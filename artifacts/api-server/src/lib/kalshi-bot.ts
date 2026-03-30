@@ -795,3 +795,114 @@ export async function manualTrade(
     return { success: false, message: msg };
   }
 }
+
+// ─── Coin-flip trade ──────────────────────────────────────────────────────────
+export interface CoinFlipResult {
+  success: boolean;
+  message: string;
+  ticker?: string;
+  title?: string;
+  side?: "YES" | "NO";
+  priceCents?: number;
+  tradeId?: number;
+}
+
+export async function coinFlipTrade(): Promise<CoinFlipResult> {
+  try {
+    const now = Date.now();
+    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
+    const resp = await kalshiFetch("GET", `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`) as { markets?: KalshiMarket[] };
+    const markets = resp.markets ?? [];
+
+    const eligible = markets.filter((m) => {
+      if (!m.close_time) return false;
+      const mins = (new Date(m.close_time).getTime() - now) / 60_000;
+      return mins > botConfig.minMinutesRemaining && mins <= 16;
+    });
+
+    if (eligible.length === 0) {
+      return { success: false, message: "No eligible markets right now — try again shortly." };
+    }
+
+    // Pick a random market
+    const market = eligible[Math.floor(Math.random() * eligible.length)];
+    const { ticker, title } = market;
+
+    // Get live prices
+    const detailResp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
+    const m = detailResp.market ?? market;
+
+    const yesAsk = priceCents(m, "yes_ask");
+    const noAsk  = priceCents(m, "no_ask");
+
+    // Flip the coin
+    const coinYes = Math.random() < 0.5;
+    const preferredSide: "YES" | "NO" = coinYes ? "YES" : "NO";
+    const preferredAsk = coinYes ? yesAsk : noAsk;
+    const fallbackSide: "YES" | "NO" = coinYes ? "NO" : "YES";
+    const fallbackAsk  = coinYes ? noAsk : yesAsk;
+
+    // Pick the flipped side if valid, otherwise try the other side
+    let side: "YES" | "NO" | null = null;
+    let ask = 0;
+    if (preferredAsk > 0 && preferredAsk <= botConfig.maxEntryPriceCents) {
+      side = preferredSide; ask = preferredAsk;
+    } else if (fallbackAsk > 0 && fallbackAsk <= botConfig.maxEntryPriceCents) {
+      side = fallbackSide; ask = fallbackAsk;
+    }
+
+    if (!side) {
+      return { success: false, message: `Flipped ${preferredSide} on ${ticker} but no valid ask price (YES:${yesAsk}¢ NO:${noAsk}¢ limit:${botConfig.maxEntryPriceCents}¢).` };
+    }
+
+    const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
+
+    const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
+      ticker,
+      client_order_id: `coinflip-${Date.now()}`,
+      type: "limit",
+      action: "buy",
+      side: side.toLowerCase(),
+      count: 1,
+      ...(side === "YES" ? { yes_price: ask } : { no_price: ask }),
+    }) as { order?: { order_id?: string } };
+
+    const buyOrderId = buyResp?.order?.order_id;
+
+    const [trade] = await db.insert(tradesTable).values({
+      marketId: ticker,
+      marketTitle: title ?? ticker,
+      side,
+      buyPriceCents: ask,
+      contractCount: 1,
+      feeCents: 0,
+      status: "open",
+      kalshiBuyOrderId: buyOrderId,
+      minutesRemaining: minutesLeft,
+    }).returning();
+
+    openMarkets.add(ticker);
+    state.openPositionCount = openMarkets.size;
+    state.tradesAttempted++;
+    state.tradesSucceeded++;
+
+    await botLog("info",
+      `🪙 Coin flip: ${side === preferredSide ? "called it!" : "landed " + side} — bought 1x ${side} on "${title}" at ${ask}¢`,
+      { tradeId: trade.id, buyOrderId, ticker, side, ask },
+    );
+
+    return {
+      success: true,
+      message: `Flipped ${side}! Bought 1x ${side} on "${title}" at ${ask}¢ — watching for profit.`,
+      ticker,
+      title,
+      side,
+      priceCents: ask,
+      tradeId: trade.id,
+    };
+  } catch (err) {
+    const msg = String(err);
+    await botLog("error", `🪙 Coin flip trade failed: ${msg}`);
+    return { success: false, message: msg };
+  }
+}

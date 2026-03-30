@@ -5,6 +5,7 @@ import { TradeTable } from "@/components/trade-table";
 import { LogViewer } from "@/components/log-viewer";
 import { BotSettings } from "@/components/bot-settings";
 import { ManualTrade } from "@/components/manual-trade";
+import { CoinFlip } from "@/components/coin-flip";
 import {
   Wallet, Target, ActivitySquare, Crosshair,
   BarChart3, TrendingUp, ShieldCheck,
@@ -68,13 +69,14 @@ export function Dashboard() {
           />
         </div>
 
-        {/* Settings + Manual Trade */}
+        {/* Settings + Manual Trade + Coin Flip */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           <div className="lg:col-span-2">
             <BotSettings />
           </div>
-          <div className="lg:col-span-1">
+          <div className="lg:col-span-1 space-y-6">
             <ManualTrade />
+            <CoinFlip />
           </div>
         </div>
 

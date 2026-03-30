@@ -236,6 +236,19 @@ export const ManualTradeResponse = zod.object({
 });
 
 /**
+ * @summary Coin-flip trade — pick a random eligible market, flip YES/NO, enter
+ */
+export const CoinFlipResponse = zod.object({
+  success: zod.boolean(),
+  message: zod.string(),
+  ticker: zod.string().optional(),
+  title: zod.string().optional(),
+  side: zod.enum(["YES", "NO"]).optional(),
+  priceCents: zod.number().optional(),
+  tradeId: zod.number().optional(),
+});
+
+/**
  * @summary Get recent bot logs
  */
 export const getBotLogsQueryLimitDefault = 50;

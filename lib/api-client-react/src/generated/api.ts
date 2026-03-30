@@ -20,6 +20,7 @@ import type {
   BotConfig,
   BotConfigUpdate,
   BotStatus,
+  CoinFlipResult,
   GetBotLogsParams,
   HealthStatus,
   ListTradesParams,
@@ -792,6 +793,52 @@ export function useManualTrade<
     Awaited<ReturnType<typeof postManualTrade>>,
     TError,
     { data: ManualTradeBody },
+    TContext
+  >({ mutationFn, ...mutationOptions });
+}
+
+/**
+ * @summary Coin-flip trade — pick a random eligible market, flip YES/NO, enter
+ */
+export const postCoinFlipTrade = async (
+  options?: RequestInit,
+): Promise<CoinFlipResult> => {
+  return customFetch<CoinFlipResult>(`/api/bot/coin-flip`, {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+  });
+};
+
+export type PostCoinFlipTradeMutationResult = NonNullable<Awaited<ReturnType<typeof postCoinFlipTrade>>>;
+export type PostCoinFlipTradeMutationError = ErrorType<unknown>;
+
+export function useCoinFlipTrade<
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof postCoinFlipTrade>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof postCoinFlipTrade>>,
+  TError,
+  void,
+  TContext
+> {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof postCoinFlipTrade>>,
+    void
+  > = () => postCoinFlipTrade(requestOptions);
+  return useMutation<
+    Awaited<ReturnType<typeof postCoinFlipTrade>>,
+    TError,
+    void,
     TContext
   >({ mutationFn, ...mutationOptions });
 }

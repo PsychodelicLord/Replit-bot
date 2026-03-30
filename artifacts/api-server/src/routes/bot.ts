@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade } from "../lib/kalshi-bot";
+import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade, coinFlipTrade } from "../lib/kalshi-bot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count } from "drizzle-orm";
 import {
@@ -16,6 +16,7 @@ import {
   GetTradeStatsResponse,
   ManualTradeBody,
   ManualTradeResponse,
+  CoinFlipResponse,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -133,6 +134,11 @@ router.post("/bot/manual-trade", async (req, res): Promise<void> => {
   const { ticker, side, limitCents, quantity } = parsed.data;
   const result = await manualTrade(ticker, side, limitCents, quantity ?? 1);
   res.json(ManualTradeResponse.parse(result));
+});
+
+router.post("/bot/coin-flip", async (_req, res): Promise<void> => {
+  const result = await coinFlipTrade();
+  res.json(CoinFlipResponse.parse(result));
 });
 
 export default router;

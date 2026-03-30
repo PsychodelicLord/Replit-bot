@@ -136,3 +136,13 @@ export type ListTradesParams = {
 export type GetBotLogsParams = {
   limit?: number;
 };
+
+export interface CoinFlipResult {
+  success: boolean;
+  message: string;
+  ticker?: string;
+  title?: string;
+  side?: "YES" | "NO";
+  priceCents?: number;
+  tradeId?: number;
+}
