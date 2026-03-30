@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { db, tradesTable, botLogsTable } from "@workspace/db";
 import { logger } from "./logger";
-import { eq, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 // ─── Kalshi API config ───────────────────────────────────────────────────────
 const KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2";
@@ -9,13 +9,19 @@ const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
 const PRIVATE_KEY_PEM = (process.env.KALSHI_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
 
 // ─── Bot parameters ──────────────────────────────────────────────────────────
-const MAX_BET_CENTS = 59;          // never risk more than 59 cents per trade
-const MIN_EDGE_CENTS = 5;          // min profit after fees (cents)
-const MAX_EDGE_CENTS = 25;         // max spread to look for (cents)
-const MIN_MINUTES_REMAINING = 10;  // skip market if 10 min or less remaining
-const POLL_INTERVAL_MS = 20_000;   // scan markets every 20 seconds
-const SELL_RETRY_MS = 8_000;       // retry selling open positions every 8s
-const KALSHI_FEE_RATE = 0.07;      // 7% fee on winnings
+// Entry: only enter if ask price per contract is ≤ 59 cents
+const MAX_ENTRY_PRICE_CENTS = 59;
+// Exit: take profit when NET profit (after fees) is between 5 and 25 cents
+const MIN_NET_PROFIT_CENTS = 5;
+const MAX_NET_PROFIT_CENTS = 25;
+// Skip any market with 10 minutes or less remaining
+const MIN_MINUTES_REMAINING = 10;
+// Kalshi fee rate on profit
+const KALSHI_FEE_RATE = 0.07;
+// How often to scan for new opportunities
+const POLL_INTERVAL_MS = 20_000;
+// How often to retry selling open positions
+const SELL_RETRY_MS = 8_000;
 
 // ─── In-memory bot state ─────────────────────────────────────────────────────
 export interface BotState {
@@ -36,13 +42,15 @@ const state: BotState = {
   totalPnlCents: 0,
 };
 
+// Track markets we already have an open position in to avoid doubling up
+const openMarkets = new Set<string>();
+
 let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
 
 // ─── Kalshi signing helper ───────────────────────────────────────────────────
 function signRequest(method: string, path: string, timestampMs: number): string {
-  const msgParts = [String(timestampMs), method.toUpperCase(), path];
-  const msg = msgParts.join("");
+  const msg = `${timestampMs}${method.toUpperCase()}${path}`;
   const key = crypto.createPrivateKey({ key: PRIVATE_KEY_PEM, format: "pem" });
   const sig = crypto.sign("sha256", Buffer.from(msg), {
     key,
@@ -55,16 +63,14 @@ function signRequest(method: string, path: string, timestampMs: number): string 
 async function kalshiFetch(method: string, path: string, body?: unknown): Promise<unknown> {
   const ts = Date.now();
   const sig = signRequest(method, path, ts);
-  const url = `${KALSHI_BASE}${path}`;
-  const headers: Record<string, string> = {
-    "KALSHI-ACCESS-KEY": API_KEY_ID,
-    "KALSHI-ACCESS-SIGNATURE": sig,
-    "KALSHI-ACCESS-TIMESTAMP": String(ts),
-    "Content-Type": "application/json",
-  };
-  const res = await fetch(url, {
+  const res = await fetch(`${KALSHI_BASE}${path}`, {
     method,
-    headers,
+    headers: {
+      "KALSHI-ACCESS-KEY": API_KEY_ID,
+      "KALSHI-ACCESS-SIGNATURE": sig,
+      "KALSHI-ACCESS-TIMESTAMP": String(ts),
+      "Content-Type": "application/json",
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -74,27 +80,31 @@ async function kalshiFetch(method: string, path: string, body?: unknown): Promis
   return res.json();
 }
 
-// ─── Fee calculation ─────────────────────────────────────────────────────────
-// Kalshi charges a fee on winnings. For a YES contract bought at P cents:
-//   Cost = P cents per contract
-//   Payout if wins = 100 cents
-//   Gross profit = (100 - P)
-//   Fee = floor(KALSHI_FEE_RATE * gross_profit) cents
-//   Net profit = gross_profit - fee
-function calcNetProfitCents(buyPriceCents: number, contracts: number): number {
-  const grossProfit = (100 - buyPriceCents) * contracts;
-  const fee = Math.floor(KALSHI_FEE_RATE * grossProfit);
-  return grossProfit - fee;
+// ─── Fee & profit helpers ────────────────────────────────────────────────────
+// When you buy a YES contract at buyPrice and sell at sellPrice:
+//   Gross profit = sellPrice - buyPrice (per contract)
+//   Kalshi fee   = floor(KALSHI_FEE_RATE * gross_profit)
+//   Net profit   = gross_profit - fee
+
+function grossToNet(grossProfitCents: number): number {
+  const fee = Math.floor(KALSHI_FEE_RATE * grossProfitCents);
+  return grossProfitCents - fee;
 }
 
-function calcFeeCents(buyPriceCents: number, contracts: number): number {
-  const grossProfit = (100 - buyPriceCents) * contracts;
-  return Math.floor(KALSHI_FEE_RATE * grossProfit);
+// Minimum gross price movement needed to achieve a target net profit
+function netToRequiredGross(netTargetCents: number): number {
+  // net = gross * (1 - FEE_RATE), solve for gross
+  return Math.ceil(netTargetCents / (1 - KALSHI_FEE_RATE));
 }
 
-// ─── Logging helpers ─────────────────────────────────────────────────────────
+// The limit sell price that gives exactly MIN_NET_PROFIT_CENTS after fees
+function calcTargetSellPrice(buyPriceCents: number): number {
+  return buyPriceCents + netToRequiredGross(MIN_NET_PROFIT_CENTS);
+}
+
+// ─── Logging helper ──────────────────────────────────────────────────────────
 async function botLog(level: string, message: string, data?: unknown): Promise<void> {
-  logger.info({ level, message, data }, "bot");
+  logger.info({ level, botMessage: message }, "bot-log");
   try {
     await db.insert(botLogsTable).values({
       level,
@@ -106,41 +116,7 @@ async function botLog(level: string, message: string, data?: unknown): Promise<v
   }
 }
 
-// ─── Core scanning logic ─────────────────────────────────────────────────────
-async function scanMarkets(): Promise<void> {
-  try {
-    // Fetch active 15-minute markets
-    const resp = await kalshiFetch("GET", "/markets?status=open&series_ticker=KXBTC&limit=100") as Record<string, unknown>;
-    // Try a broader search for short-duration markets
-    const markets15 = await fetchActiveShortMarkets();
-    state.marketsScanned += markets15.length;
-
-    for (const market of markets15) {
-      await evaluateMarket(market);
-    }
-  } catch (err) {
-    await botLog("error", "Market scan failed", String(err));
-  }
-}
-
-async function fetchActiveShortMarkets(): Promise<KalshiMarket[]> {
-  // Fetch open markets and filter for ~15 min duration
-  const resp = await kalshiFetch("GET", "/markets?status=open&limit=200") as { markets?: KalshiMarket[] };
-  const markets = resp.markets ?? [];
-
-  const now = Date.now();
-  return markets.filter((m) => {
-    if (!m.close_time) return false;
-    const closeMs = new Date(m.close_time).getTime();
-    const minutesLeft = (closeMs - now) / 60_000;
-    // Only trade markets with > 10 min remaining
-    if (minutesLeft <= MIN_MINUTES_REMAINING) return false;
-    // Only trade markets closing within 15 min (15-min markets with time left)
-    if (minutesLeft > 16) return false;
-    return true;
-  });
-}
-
+// ─── Market types ────────────────────────────────────────────────────────────
 interface KalshiMarket {
   ticker: string;
   title: string;
@@ -149,182 +125,231 @@ interface KalshiMarket {
   yes_ask?: number;
   no_bid?: number;
   no_ask?: number;
-  volume?: number;
+}
+
+// ─── Scan markets for entry opportunities ────────────────────────────────────
+async function scanMarkets(): Promise<void> {
+  try {
+    const resp = await kalshiFetch("GET", "/markets?status=open&limit=200") as { markets?: KalshiMarket[] };
+    const markets = resp.markets ?? [];
+
+    const now = Date.now();
+    // Filter to 15-minute markets with > 10 min remaining
+    const eligible = markets.filter((m) => {
+      if (!m.close_time) return false;
+      const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
+      return minutesLeft > MIN_MINUTES_REMAINING && minutesLeft <= 16;
+    });
+
+    state.marketsScanned += eligible.length;
+
+    for (const market of eligible) {
+      if (!state.running) break;
+      await evaluateMarket(market);
+    }
+  } catch (err) {
+    await botLog("error", "Market scan failed", String(err));
+  }
 }
 
 async function evaluateMarket(market: KalshiMarket): Promise<void> {
   const { ticker, title, close_time } = market;
 
-  const now = Date.now();
-  const closeMs = new Date(close_time).getTime();
-  const minutesLeft = (closeMs - now) / 60_000;
+  // Double-check time gate
+  const minutesLeft = (new Date(close_time).getTime() - Date.now()) / 60_000;
+  if (minutesLeft <= MIN_MINUTES_REMAINING) return;
 
-  // Hard gate: skip if 10 minutes or less remain
-  if (minutesLeft <= MIN_MINUTES_REMAINING) {
-    return;
-  }
+  // Skip if we already have an open position in this market
+  if (openMarkets.has(ticker)) return;
 
-  // Get live orderbook
-  let book: { yes?: { bid?: number; ask?: number } } = {};
   try {
+    // Fetch latest market data for fresh prices
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     const m = resp.market ?? market;
 
-    const yesBid = (m.yes_bid ?? 0);
-    const yesAsk = (m.yes_ask ?? 0);
+    const yesAsk = m.yes_ask ?? 0;
+    const noAsk = m.no_ask ?? 0;
 
-    if (!yesBid || !yesAsk || yesAsk >= 99) return;
+    // Check YES side: enter if ask ≤ 59¢
+    if (yesAsk > 0 && yesAsk <= MAX_ENTRY_PRICE_CENTS) {
+      const targetSell = calcTargetSellPrice(yesAsk);
+      // Sanity: target sell must be below 100 and yield net profit in range
+      const maxNet = grossToNet((MAX_ENTRY_PRICE_CENTS + 1) - yesAsk);
+      if (targetSell < 100 && maxNet >= MIN_NET_PROFIT_CENTS) {
+        await botLog("info", `Entry signal: ${title} — buy YES at ${yesAsk}¢, target sell ${targetSell}¢ (≥${MIN_NET_PROFIT_CENTS}¢ net)`, {
+          ticker, yesAsk, targetSell, minutesLeft: minutesLeft.toFixed(1),
+        });
+        state.tradesAttempted++;
+        await enterTrade(ticker, title, "YES", yesAsk, targetSell, minutesLeft);
+        return; // one trade per market per scan
+      }
+    }
 
-    const spreadCents = yesAsk - yesBid;
-
-    // Spread must be within our target range
-    if (spreadCents < MIN_EDGE_CENTS || spreadCents > MAX_EDGE_CENTS) return;
-
-    // How many contracts can we buy for <= MAX_BET_CENTS?
-    const contracts = Math.floor(MAX_BET_CENTS / yesAsk);
-    if (contracts < 1) return;
-
-    const buyCost = yesAsk * contracts;
-    const netProfit = calcNetProfitCents(yesAsk, contracts);
-    const feeCents = calcFeeCents(yesAsk, contracts);
-
-    // Only enter if net profit after fees is positive
-    if (netProfit <= 0) return;
-
-    await botLog("info", `Opportunity: ${title} — buy YES at ${yesAsk}¢, spread ${spreadCents}¢, net profit ${netProfit}¢ after fees`, {
-      ticker, yesAsk, yesBid, spreadCents, contracts, buyCost, netProfit, feeCents, minutesLeft,
-    });
-
-    state.tradesAttempted++;
-    await placeTrade(ticker, title, "YES", yesAsk, contracts, feeCents, minutesLeft);
+    // Check NO side: enter if no_ask ≤ 59¢
+    if (noAsk > 0 && noAsk <= MAX_ENTRY_PRICE_CENTS) {
+      const targetSell = calcTargetSellPrice(noAsk);
+      const maxNet = grossToNet((MAX_ENTRY_PRICE_CENTS + 1) - noAsk);
+      if (targetSell < 100 && maxNet >= MIN_NET_PROFIT_CENTS) {
+        await botLog("info", `Entry signal: ${title} — buy NO at ${noAsk}¢, target sell ${targetSell}¢ (≥${MIN_NET_PROFIT_CENTS}¢ net)`, {
+          ticker, noAsk, targetSell, minutesLeft: minutesLeft.toFixed(1),
+        });
+        state.tradesAttempted++;
+        await enterTrade(ticker, title, "NO", noAsk, targetSell, minutesLeft);
+      }
+    }
   } catch (err) {
     await botLog("warn", `Failed to evaluate ${ticker}`, String(err));
   }
 }
 
-async function placeTrade(
+// ─── Enter a trade (buy 1 contract, immediately place limit sell) ─────────────
+async function enterTrade(
   ticker: string,
   title: string,
   side: string,
   buyPriceCents: number,
-  contracts: number,
-  feeCents: number,
+  targetSellPrice: number,
   minutesRemaining: number,
 ): Promise<void> {
+  const feeCents = Math.floor(KALSHI_FEE_RATE * (targetSellPrice - buyPriceCents));
+
   try {
-    // Place limit buy order
-    const order = await kalshiFetch("POST", "/portfolio/orders", {
+    // Place limit buy for 1 contract
+    const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
-      client_order_id: `scalp-${Date.now()}`,
+      client_order_id: `scalp-buy-${Date.now()}`,
       type: "limit",
       action: "buy",
       side: side.toLowerCase(),
-      count: contracts,
-      yes_price: side === "YES" ? buyPriceCents : undefined,
-      no_price: side === "NO" ? buyPriceCents : undefined,
+      count: 1,
+      ...(side === "YES" ? { yes_price: buyPriceCents } : { no_price: buyPriceCents }),
     }) as { order?: { order_id?: string } };
 
-    const orderId = order?.order?.order_id;
+    const buyOrderId = buyResp?.order?.order_id;
 
+    // Save trade record
     const [trade] = await db.insert(tradesTable).values({
       marketId: ticker,
       marketTitle: title,
       side,
       buyPriceCents,
-      contractCount: contracts,
+      contractCount: 1,
       feeCents,
       status: "open",
-      kalshiBuyOrderId: orderId,
+      kalshiBuyOrderId: buyOrderId,
       minutesRemaining,
     }).returning();
 
+    openMarkets.add(ticker);
     state.tradesSucceeded++;
-    await botLog("info", `Buy order placed: ${contracts}x YES on ${title} at ${buyPriceCents}¢ (order: ${orderId})`, { tradeId: trade.id });
 
-    // Immediately try to place a sell order at ask price to scalp
-    setTimeout(() => trySellPosition(trade.id, ticker, side, buyPriceCents, contracts), 3000);
+    await botLog("info",
+      `✅ Bought 1x ${side} on "${title}" at ${buyPriceCents}¢ — sell target: ${targetSellPrice}¢ → net profit ≥${MIN_NET_PROFIT_CENTS}¢`,
+      { tradeId: trade.id, buyOrderId, targetSellPrice },
+    );
+
+    // Place limit sell immediately at target price
+    setTimeout(() => placeLimitSell(trade.id, ticker, side, buyPriceCents, targetSellPrice, 1), 2000);
   } catch (err) {
-    await botLog("error", `Failed to place buy order for ${ticker}`, String(err));
+    await botLog("error", `Failed to enter trade on ${ticker}`, String(err));
     state.tradesAttempted = Math.max(0, state.tradesAttempted - 1);
   }
 }
 
-async function trySellPosition(tradeId: number, ticker: string, side: string, buyPriceCents: number, contracts: number): Promise<void> {
+// ─── Place a limit sell order at the target price ────────────────────────────
+async function placeLimitSell(
+  tradeId: number,
+  ticker: string,
+  side: string,
+  buyPriceCents: number,
+  sellPriceCents: number,
+  contracts: number,
+): Promise<void> {
   try {
-    const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
-    const m = resp.market;
-    if (!m) return;
-
-    const yesBid = m.yes_bid ?? 0;
-    const sellPriceCents = side === "YES" ? yesBid : (m.no_bid ?? 0);
-
-    if (sellPriceCents <= buyPriceCents) {
-      // Price hasn't moved, wait
-      return;
-    }
-
-    // Place sell order
-    const order = await kalshiFetch("POST", "/portfolio/orders", {
+    const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
       client_order_id: `scalp-sell-${Date.now()}`,
       type: "limit",
       action: "sell",
       side: side.toLowerCase(),
       count: contracts,
-      yes_price: side === "YES" ? sellPriceCents : undefined,
-      no_price: side === "NO" ? sellPriceCents : undefined,
+      ...(side === "YES" ? { yes_price: sellPriceCents } : { no_price: sellPriceCents }),
     }) as { order?: { order_id?: string } };
 
-    const sellOrderId = order?.order?.order_id;
-
-    // Calculate actual P&L: (sellPrice - buyPrice) * contracts - fees
+    const sellOrderId = sellResp?.order?.order_id;
     const grossProfit = (sellPriceCents - buyPriceCents) * contracts;
-    // Selling back: seller pays no fee on sell, fee was on buy side
-    const feeCents = calcFeeCents(buyPriceCents, contracts);
-    const pnlCents = grossProfit - feeCents;
+    const fee = Math.floor(KALSHI_FEE_RATE * grossProfit);
+    const netPnl = grossProfit - fee;
 
     await db.update(tradesTable).set({
       sellPriceCents,
-      pnlCents,
+      pnlCents: netPnl,
+      feeCents: fee,
       status: "closed",
       kalshiSellOrderId: sellOrderId,
       closedAt: new Date(),
     }).where(eq(tradesTable.id, tradeId));
 
-    state.totalPnlCents += pnlCents;
+    openMarkets.delete(ticker);
+    state.totalPnlCents += netPnl;
 
     await botLog(
-      pnlCents >= 0 ? "info" : "warn",
-      `Sold ${contracts}x ${side} on ${ticker} at ${sellPriceCents}¢, P&L: ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
-      { tradeId, sellPriceCents, pnlCents },
+      netPnl > 0 ? "info" : "warn",
+      `📤 Sold 1x ${side} on ${ticker} at ${sellPriceCents}¢ — net P&L: ${netPnl > 0 ? "+" : ""}${netPnl}¢ (fee: ${fee}¢)`,
+      { tradeId, sellPriceCents, grossProfit, fee, netPnl },
     );
   } catch (err) {
-    await botLog("warn", `Failed to sell position ${tradeId}`, String(err));
+    await botLog("warn", `Failed to place limit sell for trade ${tradeId}`, String(err));
+    // Will retry via the open-position poller
   }
 }
 
-// ─── Retry selling open positions ────────────────────────────────────────────
+// ─── Retry open positions: check current price and sell if profitable ─────────
 async function retryOpenPositions(): Promise<void> {
   try {
     const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-    for (const trade of openTrades) {
-      const now = Date.now();
-      const tradeAge = now - trade.createdAt.getTime();
 
-      // If trade is older than 12 minutes, mark expired (market closed on us)
-      if (tradeAge > 12 * 60_000) {
+    for (const trade of openTrades) {
+      const tradeAgeMs = Date.now() - trade.createdAt.getTime();
+
+      // If older than 13 minutes, the market likely closed — record as expired
+      if (tradeAgeMs > 13 * 60_000) {
         await db.update(tradesTable).set({
           status: "expired",
-          pnlCents: -(trade.buyPriceCents * trade.contractCount),
+          pnlCents: -trade.buyPriceCents,
           closedAt: new Date(),
         }).where(eq(tradesTable.id, trade.id));
 
-        state.totalPnlCents -= trade.buyPriceCents * trade.contractCount;
-        await botLog("warn", `Trade ${trade.id} expired without selling — loss of ${trade.buyPriceCents * trade.contractCount}¢`);
+        openMarkets.delete(trade.marketId);
+        state.totalPnlCents -= trade.buyPriceCents;
+        await botLog("warn",
+          `⚠️ Trade ${trade.id} expired without exit — lost ${trade.buyPriceCents}¢`,
+          { tradeId: trade.id },
+        );
         continue;
       }
 
-      await trySellPosition(trade.id, trade.marketId, trade.side, trade.buyPriceCents, trade.contractCount);
+      // Check current market price
+      try {
+        const resp = await kalshiFetch("GET", `/markets/${trade.marketId}`) as { market?: KalshiMarket };
+        const m = resp.market;
+        if (!m) continue;
+
+        const currentBid = trade.side === "YES" ? (m.yes_bid ?? 0) : (m.no_bid ?? 0);
+        const grossProfit = currentBid - trade.buyPriceCents;
+        const netProfit = grossToNet(grossProfit);
+
+        // Exit if net profit is in the 5–25 cent target range
+        if (netProfit >= MIN_NET_PROFIT_CENTS) {
+          await botLog("info",
+            `🎯 Price hit target for trade ${trade.id}: bid ${currentBid}¢, net profit ${netProfit}¢ — exiting`,
+            { tradeId: trade.id, currentBid, netProfit },
+          );
+          await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+        }
+      } catch (err) {
+        await botLog("warn", `Failed to check position ${trade.id}`, String(err));
+      }
     }
   } catch (err) {
     logger.error({ err }, "retryOpenPositions failed");
@@ -338,7 +363,6 @@ export function getBotState(): BotState {
 
 export async function startBot(): Promise<BotState> {
   if (state.running) return getBotState();
-
   if (!API_KEY_ID || !PRIVATE_KEY_PEM) {
     throw new Error("KALSHI_API_KEY and KALSHI_PRIVATE_KEY must be set");
   }
@@ -349,11 +373,11 @@ export async function startBot(): Promise<BotState> {
   state.tradesAttempted = 0;
   state.tradesSucceeded = 0;
 
-  await botLog("info", "Bot started — scanning 15-minute Kalshi markets (skip if ≤10 min remain, max bet 59¢)");
+  await botLog("info",
+    "🤖 Bot started — enter if YES/NO ask ≤59¢ with >10 min left; exit at 5–25¢ net profit after 7% fee",
+  );
 
-  // Immediate first scan
   scanMarkets();
-
   scanTimer = setInterval(scanMarkets, POLL_INTERVAL_MS);
   sellTimer = setInterval(retryOpenPositions, SELL_RETRY_MS);
 
@@ -364,11 +388,9 @@ export async function stopBot(): Promise<BotState> {
   if (!state.running) return getBotState();
 
   state.running = false;
-
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
 
-  await botLog("info", `Bot stopped. Total P&L: ${state.totalPnlCents}¢`);
-
+  await botLog("info", `🛑 Bot stopped. Session P&L: ${state.totalPnlCents > 0 ? "+" : ""}${state.totalPnlCents}¢`);
   return getBotState();
 }
