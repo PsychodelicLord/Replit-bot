@@ -842,17 +842,20 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const fallbackSide: "YES" | "NO" = coinYes ? "NO" : "YES";
     const fallbackAsk  = coinYes ? noAsk : yesAsk;
 
+    // Coin flip uses its own entry limit — any price under 90¢ is fine
+    const COIN_FLIP_MAX_CENTS = 89;
+
     // Pick the flipped side if valid, otherwise try the other side
     let side: "YES" | "NO" | null = null;
     let ask = 0;
-    if (preferredAsk > 0 && preferredAsk <= botConfig.maxEntryPriceCents) {
+    if (preferredAsk > 0 && preferredAsk <= COIN_FLIP_MAX_CENTS) {
       side = preferredSide; ask = preferredAsk;
-    } else if (fallbackAsk > 0 && fallbackAsk <= botConfig.maxEntryPriceCents) {
+    } else if (fallbackAsk > 0 && fallbackAsk <= COIN_FLIP_MAX_CENTS) {
       side = fallbackSide; ask = fallbackAsk;
     }
 
     if (!side) {
-      return { success: false, message: `Flipped ${preferredSide} on ${ticker} but no valid ask price (YES:${yesAsk}¢ NO:${noAsk}¢ limit:${botConfig.maxEntryPriceCents}¢).` };
+      return { success: false, message: `Flipped ${preferredSide} on ${ticker} but no valid ask price under 90¢ (YES:${yesAsk}¢ NO:${noAsk}¢).` };
     }
 
     const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
