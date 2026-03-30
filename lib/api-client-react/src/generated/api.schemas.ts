@@ -9,6 +9,20 @@ export interface HealthStatus {
   status: string;
 }
 
+export interface ManualTradeBody {
+  ticker: string;
+  side: "YES" | "NO";
+  limitCents: number;
+  quantity?: number;
+}
+
+export interface ManualTradeResult {
+  success: boolean;
+  tradeId?: number;
+  orderId?: string;
+  message: string;
+}
+
 export interface BotConfig {
   /** Only enter if ask price per contract is at or below this (cents) */
   maxEntryPriceCents: number;

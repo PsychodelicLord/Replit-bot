@@ -219,6 +219,23 @@ export const GetTradeStatsResponse = zod.object({
 });
 
 /**
+ * @summary Manual trade — buy a specific market at a limit price
+ */
+export const ManualTradeBody = zod.object({
+  ticker: zod.string().min(1),
+  side: zod.enum(["YES", "NO"]),
+  limitCents: zod.number().int().min(1).max(99),
+  quantity: zod.number().int().min(1).max(500).optional(),
+});
+
+export const ManualTradeResponse = zod.object({
+  success: zod.boolean(),
+  tradeId: zod.number().optional(),
+  orderId: zod.string().optional(),
+  message: zod.string(),
+});
+
+/**
  * @summary Get recent bot logs
  */
 export const getBotLogsQueryLimitDefault = 50;

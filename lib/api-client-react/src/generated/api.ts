@@ -24,6 +24,8 @@ import type {
   HealthStatus,
   ListTradesParams,
   LogList,
+  ManualTradeBody,
+  ManualTradeResult,
   TradeList,
   TradeStats,
 } from "./api.schemas";
@@ -745,6 +747,54 @@ export type GetBotLogsQueryError = ErrorType<unknown>;
 /**
  * @summary Get recent bot logs
  */
+
+/**
+ * @summary Manual trade — place a limit buy order on a specific market
+ */
+export const postManualTrade = async (
+  body: ManualTradeBody,
+  options?: RequestInit,
+): Promise<ManualTradeResult> => {
+  return customFetch<ManualTradeResult>(`/api/bot/manual-trade`, {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(body),
+  });
+};
+
+export type PostManualTradeMutationResult = NonNullable<Awaited<ReturnType<typeof postManualTrade>>>;
+export type PostManualTradeMutationError = ErrorType<unknown>;
+
+export function useManualTrade<
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof postManualTrade>>,
+    TError,
+    { data: ManualTradeBody },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof postManualTrade>>,
+  TError,
+  { data: ManualTradeBody },
+  TContext
+> {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof postManualTrade>>,
+    { data: ManualTradeBody }
+  > = ({ data }) => postManualTrade(data, requestOptions);
+  return useMutation<
+    Awaited<ReturnType<typeof postManualTrade>>,
+    TError,
+    { data: ManualTradeBody },
+    TContext
+  >({ mutationFn, ...mutationOptions });
+}
 
 export function useGetBotLogs<
   TData = Awaited<ReturnType<typeof getBotLogs>>,

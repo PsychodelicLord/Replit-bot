@@ -4,6 +4,7 @@ import { StatsCard } from "@/components/stats-card";
 import { TradeTable } from "@/components/trade-table";
 import { LogViewer } from "@/components/log-viewer";
 import { BotSettings } from "@/components/bot-settings";
+import { ManualTrade } from "@/components/manual-trade";
 import {
   Wallet, Target, ActivitySquare, Crosshair,
   BarChart3, TrendingUp, ShieldCheck,
@@ -67,8 +68,15 @@ export function Dashboard() {
           />
         </div>
 
-        {/* Settings */}
-        <BotSettings />
+        {/* Settings + Manual Trade */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+          <div className="lg:col-span-2">
+            <BotSettings />
+          </div>
+          <div className="lg:col-span-1">
+            <ManualTrade />
+          </div>
+        </div>
 
         {/* Trade table + Logs */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">

@@ -331,12 +331,20 @@ interface KalshiMarket {
   last_price_dollars?: number;
 }
 
-/** Read a price field from a market object, always returning integer cents. */
+/** Read a price field from a market object, always returning integer cents.
+ *  Handles both number and string values — Kalshi sometimes returns prices as strings.
+ */
 function priceCents(m: KalshiMarket, field: "yes_ask" | "yes_bid" | "no_ask" | "no_bid" | "last_price"): number {
-  const dollars = (m as any)[`${field}_dollars`];
-  if (typeof dollars === "number" && dollars > 0) return Math.round(dollars * 100);
-  const cents = (m as any)[field];
-  if (typeof cents === "number" && cents > 0) return Math.round(cents);
+  const rawDollars = (m as any)[`${field}_dollars`];
+  if (rawDollars !== undefined && rawDollars !== null) {
+    const v = typeof rawDollars === "number" ? rawDollars : parseFloat(String(rawDollars));
+    if (!isNaN(v) && v > 0) return Math.round(v * 100);
+  }
+  const rawCents = (m as any)[field];
+  if (rawCents !== undefined && rawCents !== null) {
+    const v = typeof rawCents === "number" ? rawCents : parseFloat(String(rawCents));
+    if (!isNaN(v) && v > 0) return Math.round(v);
+  }
   return 0;
 }
 
@@ -456,7 +464,7 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
     const noBid  = priceCents(m, "no_bid");
     const { maxEntryPriceCents } = botConfig;
 
-    // If no liquidity, cache and skip silently — don't flood the log
+    // If no liquidity, cache silently and skip
     if (yesAsk === 0 && noAsk === 0) {
       zeroPriceTs.set(ticker, Date.now());
       return;
@@ -536,7 +544,8 @@ async function enterTrade(
       { tradeId: trade.id, buyOrderId },
     );
   } catch (err) {
-    await botLog("error", `Failed to enter trade on ${ticker}`, String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    await botLog("error", `Failed to enter trade on ${ticker}: ${msg}`);
     state.tradesAttempted = Math.max(0, state.tradesAttempted - 1);
   }
 }
@@ -721,4 +730,64 @@ export async function stopBot(reason?: string): Promise<BotState> {
 
   await botLog("info", `🛑 Bot stopped${reason ? ": " + reason : ""}. Daily P&L: ${state.dailyPnlCents > 0 ? "+" : ""}${state.dailyPnlCents}¢`);
   return getBotState();
+}
+
+// ─── Manual trade (user-initiated) ────────────────────────────────────────────
+export async function manualTrade(
+  ticker: string,
+  side: "YES" | "NO",
+  limitCents: number,
+  quantity: number,
+): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
+  try {
+    const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
+    if (!resp.market) {
+      return { success: false, message: `Market not found: ${ticker}` };
+    }
+    const { title, close_time } = resp.market;
+    const minutesLeft = (new Date(close_time).getTime() - Date.now()) / 60_000;
+
+    const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
+      ticker,
+      client_order_id: `manual-${Date.now()}`,
+      type: "limit",
+      action: "buy",
+      side: side.toLowerCase(),
+      count: quantity,
+      ...(side === "YES" ? { yes_price: limitCents } : { no_price: limitCents }),
+    }) as { order?: { order_id?: string } };
+
+    const buyOrderId = buyResp?.order?.order_id;
+
+    const [trade] = await db.insert(tradesTable).values({
+      marketId: ticker,
+      marketTitle: title ?? ticker,
+      side,
+      buyPriceCents: limitCents,
+      contractCount: quantity,
+      feeCents: 0,
+      status: "open",
+      kalshiBuyOrderId: buyOrderId,
+      minutesRemaining: minutesLeft,
+    }).returning();
+
+    openMarkets.add(ticker);
+    state.openPositionCount = openMarkets.size;
+
+    await botLog("info",
+      `🎯 Manual: bought ${quantity}x ${side} on "${title}" at ${limitCents}¢ — order ${buyOrderId ?? "(no id)"}`,
+      { tradeId: trade.id, buyOrderId },
+    );
+
+    return {
+      success: true,
+      tradeId: trade.id,
+      orderId: buyOrderId,
+      message: `Order placed: ${quantity}x ${side} @ ${limitCents}¢ on ${ticker}`,
+    };
+  } catch (err) {
+    const msg = String(err);
+    await botLog("error", `🎯 Manual trade failed on ${ticker}: ${msg}`);
+    return { success: false, message: msg };
+  }
 }
