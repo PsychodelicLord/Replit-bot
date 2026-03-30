@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "ytbBt3C5IgTUR8KK6SwWD"
+uri = "file://kalshi-bot.tar.gz"
+type = "unspecified"
+title = "Kalshi Scalping Bot — Full Source Code"
