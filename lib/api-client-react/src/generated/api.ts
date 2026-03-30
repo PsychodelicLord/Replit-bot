@@ -20,6 +20,8 @@ import type {
   BotConfig,
   BotConfigUpdate,
   BotStatus,
+  CoinFlipAutoBody,
+  CoinFlipAutoStatus,
   CoinFlipResult,
   GetBotLogsParams,
   HealthStatus,
@@ -795,6 +797,52 @@ export function useManualTrade<
     { data: ManualTradeBody },
     TContext
   >({ mutationFn, ...mutationOptions });
+}
+
+/**
+ * @summary Get coin-flip auto mode status
+ */
+export const getCoinFlipAutoUrl = () => `/api/bot/coin-flip/auto`;
+
+export const getCoinFlipAuto = async (options?: RequestInit): Promise<CoinFlipAutoStatus> =>
+  customFetch<CoinFlipAutoStatus>(getCoinFlipAutoUrl(), { ...options, method: "GET" });
+
+export const getGetCoinFlipAutoQueryKey = () => [`/api/bot/coin-flip/auto`] as const;
+
+export function useGetCoinFlipAuto<
+  TData = Awaited<ReturnType<typeof getCoinFlipAuto>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<Awaited<ReturnType<typeof getCoinFlipAuto>>, TError, TData>;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getGetCoinFlipAutoQueryKey();
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoinFlipAuto>>> = ({ signal }) =>
+    getCoinFlipAuto({ signal, ...requestOptions });
+  const query = useQuery({ queryKey, queryFn, ...queryOptions }) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return { ...query, queryKey };
+}
+
+/**
+ * @summary Set coin-flip auto mode
+ */
+export const postSetCoinFlipAuto = async (body: CoinFlipAutoBody, options?: RequestInit): Promise<CoinFlipAutoStatus> =>
+  customFetch<CoinFlipAutoStatus>(`/api/bot/coin-flip/auto`, {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(body),
+  });
+
+export function useSetCoinFlipAuto<TError = ErrorType<unknown>, TContext = unknown>(options?: {
+  mutation?: UseMutationOptions<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, TError, { data: CoinFlipAutoBody }, TContext>;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, TError, { data: CoinFlipAutoBody }, TContext> {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, { data: CoinFlipAutoBody }> =
+    ({ data }) => postSetCoinFlipAuto(data, requestOptions);
+  return useMutation<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, TError, { data: CoinFlipAutoBody }, TContext>({ mutationFn, ...mutationOptions });
 }
 
 /**

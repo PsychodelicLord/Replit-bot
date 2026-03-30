@@ -146,3 +146,14 @@ export interface CoinFlipResult {
   priceCents?: number;
   tradeId?: number;
 }
+
+export interface CoinFlipAutoBody {
+  enabled: boolean;
+  intervalSecs?: number;
+}
+
+export interface CoinFlipAutoStatus {
+  enabled: boolean;
+  intervalSecs: number;
+  nextFlipAt: number | null;
+}

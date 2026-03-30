@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade, coinFlipTrade } from "../lib/kalshi-bot";
+import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState } from "../lib/kalshi-bot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count } from "drizzle-orm";
 import {
@@ -17,6 +17,8 @@ import {
   ManualTradeBody,
   ManualTradeResponse,
   CoinFlipResponse,
+  CoinFlipAutoBody,
+  CoinFlipAutoStatus,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -139,6 +141,20 @@ router.post("/bot/manual-trade", async (req, res): Promise<void> => {
 router.post("/bot/coin-flip", async (_req, res): Promise<void> => {
   const result = await coinFlipTrade();
   res.json(CoinFlipResponse.parse(result));
+});
+
+router.get("/bot/coin-flip/auto", (_req, res): void => {
+  res.json(CoinFlipAutoStatus.parse(getCoinFlipAutoState()));
+});
+
+router.post("/bot/coin-flip/auto", (req, res): void => {
+  const parsed = CoinFlipAutoBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  const { enabled, intervalSecs } = parsed.data;
+  const state = enabled
+    ? startCoinFlipAuto(intervalSecs ?? 60)
+    : stopCoinFlipAuto();
+  res.json(CoinFlipAutoStatus.parse(state));
 });
 
 export default router;

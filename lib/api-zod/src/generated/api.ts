@@ -236,6 +236,20 @@ export const ManualTradeResponse = zod.object({
 });
 
 /**
+ * @summary Coin-flip auto mode — toggle automatic flipping
+ */
+export const CoinFlipAutoBody = zod.object({
+  enabled: zod.boolean(),
+  intervalSecs: zod.number().int().min(10).max(3600).optional(),
+});
+
+export const CoinFlipAutoStatus = zod.object({
+  enabled: zod.boolean(),
+  intervalSecs: zod.number(),
+  nextFlipAt: zod.number().nullable(),
+});
+
+/**
  * @summary Coin-flip trade — pick a random eligible market, flip YES/NO, enter
  */
 export const CoinFlipResponse = zod.object({

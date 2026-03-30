@@ -796,6 +796,53 @@ export async function manualTrade(
   }
 }
 
+// ─── Coin-flip auto mode ──────────────────────────────────────────────────────
+interface CoinFlipAutoState {
+  enabled: boolean;
+  intervalSecs: number;
+  nextFlipAt: number | null;
+}
+
+const coinFlipAuto: CoinFlipAutoState = {
+  enabled: false,
+  intervalSecs: 900,
+  nextFlipAt: null,
+};
+
+let coinFlipTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleCoinFlip() {
+  if (coinFlipTimer) clearTimeout(coinFlipTimer);
+  if (!coinFlipAuto.enabled) return;
+  coinFlipAuto.nextFlipAt = Date.now() + coinFlipAuto.intervalSecs * 1000;
+  coinFlipTimer = setTimeout(async () => {
+    if (!coinFlipAuto.enabled) return;
+    try {
+      const result = await coinFlipTrade();
+      await botLog("info", `🪙 Auto-flip: ${result.message}`);
+    } catch (_) {}
+    scheduleCoinFlip();
+  }, coinFlipAuto.intervalSecs * 1000);
+}
+
+export function startCoinFlipAuto(intervalSecs: number): CoinFlipAutoState {
+  coinFlipAuto.enabled = true;
+  coinFlipAuto.intervalSecs = intervalSecs;
+  scheduleCoinFlip();
+  return { ...coinFlipAuto };
+}
+
+export function stopCoinFlipAuto(): CoinFlipAutoState {
+  coinFlipAuto.enabled = false;
+  coinFlipAuto.nextFlipAt = null;
+  if (coinFlipTimer) { clearTimeout(coinFlipTimer); coinFlipTimer = null; }
+  return { ...coinFlipAuto };
+}
+
+export function getCoinFlipAutoState(): CoinFlipAutoState {
+  return { ...coinFlipAuto };
+}
+
 // ─── Coin-flip trade ──────────────────────────────────────────────────────────
 export interface CoinFlipResult {
   success: boolean;
@@ -814,14 +861,15 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const resp = await kalshiFetch("GET", `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`) as { markets?: KalshiMarket[] };
     const markets = resp.markets ?? [];
 
+    // Coin flip enters anywhere in the 15-min window — just needs > 1 min left
     const eligible = markets.filter((m) => {
       if (!m.close_time) return false;
       const mins = (new Date(m.close_time).getTime() - now) / 60_000;
-      return mins > botConfig.minMinutesRemaining && mins <= 16;
+      return mins > 1 && mins <= 16;
     });
 
     if (eligible.length === 0) {
-      return { success: false, message: "No eligible markets right now — try again shortly." };
+      return { success: false, message: "No open 15-min markets right now — try again shortly." };
     }
 
     // Pick a random market

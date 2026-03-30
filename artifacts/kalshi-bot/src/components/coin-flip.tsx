@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
-import { useCoinFlipTrade } from "@workspace/api-client-react";
-import { CheckCircle2, AlertCircle, Coins } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { useCoinFlipTrade, useGetCoinFlipAuto, useSetCoinFlipAuto, getGetCoinFlipAutoQueryKey } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, AlertCircle, Coins, RefreshCw } from "lucide-react";
 
 type FlipResult = {
   success: boolean;
@@ -12,10 +13,37 @@ type FlipResult = {
 };
 
 export function CoinFlip() {
+  const queryClient = useQueryClient();
   const [flipping, setFlipping] = useState(false);
-  const [landed, setLanded] = useState<"YES" | "NO" | null>(null);
-  const [result, setResult] = useState<FlipResult | null>(null);
-  const [animKey, setAnimKey] = useState(0);
+  const [landed, setLanded]     = useState<"YES" | "NO" | null>(null);
+  const [result, setResult]     = useState<FlipResult | null>(null);
+  const [animKey, setAnimKey]   = useState(0);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const { data: autoState } = useGetCoinFlipAuto({
+    query: { refetchInterval: 3000 },
+  });
+
+  const setAuto = useSetCoinFlipAuto({
+    mutation: {
+      onSuccess: () => queryClient.invalidateQueries({ queryKey: getGetCoinFlipAutoQueryKey() }),
+    },
+  });
+
+  const autoEnabled = autoState?.enabled ?? false;
+
+  useEffect(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (!autoEnabled || !autoState?.nextFlipAt) { setCountdown(null); return; }
+    function tick() {
+      const secs = Math.max(0, Math.round((autoState!.nextFlipAt! - Date.now()) / 1000));
+      setCountdown(secs);
+    }
+    tick();
+    timerRef.current = setInterval(tick, 500);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [autoEnabled, autoState?.nextFlipAt]);
 
   const { mutate } = useCoinFlipTrade({
     mutation: {
@@ -44,6 +72,16 @@ export function CoinFlip() {
     mutate();
   }
 
+  function toggleAuto() {
+    setAuto.mutate({ data: { enabled: !autoEnabled, intervalSecs: 900 } });
+  }
+
+  function fmtCountdown(secs: number) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-4">
       <div className="flex items-center gap-2">
@@ -54,7 +92,7 @@ export function CoinFlip() {
       </div>
 
       <p className="text-xs text-slate-500 leading-relaxed">
-        Picks a random eligible market, flips YES or NO, enters the trade, then watches for profit.
+        Picks a random open 15-min market, flips YES or NO (any price under 90¢), and cashes out at profit.
       </p>
 
       {/* Coin */}
@@ -66,24 +104,20 @@ export function CoinFlip() {
           }`}
         >
           <div className="coin-face coin-front">
-            {landed === "NO" ? (
-              <span className="coin-label coin-label-no">NO</span>
-            ) : (
-              <span className="coin-label coin-label-yes">YES</span>
-            )}
+            <span className={`coin-label ${landed === "NO" ? "coin-label-no" : "coin-label-yes"}`}>
+              {landed === "NO" ? "NO" : "YES"}
+            </span>
           </div>
           <div className="coin-face coin-back">
-            {landed === "NO" ? (
-              <span className="coin-label coin-label-no">NO</span>
-            ) : (
-              <span className="coin-label coin-label-yes">YES</span>
-            )}
+            <span className={`coin-label ${landed === "NO" ? "coin-label-no" : "coin-label-yes"}`}>
+              {landed === "NO" ? "NO" : "YES"}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Result info */}
-      {result && result.success && result.ticker && (
+      {/* Last result info */}
+      {result?.success && result.ticker && (
         <div className="text-center space-y-0.5">
           <p className={`text-lg font-bold tracking-wider ${result.side === "YES" ? "text-emerald-400" : "text-orange-400"}`}>
             {result.side}
@@ -93,7 +127,7 @@ export function CoinFlip() {
         </div>
       )}
 
-      {/* Flip button */}
+      {/* Manual flip button */}
       <button
         onClick={handleFlip}
         disabled={flipping}
@@ -105,6 +139,37 @@ export function CoinFlip() {
       >
         {flipping ? "Flipping…" : landed ? "Flip Again" : "Flip & Trade"}
       </button>
+
+      {/* Auto mode toggle */}
+      <div className="border-t border-white/5 pt-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold text-slate-300">Auto Flip</p>
+            <p className="text-[10px] text-slate-600 mt-0.5">
+              {autoEnabled && countdown !== null
+                ? `Next flip in ${fmtCountdown(countdown)}`
+                : "1 flip per 15-min market cycle"}
+            </p>
+          </div>
+          <button
+            onClick={toggleAuto}
+            disabled={setAuto.isPending}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+              autoEnabled ? "bg-yellow-500/70" : "bg-white/10"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+              autoEnabled ? "translate-x-6" : "translate-x-1"
+            }`} />
+          </button>
+        </div>
+        {autoEnabled && (
+          <div className="flex items-center gap-1.5 mt-2 text-[10px] text-yellow-400/70">
+            <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
+            <span>Auto flip active — once per 15-min cycle</span>
+          </div>
+        )}
+      </div>
 
       {/* Status message */}
       {result && (
