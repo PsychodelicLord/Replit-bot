@@ -817,6 +817,11 @@ function scheduleCoinFlip() {
   coinFlipAuto.nextFlipAt = Date.now() + coinFlipAuto.intervalSecs * 1000;
   coinFlipTimer = setTimeout(async () => {
     if (!coinFlipAuto.enabled) return;
+    // Don't fire when the main bot is stopped
+    if (!state.running) {
+      scheduleCoinFlip(); // reschedule — will fire once bot is back on
+      return;
+    }
     try {
       const result = await coinFlipTrade();
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
@@ -862,6 +867,11 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       return { success: false, message: "Safety limit reached (balance floor / daily limit) — coin flip blocked." };
     }
 
+    // Respect max open positions — don't add a bet if one is already open
+    if (openMarkets.size >= botConfig.maxOpenPositions) {
+      return { success: false, message: `Max open positions (${botConfig.maxOpenPositions}) already reached — coin flip blocked.` };
+    }
+
     const now = Date.now();
     const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
     const resp = await kalshiFetch("GET", `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`) as { markets?: KalshiMarket[] };
@@ -896,8 +906,8 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const fallbackSide: "YES" | "NO" = coinYes ? "NO" : "YES";
     const fallbackAsk  = coinYes ? noAsk : yesAsk;
 
-    // Coin flip uses its own entry limit — any price under 90¢ is fine
-    const COIN_FLIP_MAX_CENTS = 89;
+    // Coin flip respects the same max entry price as the main bot
+    const COIN_FLIP_MAX_CENTS = botConfig.maxEntryPriceCents;
 
     // Pick the flipped side if valid, otherwise try the other side
     let side: "YES" | "NO" | null = null;
@@ -909,7 +919,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     }
 
     if (!side) {
-      return { success: false, message: `Flipped ${preferredSide} on ${ticker} but no valid ask price under 90¢ (YES:${yesAsk}¢ NO:${noAsk}¢).` };
+      return { success: false, message: `Flipped ${preferredSide} on ${ticker} but no valid ask price under ${COIN_FLIP_MAX_CENTS}¢ (YES:${yesAsk}¢ NO:${noAsk}¢).` };
     }
 
     const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
