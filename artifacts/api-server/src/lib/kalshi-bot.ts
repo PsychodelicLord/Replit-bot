@@ -348,6 +348,10 @@ async function scanMarkets(): Promise<void> {
 
     state.marketsScanned += eligible.length;
 
+    await botLog("info", `🔍 Scanned ${markets.length} markets — ${eligible.length} in entry window`, {
+      total: markets.length, eligible: eligible.length,
+    });
+
     for (const market of eligible) {
       if (!state.running) break;
       if (openMarkets.size >= botConfig.maxOpenPositions) break;
