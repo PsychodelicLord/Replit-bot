@@ -335,10 +335,15 @@ async function scanMarkets(): Promise<void> {
   }
 
   try {
-    const resp = await kalshiFetch("GET", "/markets?status=open&limit=200") as { markets?: KalshiMarket[] };
+    const now = Date.now();
+    // Ask Kalshi for markets closing within the next 20 minutes specifically
+    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
+    const resp = await kalshiFetch(
+      "GET",
+      `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`
+    ) as { markets?: KalshiMarket[] };
     const markets = resp.markets ?? [];
 
-    const now = Date.now();
     const eligible = markets.filter((m) => {
       if (!m.close_time) return false;
       const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
@@ -348,9 +353,30 @@ async function scanMarkets(): Promise<void> {
 
     state.marketsScanned += eligible.length;
 
-    await botLog("info", `🔍 Scanned ${markets.length} markets — ${eligible.length} in entry window`, {
-      total: markets.length, eligible: eligible.length,
-    });
+    // Bucket markets by time remaining for diagnostics
+    const under10 = markets.filter(m => {
+      const mins = (new Date(m.close_time).getTime() - now) / 60_000;
+      return mins > 0 && mins <= 10;
+    }).length;
+    const window1016 = markets.filter(m => {
+      const mins = (new Date(m.close_time).getTime() - now) / 60_000;
+      return mins > 10 && mins <= 16;
+    }).length;
+    const over16 = markets.filter(m => {
+      const mins = (new Date(m.close_time).getTime() - now) / 60_000;
+      return mins > 16;
+    }).length;
+
+    // Sample a few tickers to show what's available
+    const sample = markets.slice(0, 5).map(m => {
+      const mins = ((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1);
+      return `${m.ticker}(${mins}m)`;
+    }).join(", ");
+
+    await botLog("info",
+      `🔍 Scanned ${markets.length} markets — ${eligible.length} in window | <10min:${under10} | 10-16min:${window1016} | >16min:${over16}`,
+      { sample },
+    );
 
     for (const market of eligible) {
       if (!state.running) break;
