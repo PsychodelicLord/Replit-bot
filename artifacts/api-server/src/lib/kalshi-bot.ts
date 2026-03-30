@@ -133,6 +133,9 @@ const state: BotState = {
 
 const openMarkets = new Set<string>();
 
+// Trade mutex — only one trade entry can execute at a time (prevents race conditions)
+let tradeMutex = false;
+
 // Cache of tickers that had zero liquidity — skip expensive API calls for 20 seconds
 const zeroPriceTs = new Map<string, number>();
 const ZERO_SKIP_MS = 20_000;
@@ -514,6 +517,11 @@ async function enterTrade(
   buyPriceCents: number,
   minutesRemaining: number,
 ): Promise<void> {
+  if (tradeMutex) {
+    await botLog("info", `⏳ Trade skipped (another trade in progress): ${ticker}`);
+    return;
+  }
+  tradeMutex = true;
   try {
     const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
@@ -551,6 +559,8 @@ async function enterTrade(
     const msg = err instanceof Error ? err.message : String(err);
     await botLog("error", `Failed to enter trade on ${ticker}: ${msg}`);
     state.tradesAttempted = Math.max(0, state.tradesAttempted - 1);
+  } finally {
+    tradeMutex = false;
   }
 }
 
@@ -866,6 +876,10 @@ export interface CoinFlipResult {
 }
 
 export async function coinFlipTrade(): Promise<CoinFlipResult> {
+  if (tradeMutex) {
+    return { success: false, message: "Another trade is in progress — coin flip blocked." };
+  }
+  tradeMutex = true;
   try {
     // Respect the same safety guards as the main bot
     const safe = await checkSafetyLimits();
@@ -979,5 +993,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const msg = String(err);
     await botLog("error", `🪙 Coin flip trade failed: ${msg}`);
     return { success: false, message: msg };
+  } finally {
+    tradeMutex = false;
   }
 }
