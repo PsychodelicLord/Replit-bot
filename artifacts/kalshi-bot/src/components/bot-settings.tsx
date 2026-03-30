@@ -42,7 +42,7 @@ const defaults: FormState = {
   minMinutesRemaining: "10",
   feeRateDisplay: "7",
   pollIntervalSecs: "5",
-  maxOpenPositions: "3",
+  maxOpenPositions: "1",
   balanceFloorCents: "0",
   dailyProfitTargetCents: "0",
   dailyLossLimitCents: "0",

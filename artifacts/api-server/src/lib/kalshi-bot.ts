@@ -89,7 +89,7 @@ export const botConfig: BotConfig = {
   pollIntervalSecs: 5,
   marketCategories: ["crypto", "sports"],
   cryptoCoins: ["BTC", "ETH", "SOL", "DOGE"],
-  maxOpenPositions: 3,
+  maxOpenPositions: 1,
   balanceFloorCents: 0,
   dailyProfitTargetCents: 0,
   dailyLossLimitCents: 0,
