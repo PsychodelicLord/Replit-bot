@@ -714,11 +714,32 @@ export async function startBot(): Promise<BotState> {
   } catch (e) {
     logger.error({ err: String(e) }, "KEY_LOAD_FAILED");
   }
-  try {
-    const balRaw = await kalshiFetch("GET", "/portfolio/balance");
-    logger.info({ balRaw }, "BALANCE_RAW_RESPONSE");
-  } catch (e) {
-    logger.error({ err: String(e) }, "BALANCE_FETCH_FAILED");
+  // Test both PSS and PKCS1v15 to determine which Kalshi accepts
+  for (const [label, padding, saltLen] of [
+    ["PKCS1v15", crypto.constants.RSA_PKCS1_PADDING, undefined] as const,
+    ["PSS-MAX",  crypto.constants.RSA_PKCS1_PSS_PADDING, -2]    as const,
+  ]) {
+    try {
+      const ts2 = Date.now();
+      const msg2 = `${ts2}GET/portfolio/balance`;
+      const key2 = loadPrivateKey();
+      const sigBuf = saltLen !== undefined
+        ? crypto.sign("sha256", Buffer.from(msg2), { key: key2, padding, saltLength: saltLen })
+        : crypto.sign("sha256", Buffer.from(msg2), { key: key2, padding });
+      const sig2 = sigBuf.toString("base64");
+      const r = await fetch(`${KALSHI_BASE}/portfolio/balance`, {
+        headers: {
+          "KALSHI-ACCESS-KEY": API_KEY_ID,
+          "KALSHI-ACCESS-SIGNATURE": sig2,
+          "KALSHI-ACCESS-TIMESTAMP": String(ts2),
+          "Content-Type": "application/json",
+        },
+      });
+      const body2 = await r.text();
+      logger.info({ label, status: r.status, body: body2.slice(0, 200) }, "AUTH_TEST");
+    } catch (e) {
+      logger.error({ label, err: String(e) }, "AUTH_TEST_ERR");
+    }
   }
   // ────────────────────────────────────────────────────────────────────────────
 
