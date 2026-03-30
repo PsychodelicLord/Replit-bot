@@ -83,10 +83,10 @@ export interface BotConfig {
 export const botConfig: BotConfig = {
   maxEntryPriceCents: 59,
   minNetProfitCents: 5,
-  maxNetProfitCents: 25,
+  maxNetProfitCents: 99,
   minMinutesRemaining: 10,
   feeRate: 0.07,
-  pollIntervalSecs: 20,
+  pollIntervalSecs: 5,
   marketCategories: ["crypto", "sports"],
   cryptoCoins: ["BTC", "ETH", "SOL", "DOGE"],
   maxOpenPositions: 3,
@@ -132,6 +132,14 @@ const state: BotState = {
 };
 
 const openMarkets = new Set<string>();
+
+// Cache of tickers that had zero liquidity — skip expensive API calls for 20 seconds
+const zeroPriceTs = new Map<string, number>();
+const ZERO_SKIP_MS = 20_000;
+
+// Throttle scan logs when nothing is eligible — log at most once every 30s
+let lastIdleScanLogMs = 0;
+const IDLE_LOG_INTERVAL_MS = 30_000;
 
 let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
@@ -216,11 +224,7 @@ function marketPassesCategoryFilter(ticker: string, title: string): boolean {
   }
   if (wantsSports && isSportsMarket(ticker, title)) return true;
 
-  // If neither crypto nor sports, allow non-categorized if both are selected (treat as "all")
-  if (wantsCrypto && wantsSports && !isCryptoMarket(ticker, title) && !isSportsMarket(ticker, title)) {
-    return true;
-  }
-
+  // Only allow explicitly matched categories — weather/misc markets are rejected
   return false;
 }
 
@@ -354,11 +358,23 @@ async function scanMarkets(): Promise<void> {
     const now = Date.now();
     // Ask Kalshi for markets closing within the next 20 minutes specifically
     const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
-    const resp = await kalshiFetch(
-      "GET",
-      `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`
-    ) as { markets?: KalshiMarket[] };
-    const markets = resp.markets ?? [];
+    const baseUrl = `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`;
+
+    const resp1 = await kalshiFetch("GET", baseUrl) as { markets?: KalshiMarket[]; cursor?: string };
+    let markets = resp1.markets ?? [];
+
+    // Paginate: if exactly 200 results came back there may be more (BTC/ETH could be on page 2)
+    if (resp1.cursor && markets.length === 200) {
+      try {
+        const resp2 = await kalshiFetch(
+          "GET",
+          `${baseUrl}&cursor=${encodeURIComponent(resp1.cursor)}`
+        ) as { markets?: KalshiMarket[] };
+        markets = [...markets, ...(resp2.markets ?? [])];
+      } catch (_) {
+        // page 2 failed — continue with page 1 only
+      }
+    }
 
     const eligible = markets.filter((m) => {
       if (!m.close_time) return false;
@@ -366,8 +382,6 @@ async function scanMarkets(): Promise<void> {
       if (minutesLeft <= botConfig.minMinutesRemaining || minutesLeft > 16) return false;
       return marketPassesCategoryFilter(m.ticker, m.title);
     });
-
-    state.marketsScanned += eligible.length;
 
     // Bucket markets by time remaining for diagnostics
     const under10 = markets.filter(m => {
@@ -383,18 +397,34 @@ async function scanMarkets(): Promise<void> {
       return mins > 16;
     }).length;
 
-    // Sample a few tickers to show what's available
-    const sample = markets.slice(0, 5).map(m => {
+    // Sample from eligible (filtered) markets, not the raw list
+    const sample = eligible.slice(0, 5).map(m => {
       const mins = ((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1);
       return `${m.ticker}(${mins}m)`;
     }).join(", ");
 
-    await botLog("info",
-      `🔍 Scanned ${markets.length} markets — ${eligible.length} in window | <10min:${under10} | 10-16min:${window1016} | >16min:${over16}`,
-      { sample },
-    );
+    // Calculate minutes to next 15-min ET boundary
+    const etOffsetMs = 4 * 3600_000; // EDT = UTC-4
+    const etMin = Math.floor((now - etOffsetMs) / 60_000) % 15;
+    const minsToNext = ((15 - etMin) % 15) || 15;
+    const batchHint = eligible.length === 0
+      ? ` | 💤 next batch ~${minsToNext}min`
+      : "";
 
-    for (const market of eligible) {
+    // If nothing eligible, throttle the scan log to avoid spamming DB & UI
+    const shouldLog = eligible.length > 0 || (now - lastIdleScanLogMs) >= IDLE_LOG_INTERVAL_MS;
+    if (shouldLog) {
+      lastIdleScanLogMs = eligible.length === 0 ? now : lastIdleScanLogMs;
+      await botLog("info",
+        `🔍 Scanned ${markets.length} total — ${eligible.length} eligible | <10min:${under10} | 10-16min:${window1016} | >16min:${over16}${sample ? ` | ${sample}` : ""}${batchHint}`,
+      );
+    }
+
+    state.marketsScanned += eligible.length;
+
+    // Evaluate up to 50 per scan; zero-price cache means most cached ones return instantly
+    const toEvaluate = eligible.slice(0, 50);
+    for (const market of toEvaluate) {
       if (!state.running) break;
       if (openMarkets.size >= botConfig.maxOpenPositions) break;
       await evaluateMarket(market);
@@ -412,6 +442,10 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
 
   if (openMarkets.has(ticker)) return;
 
+  // Skip tickers we recently found to have zero liquidity
+  const lastZero = zeroPriceTs.get(ticker);
+  if (lastZero && Date.now() - lastZero < ZERO_SKIP_MS) return;
+
   try {
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     const m = resp.market ?? market;
@@ -420,34 +454,39 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
     const noAsk  = priceCents(m, "no_ask");
     const yesBid = priceCents(m, "yes_bid");
     const noBid  = priceCents(m, "no_bid");
-    const { maxEntryPriceCents, minNetProfitCents } = botConfig;
+    const { maxEntryPriceCents } = botConfig;
 
+    // If no liquidity, cache and skip silently — don't flood the log
+    if (yesAsk === 0 && noAsk === 0) {
+      zeroPriceTs.set(ticker, Date.now());
+      return;
+    }
+
+    // Only log markets that have actual prices
     await botLog("info",
       `📊 ${ticker} — YES ask:${yesAsk}¢ bid:${yesBid}¢ | NO ask:${noAsk}¢ bid:${noBid}¢ | limit:${maxEntryPriceCents}¢ | ${minutesLeft.toFixed(1)}min`,
     );
 
     if (yesAsk > 0 && yesAsk <= maxEntryPriceCents) {
-      const targetSell = calcTargetSellPrice(yesAsk);
-      const maxNet = grossToNet((maxEntryPriceCents + 1) - yesAsk);
-      if (targetSell < 100 && maxNet >= minNetProfitCents) {
-        await botLog("info", `Entry signal: ${title} — buy YES at ${yesAsk}¢, target sell ${targetSell}¢`, {
-          ticker, yesAsk, targetSell, minutesLeft: minutesLeft.toFixed(1),
+      const minSellTarget = calcTargetSellPrice(yesAsk);
+      if (minSellTarget < 100) {
+        await botLog("info", `🟢 Entry signal: ${title} — buy YES at ${yesAsk}¢ | min exit: ${minSellTarget}¢ (no cap)`, {
+          ticker, yesAsk, minSellTarget, minutesLeft: minutesLeft.toFixed(1),
         });
         state.tradesAttempted++;
-        await enterTrade(ticker, title, "YES", yesAsk, targetSell, minutesLeft);
+        await enterTrade(ticker, title, "YES", yesAsk, minutesLeft);
         return;
       }
     }
 
     if (noAsk > 0 && noAsk <= maxEntryPriceCents) {
-      const targetSell = calcTargetSellPrice(noAsk);
-      const maxNet = grossToNet((maxEntryPriceCents + 1) - noAsk);
-      if (targetSell < 100 && maxNet >= minNetProfitCents) {
-        await botLog("info", `Entry signal: ${title} — buy NO at ${noAsk}¢, target sell ${targetSell}¢`, {
-          ticker, noAsk, targetSell, minutesLeft: minutesLeft.toFixed(1),
+      const minSellTarget = calcTargetSellPrice(noAsk);
+      if (minSellTarget < 100) {
+        await botLog("info", `🟢 Entry signal: ${title} — buy NO at ${noAsk}¢ | min exit: ${minSellTarget}¢ (no cap)`, {
+          ticker, noAsk, minSellTarget, minutesLeft: minutesLeft.toFixed(1),
         });
         state.tradesAttempted++;
-        await enterTrade(ticker, title, "NO", noAsk, targetSell, minutesLeft);
+        await enterTrade(ticker, title, "NO", noAsk, minutesLeft);
       }
     }
   } catch (err) {
@@ -461,11 +500,8 @@ async function enterTrade(
   title: string,
   side: string,
   buyPriceCents: number,
-  targetSellPrice: number,
   minutesRemaining: number,
 ): Promise<void> {
-  const feeCents = Math.floor(botConfig.feeRate * (targetSellPrice - buyPriceCents));
-
   try {
     const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
@@ -485,7 +521,7 @@ async function enterTrade(
       side,
       buyPriceCents,
       contractCount: 1,
-      feeCents,
+      feeCents: 0,
       status: "open",
       kalshiBuyOrderId: buyOrderId,
       minutesRemaining,
@@ -496,11 +532,9 @@ async function enterTrade(
     state.tradesSucceeded++;
 
     await botLog("info",
-      `✅ Bought 1x ${side} on "${title}" at ${buyPriceCents}¢ — target sell: ${targetSellPrice}¢`,
-      { tradeId: trade.id, buyOrderId, targetSellPrice },
+      `✅ Bought 1x ${side} on "${title}" at ${buyPriceCents}¢ — monitoring for ≥${botConfig.minNetProfitCents}¢ net (no cap)`,
+      { tradeId: trade.id, buyOrderId },
     );
-
-    setTimeout(() => placeLimitSell(trade.id, ticker, side, buyPriceCents, targetSellPrice, 1), 2000);
   } catch (err) {
     await botLog("error", `Failed to enter trade on ${ticker}`, String(err));
     state.tradesAttempted = Math.max(0, state.tradesAttempted - 1);
@@ -563,7 +597,33 @@ async function retryOpenPositions(): Promise<void> {
     state.openPositionCount = openTrades.length;
 
     for (const trade of openTrades) {
-      const tradeAgeMs = Date.now() - trade.createdAt.getTime();
+      const now = Date.now();
+      const tradeAgeMs = now - trade.createdAt.getTime();
+
+      // Check if buy order was actually filled (after 60s of no exit opportunity)
+      if (tradeAgeMs >= 60_000 && tradeAgeMs < 90_000 && trade.kalshiBuyOrderId) {
+        try {
+          const orderResp = await kalshiFetch("GET", `/portfolio/orders/${trade.kalshiBuyOrderId}`) as {
+            order?: { status?: string; remaining_count?: number; filled_count?: number }
+          };
+          const order = orderResp.order;
+          const filled = (order?.filled_count ?? 0) > 0;
+          if (!filled) {
+            // Cancel the unfilled order and clean up
+            try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiBuyOrderId}`); } catch (_) {}
+            await db.update(tradesTable).set({ status: "cancelled", closedAt: new Date() })
+              .where(eq(tradesTable.id, trade.id));
+            openMarkets.delete(trade.marketId);
+            state.openPositionCount = openMarkets.size;
+            await botLog("warn",
+              `🚫 Trade ${trade.id} cancelled — buy order never filled after 60s`, { tradeId: trade.id }
+            );
+            continue;
+          }
+        } catch (_) {
+          // Can't verify — continue holding the position
+        }
+      }
 
       if (tradeAgeMs > 13 * 60_000) {
         await db.update(tradesTable).set({
@@ -591,13 +651,19 @@ async function retryOpenPositions(): Promise<void> {
         const currentBid = trade.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const grossProfit = currentBid - trade.buyPriceCents;
         const netProfit = grossToNet(grossProfit);
+        const ageMins = (tradeAgeMs / 60_000).toFixed(1);
 
         if (netProfit >= botConfig.minNetProfitCents) {
           await botLog("info",
-            `🎯 Target hit for trade ${trade.id}: bid ${currentBid}¢, net profit ${netProfit}¢ — exiting`,
+            `🎯 Target hit trade ${trade.id}: bid ${currentBid}¢, net +${netProfit}¢ | held ${ageMins}min — exiting`,
             { tradeId: trade.id, currentBid, netProfit },
           );
           await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+        } else if (currentBid > 0) {
+          // Log position status so user can see how close we are
+          await botLog("info",
+            `⏳ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢): bid now ${currentBid}¢, net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | need +${botConfig.minNetProfitCents}¢ | ${ageMins}min held`,
+          );
         }
       } catch (err) {
         await botLog("warn", `Failed to check position ${trade.id}`, String(err));
@@ -625,6 +691,8 @@ export async function startBot(): Promise<BotState> {
   state.tradesAttempted = 0;
   state.tradesSucceeded = 0;
   state.stoppedReason = null;
+  zeroPriceTs.clear();     // fresh start — re-evaluate all markets
+  lastIdleScanLogMs = 0;   // always show first scan result
 
   await refreshBalance();
   await refreshDailyPnl();
@@ -636,7 +704,7 @@ export async function startBot(): Promise<BotState> {
 
   scanMarkets();
   scanTimer = setInterval(scanMarkets, botConfig.pollIntervalSecs * 1000);
-  sellTimer = setInterval(retryOpenPositions, 8_000);
+  sellTimer = setInterval(retryOpenPositions, botConfig.pollIntervalSecs * 1000);
   balanceTimer = setInterval(refreshBalance, 60_000);
 
   return getBotState();

@@ -32,10 +32,10 @@ interface FormState {
 const defaults: FormState = {
   maxEntryPriceCents: "59",
   minNetProfitCents: "5",
-  maxNetProfitCents: "25",
+  maxNetProfitCents: "99",
   minMinutesRemaining: "10",
   feeRateDisplay: "7",
-  pollIntervalSecs: "20",
+  pollIntervalSecs: "5",
   maxOpenPositions: "3",
   balanceFloorCents: "0",
   dailyProfitTargetCents: "0",
@@ -209,13 +209,12 @@ export function BotSettings() {
               <SlidersHorizontal className="w-3.5 h-3.5" />
               Trading Parameters
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
               <SettingField label="Max Entry (¢)" hint="Skip if ask > this" {...field("maxEntryPriceCents")} type="number" />
-              <SettingField label="Min Profit (¢)" hint="Exit when net ≥ this" {...field("minNetProfitCents")} type="number" />
-              <SettingField label="Max Profit (¢)" hint="Upper target bound" {...field("maxNetProfitCents")} type="number" />
+              <SettingField label="Min Profit (¢)" hint="Exit when net ≥ this — no upper cap" {...field("minNetProfitCents")} type="number" />
               <SettingField label="Min Time Left (min)" hint="Skip if ≤ this left" {...field("minMinutesRemaining")} type="number" />
               <SettingField label="Fee Rate (%)" hint="Kalshi fee on profit" {...field("feeRateDisplay")} type="number" step="0.01" />
-              <SettingField label="Scan Every (sec)" hint="How often to scan" {...field("pollIntervalSecs")} type="number" />
+              <SettingField label="Scan Every (sec)" hint="Lower = faster, more API calls" {...field("pollIntervalSecs")} type="number" />
             </div>
           </section>
 
