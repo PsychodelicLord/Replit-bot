@@ -314,10 +314,26 @@ interface KalshiMarket {
   ticker: string;
   title: string;
   close_time: string;
+  // Legacy cent fields (may be absent — Kalshi now returns _dollars variants)
   yes_bid?: number;
   yes_ask?: number;
   no_bid?: number;
   no_ask?: number;
+  // Dollar-unit fields (0.0–1.0 scale); multiply by 100 to get cents
+  yes_ask_dollars?: number;
+  yes_bid_dollars?: number;
+  no_ask_dollars?: number;
+  no_bid_dollars?: number;
+  last_price_dollars?: number;
+}
+
+/** Read a price field from a market object, always returning integer cents. */
+function priceCents(m: KalshiMarket, field: "yes_ask" | "yes_bid" | "no_ask" | "no_bid" | "last_price"): number {
+  const dollars = (m as any)[`${field}_dollars`];
+  if (typeof dollars === "number" && dollars > 0) return Math.round(dollars * 100);
+  const cents = (m as any)[field];
+  if (typeof cents === "number" && cents > 0) return Math.round(cents);
+  return 0;
 }
 
 // ─── Scan markets for entry opportunities ────────────────────────────────────
@@ -400,9 +416,15 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     const m = resp.market ?? market;
 
-    const yesAsk = m.yes_ask ?? 0;
-    const noAsk = m.no_ask ?? 0;
+    const yesAsk = priceCents(m, "yes_ask");
+    const noAsk  = priceCents(m, "no_ask");
+    const yesBid = priceCents(m, "yes_bid");
+    const noBid  = priceCents(m, "no_bid");
     const { maxEntryPriceCents, minNetProfitCents } = botConfig;
+
+    await botLog("info",
+      `📊 ${ticker} — YES ask:${yesAsk}¢ bid:${yesBid}¢ | NO ask:${noAsk}¢ bid:${noBid}¢ | limit:${maxEntryPriceCents}¢ | ${minutesLeft.toFixed(1)}min`,
+    );
 
     if (yesAsk > 0 && yesAsk <= maxEntryPriceCents) {
       const targetSell = calcTargetSellPrice(yesAsk);
@@ -566,7 +588,7 @@ async function retryOpenPositions(): Promise<void> {
         const m = resp.market;
         if (!m) continue;
 
-        const currentBid = trade.side === "YES" ? (m.yes_bid ?? 0) : (m.no_bid ?? 0);
+        const currentBid = trade.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const grossProfit = currentBid - trade.buyPriceCents;
         const netProfit = grossToNet(grossProfit);
 
