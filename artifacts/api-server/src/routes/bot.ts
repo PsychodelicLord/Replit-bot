@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig } from "../lib/kalshi-bot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
-import { desc, count, sum, eq, isNull, isNotNull } from "drizzle-orm";
+import { desc, count } from "drizzle-orm";
 import {
   GetBotStatusResponse,
   StartBotResponse,
@@ -18,6 +18,21 @@ import {
 
 const router: IRouter = Router();
 
+function serializeState(s: ReturnType<typeof getBotState>) {
+  return {
+    running: s.running,
+    startedAt: s.startedAt,
+    marketsScanned: s.marketsScanned,
+    tradesAttempted: s.tradesAttempted,
+    tradesSucceeded: s.tradesSucceeded,
+    totalPnlCents: s.totalPnlCents,
+    dailyPnlCents: s.dailyPnlCents,
+    openPositionCount: s.openPositionCount,
+    balanceCents: s.balanceCents,
+    stoppedReason: s.stoppedReason,
+  };
+}
+
 router.get("/bot/config", async (_req, res): Promise<void> => {
   res.json(GetBotConfigResponse.parse(getBotConfig()));
 });
@@ -33,39 +48,17 @@ router.patch("/bot/config", async (req, res): Promise<void> => {
 });
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
-  const s = getBotState();
-  res.json(GetBotStatusResponse.parse({
-    running: s.running,
-    startedAt: s.startedAt,
-    marketsScanned: s.marketsScanned,
-    tradesAttempted: s.tradesAttempted,
-    tradesSucceeded: s.tradesSucceeded,
-    totalPnlCents: s.totalPnlCents,
-  }));
+  res.json(GetBotStatusResponse.parse(serializeState(getBotState())));
 });
 
 router.post("/bot/start", async (_req, res): Promise<void> => {
   const s = await startBot();
-  res.json(StartBotResponse.parse({
-    running: s.running,
-    startedAt: s.startedAt,
-    marketsScanned: s.marketsScanned,
-    tradesAttempted: s.tradesAttempted,
-    tradesSucceeded: s.tradesSucceeded,
-    totalPnlCents: s.totalPnlCents,
-  }));
+  res.json(StartBotResponse.parse(serializeState(s)));
 });
 
 router.post("/bot/stop", async (_req, res): Promise<void> => {
   const s = await stopBot();
-  res.json(StopBotResponse.parse({
-    running: s.running,
-    startedAt: s.startedAt,
-    marketsScanned: s.marketsScanned,
-    tradesAttempted: s.tradesAttempted,
-    tradesSucceeded: s.tradesSucceeded,
-    totalPnlCents: s.totalPnlCents,
-  }));
+  res.json(StopBotResponse.parse(serializeState(s)));
 });
 
 router.get("/logs", async (req, res): Promise<void> => {

@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Api
   version: 0.1.0
-  description: Kalshi Scalping Bot API
+  description: Instinct Scalper API
 servers:
   - url: /api
     description: Base API path
@@ -19,7 +19,6 @@ paths:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -33,7 +32,6 @@ paths:
       operationId: getBotStatus
       tags: [bot]
       summary: Get bot status
-      description: Returns current bot running status and stats
       responses:
         "200":
           description: Bot status
@@ -185,6 +183,28 @@ components:
         pollIntervalSecs:
           type: integer
           description: How often to scan markets (seconds)
+        marketCategories:
+          type: array
+          items:
+            type: string
+          description: Which market categories to trade - "crypto", "sports", or "all"
+        cryptoCoins:
+          type: array
+          items:
+            type: string
+          description: Which crypto coins to trade e.g. ["BTC","ETH","SOL","DOGE"]
+        maxOpenPositions:
+          type: integer
+          description: Maximum number of concurrent open trades
+        balanceFloorCents:
+          type: integer
+          description: Auto-stop if account balance drops below this (cents, 0 = disabled)
+        dailyProfitTargetCents:
+          type: integer
+          description: Auto-stop when daily profit reaches this (cents, 0 = disabled)
+        dailyLossLimitCents:
+          type: integer
+          description: Auto-stop when daily loss reaches this (cents, 0 = disabled)
       required:
         - maxEntryPriceCents
         - minNetProfitCents
@@ -192,6 +212,12 @@ components:
         - minMinutesRemaining
         - feeRate
         - pollIntervalSecs
+        - marketCategories
+        - cryptoCoins
+        - maxOpenPositions
+        - balanceFloorCents
+        - dailyProfitTargetCents
+        - dailyLossLimitCents
 
     BotConfigUpdate:
       type: object
@@ -207,6 +233,22 @@ components:
         feeRate:
           type: number
         pollIntervalSecs:
+          type: integer
+        marketCategories:
+          type: array
+          items:
+            type: string
+        cryptoCoins:
+          type: array
+          items:
+            type: string
+        maxOpenPositions:
+          type: integer
+        balanceFloorCents:
+          type: integer
+        dailyProfitTargetCents:
+          type: integer
+        dailyLossLimitCents:
           type: integer
 
     BotStatus:
@@ -224,6 +266,14 @@ components:
           type: integer
         totalPnlCents:
           type: integer
+        dailyPnlCents:
+          type: integer
+        openPositionCount:
+          type: integer
+        balanceCents:
+          type: integer
+        stoppedReason:
+          type: ["string", "null"]
       required:
         - running
         - startedAt
@@ -231,6 +281,10 @@ components:
         - tradesAttempted
         - tradesSucceeded
         - totalPnlCents
+        - dailyPnlCents
+        - openPositionCount
+        - balanceCents
+        - stoppedReason
 
     Trade:
       type: object

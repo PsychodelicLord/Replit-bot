@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700;800&display=swap');
 @import "tailwindcss";
 
 @theme inline {
@@ -34,6 +34,8 @@
   --color-success: hsl(var(--success));
   --color-success-foreground: hsl(var(--success-foreground));
 
+  --color-silver: hsl(var(--silver));
+
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
@@ -41,41 +43,45 @@
 }
 
 :root {
-  /* Enforce Dark Mode for Trading Terminal */
   color-scheme: dark;
   
-  --background: 224 71% 4%;
-  --foreground: 213 31% 91%;
+  /* Ultra Instinct: pure black base, electric blue primary, silver/white accents */
+  --background: 220 30% 3%;
+  --foreground: 210 40% 96%;
   
-  --card: 224 71% 7%;
-  --card-foreground: 213 31% 91%;
-  --card-border: 224 71% 12%;
+  --card: 220 30% 5%;
+  --card-foreground: 210 40% 96%;
+  --card-border: 220 30% 10%;
   
-  --popover: 224 71% 7%;
-  --popover-foreground: 213 31% 91%;
-  --popover-border: 224 71% 12%;
+  --popover: 220 30% 5%;
+  --popover-foreground: 210 40% 96%;
+  --popover-border: 220 30% 10%;
   
-  --primary: 217 91% 60%;
-  --primary-foreground: 0 0% 100%;
+  /* Electric ice-blue — Ultra Instinct aura */
+  --primary: 199 100% 60%;
+  --primary-foreground: 220 30% 3%;
   
-  --secondary: 224 71% 12%;
-  --secondary-foreground: 213 31% 91%;
+  --secondary: 220 30% 9%;
+  --secondary-foreground: 210 40% 75%;
   
-  --muted: 224 71% 12%;
-  --muted-foreground: 215 20.2% 65.1%;
+  --muted: 220 30% 9%;
+  --muted-foreground: 215 20% 55%;
   
-  --accent: 217 91% 60%;
-  --accent-foreground: 0 0% 100%;
+  --accent: 199 100% 60%;
+  --accent-foreground: 220 30% 3%;
   
-  --destructive: 348 83% 47%;
+  --destructive: 0 84% 60%;
   --destructive-foreground: 210 40% 98%;
   
-  --success: 142 71% 45%;
+  --success: 142 71% 50%;
   --success-foreground: 210 40% 98%;
+
+  /* Silver — Ultra Instinct hair/aura */
+  --silver: 215 20% 75%;
   
-  --border: 224 71% 12%;
-  --input: 224 71% 12%;
-  --ring: 217 91% 60%;
+  --border: 220 30% 10%;
+  --input: 220 30% 9%;
+  --ring: 199 100% 60%;
 }
 
 @layer base {
@@ -85,6 +91,10 @@
   
   body {
     @apply font-sans antialiased bg-background text-foreground min-h-screen selection:bg-primary/30;
+    background-image: 
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0, 195, 255, 0.06) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at 80% 80%, rgba(0, 195, 255, 0.03) 0%, transparent 50%);
+    background-attachment: fixed;
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -94,33 +104,122 @@
 
 @layer utilities {
   .glass-panel {
-    @apply bg-card/60 backdrop-blur-xl border border-white/5 shadow-2xl shadow-black/50;
+    @apply bg-card/80 backdrop-blur-xl border border-white/5 shadow-2xl shadow-black/60;
+  }
+
+  .ui-glow {
+    box-shadow: 0 0 20px rgba(0, 195, 255, 0.15), 0 0 40px rgba(0, 195, 255, 0.05);
+  }
+
+  .ui-glow-active {
+    box-shadow: 0 0 0 1px rgba(0, 195, 255, 0.5), 0 0 20px rgba(0, 195, 255, 0.3), 0 0 60px rgba(0, 195, 255, 0.1);
   }
   
   .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-br from-white to-white/50;
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #ffffff 0%, #7dd3fc 50%, #38bdf8 100%);
   }
 
-  /* Custom Scrollbar for Terminal aesthetic */
+  .text-gradient-silver {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #ffffff 0%, #cbd5e1 60%, #94a3b8 100%);
+  }
+
+  .instinct-border {
+    border: 1px solid rgba(0, 195, 255, 0.15);
+  }
+
+  .instinct-border-active {
+    border: 1px solid rgba(0, 195, 255, 0.5);
+  }
+
+  /* Category / coin toggle pills */
+  .pill-toggle {
+    @apply px-4 py-1.5 rounded-full text-sm font-semibold border transition-all duration-200 cursor-pointer select-none;
+    border-color: rgba(0, 195, 255, 0.2);
+    color: rgba(148, 163, 184, 1);
+    background: transparent;
+  }
+
+  .pill-toggle:hover {
+    border-color: rgba(0, 195, 255, 0.4);
+    color: #7dd3fc;
+  }
+
+  .pill-toggle-active {
+    background: rgba(0, 195, 255, 0.12);
+    border-color: rgba(0, 195, 255, 0.6);
+    color: #38bdf8;
+    box-shadow: 0 0 12px rgba(0, 195, 255, 0.2);
+  }
+
+  .coin-chip {
+    @apply px-3 py-1 rounded-lg text-xs font-mono font-bold border transition-all duration-200 cursor-pointer select-none;
+    border-color: rgba(148, 163, 184, 0.2);
+    color: rgba(100, 116, 139, 1);
+    background: transparent;
+  }
+
+  .coin-chip:hover {
+    border-color: rgba(0, 195, 255, 0.4);
+    color: #7dd3fc;
+  }
+
+  .coin-chip-active {
+    background: rgba(0, 195, 255, 0.1);
+    border-color: rgba(0, 195, 255, 0.5);
+    color: #38bdf8;
+    box-shadow: 0 0 8px rgba(0, 195, 255, 0.15);
+  }
+  
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 4px;
+    height: 4px;
   }
   ::-webkit-scrollbar-track {
     @apply bg-transparent;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-white/10 rounded-full hover:bg-white/20 transition-colors;
+    background: rgba(0, 195, 255, 0.15);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 195, 255, 0.3);
   }
 }
 
-/* Animations */
-@keyframes pulse-ring {
-  0% { transform: scale(0.8); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
-  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
-  100% { transform: scale(0.8); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+/* Status pulse — blue for running */
+@keyframes instinct-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0, 195, 255, 0.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(0, 195, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 195, 255, 0); }
 }
 
-.animate-pulse-ring {
-  animation: pulse-ring 2s infinite cubic-bezier(0.66, 0, 0, 1);
+.animate-instinct-pulse {
+  animation: instinct-pulse 2s infinite cubic-bezier(0.66, 0, 0, 1);
+}
+
+@keyframes float-aura {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50%       { opacity: 1;   transform: scale(1.05); }
+}
+
+.animate-aura {
+  animation: float-aura 3s ease-in-out infinite;
+}
+
+/* Scanline overlay for terminal feel */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
 }
