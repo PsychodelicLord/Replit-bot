@@ -29,6 +29,12 @@ interface FormState {
   cryptoCoins: string[];
 }
 
+interface DollarDisplayState {
+  balanceFloor: string;
+  dailyProfitTarget: string;
+  dailyLossLimit: string;
+}
+
 const defaults: FormState = {
   maxEntryPriceCents: "59",
   minNetProfitCents: "5",
@@ -51,9 +57,17 @@ export function BotSettings() {
   const updateConfig = useUpdateBotConfig();
   const [open, setOpen] = useState(true);
   const [form, setForm] = useState<FormState>(defaults);
+  const [dollars, setDollars] = useState<DollarDisplayState>({
+    balanceFloor: "0.00",
+    dailyProfitTarget: "0.00",
+    dailyLossLimit: "0.00",
+  });
 
   useEffect(() => {
     if (!config) return;
+    const bf  = config.balanceFloorCents ?? 0;
+    const dpt = config.dailyProfitTargetCents ?? 0;
+    const dll = config.dailyLossLimitCents ?? 0;
     setForm({
       maxEntryPriceCents: String(config.maxEntryPriceCents ?? 59),
       minNetProfitCents: String(config.minNetProfitCents ?? 5),
@@ -62,13 +76,25 @@ export function BotSettings() {
       feeRateDisplay: config.feeRate ? String(Math.round(config.feeRate * 10000) / 100) : "7",
       pollIntervalSecs: String(config.pollIntervalSecs ?? 20),
       maxOpenPositions: String(config.maxOpenPositions ?? 3),
-      balanceFloorCents: String(config.balanceFloorCents ?? 0),
-      dailyProfitTargetCents: String(config.dailyProfitTargetCents ?? 0),
-      dailyLossLimitCents: String(config.dailyLossLimitCents ?? 0),
+      balanceFloorCents: String(bf),
+      dailyProfitTargetCents: String(dpt),
+      dailyLossLimitCents: String(dll),
       marketCategories: config.marketCategories ?? ["crypto", "sports"],
       cryptoCoins: config.cryptoCoins ?? ["BTC", "ETH", "SOL", "DOGE"],
     });
+    setDollars({
+      balanceFloor: (bf / 100).toFixed(2),
+      dailyProfitTarget: (dpt / 100).toFixed(2),
+      dailyLossLimit: (dll / 100).toFixed(2),
+    });
   }, [config]);
+
+  function commitDollar(key: keyof DollarDisplayState, centsKey: keyof FormState) {
+    const raw = parseFloat(dollars[key]);
+    const cents = String(isNaN(raw) ? 0 : Math.round(raw * 100));
+    setForm((p) => ({ ...p, [centsKey]: cents }));
+    setDollars((p) => ({ ...p, [key]: (parseInt(cents) / 100).toFixed(2) }));
+  }
 
   const field = (name: keyof FormState) => ({
     value: form[name] as string,
@@ -237,24 +263,27 @@ export function BotSettings() {
               <SettingField
                 label="Balance Floor ($)"
                 hint="Auto-stop if balance drops below"
-                value={(parseInt(form.balanceFloorCents) / 100).toFixed(2)}
-                onChange={(e) => setForm((p) => ({ ...p, balanceFloorCents: String(Math.round(parseFloat(e.target.value) * 100) || 0) }))}
+                value={dollars.balanceFloor}
+                onChange={(e) => setDollars((p) => ({ ...p, balanceFloor: e.target.value }))}
+                onBlur={() => commitDollar("balanceFloor", "balanceFloorCents")}
                 type="number"
                 step="0.01"
               />
               <SettingField
                 label="Daily Profit Target ($)"
                 hint="Auto-stop when daily gain hits"
-                value={(parseInt(form.dailyProfitTargetCents) / 100).toFixed(2)}
-                onChange={(e) => setForm((p) => ({ ...p, dailyProfitTargetCents: String(Math.round(parseFloat(e.target.value) * 100) || 0) }))}
+                value={dollars.dailyProfitTarget}
+                onChange={(e) => setDollars((p) => ({ ...p, dailyProfitTarget: e.target.value }))}
+                onBlur={() => commitDollar("dailyProfitTarget", "dailyProfitTargetCents")}
                 type="number"
                 step="0.01"
               />
               <SettingField
                 label="Daily Loss Limit ($)"
                 hint="Auto-stop when daily loss hits"
-                value={(parseInt(form.dailyLossLimitCents) / 100).toFixed(2)}
-                onChange={(e) => setForm((p) => ({ ...p, dailyLossLimitCents: String(Math.round(parseFloat(e.target.value) * 100) || 0) }))}
+                value={dollars.dailyLossLimit}
+                onChange={(e) => setDollars((p) => ({ ...p, dailyLossLimit: e.target.value }))}
+                onBlur={() => commitDollar("dailyLossLimit", "dailyLossLimitCents")}
                 type="number"
                 step="0.01"
               />
@@ -268,12 +297,13 @@ export function BotSettings() {
 }
 
 function SettingField({
-  label, hint, value, onChange, type = "text", step,
+  label, hint, value, onChange, onBlur, type = "text", step,
 }: {
   label: string;
   hint: string;
   value: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onBlur?: () => void;
   type?: string;
   step?: string;
 }) {
@@ -285,6 +315,7 @@ function SettingField({
         step={step}
         value={value}
         onChange={onChange}
+        onBlur={onBlur}
         className="font-mono text-sm bg-white/[0.03] border-white/10 text-white focus:border-sky-400/50 focus:ring-sky-400/20 h-9"
       />
       <p className="text-[10px] text-slate-600">{hint}</p>
