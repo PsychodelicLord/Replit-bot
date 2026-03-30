@@ -146,23 +146,28 @@ let sellTimer: NodeJS.Timeout | null = null;
 let balanceTimer: NodeJS.Timeout | null = null;
 
 // ─── Kalshi signing helper ───────────────────────────────────────────────────
+// elections.kalshi.com requires the FULL path (including /trade-api/v2 prefix)
+// in the signing message, with RSA-PSS SHA-256 at max salt length.
+const KALSHI_PATH_PREFIX = "/trade-api/v2";
+
 function signRequest(method: string, path: string, timestampMs: number): string {
-  const msg = `${timestampMs}${method.toUpperCase()}${path}`;
+  // Use full path in the signing message
+  const fullPath = path.startsWith(KALSHI_PATH_PREFIX) ? path : `${KALSHI_PATH_PREFIX}${path}`;
+  const msg = `${timestampMs}${method.toUpperCase()}${fullPath}`;
   const key = loadPrivateKey();
   const keyType = key.asymmetricKeyType ?? "";
 
   let sig: Buffer;
   if (keyType === "ed25519" || keyType === "ed448") {
-    // EdDSA keys — no hash algorithm needed
     sig = crypto.sign(null, Buffer.from(msg), key);
   } else if (keyType === "ec") {
-    // ECDSA keys
     sig = crypto.sign("sha256", Buffer.from(msg), key);
   } else {
-    // RSA PKCS1 v1.5 (SHA-256) — required by elections.kalshi.com trade API
+    // RSA-PSS SHA-256 with max salt length — confirmed working with elections.kalshi.com
     sig = crypto.sign("sha256", Buffer.from(msg), {
       key,
-      padding: crypto.constants.RSA_PKCS1_PADDING,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: -2,
     });
   }
   return sig.toString("base64");
@@ -701,49 +706,6 @@ export async function startBot(): Promise<BotState> {
   state.stoppedReason = null;
   zeroPriceTs.clear();     // fresh start — re-evaluate all markets
   lastIdleScanLogMs = 0;   // always show first scan result
-
-  // ── Startup diagnostic ──────────────────────────────────────────────────────
-  try {
-    const diagKey = loadPrivateKey();
-    const keyType = diagKey.asymmetricKeyType ?? "unknown";
-    const keyIdLen = API_KEY_ID.length;
-    const pemLines = PRIVATE_KEY_PEM.split("\n").length;
-    // Derive and log the public key so we can compare against what's on Kalshi
-    const pubKey = crypto.createPublicKey(diagKey);
-    const pubPem = pubKey.export({ type: "pkcs1", format: "pem" }).toString();
-    const pubB64 = pubPem
-      .replace(/-----BEGIN.*-----/, "")
-      .replace(/-----END.*-----/, "")
-      .replace(/\s/g, "");
-    logger.info({ keyType, keyIdLen, pemLines, pubKeyB64Prefix: pubB64.slice(0, 40) }, "KEY_DIAGNOSTIC");
-    logger.info({ pubKeyPem: pubPem }, "PUBLIC_KEY_DERIVED");
-  } catch (e) {
-    logger.error({ err: String(e) }, "KEY_LOAD_FAILED");
-  }
-  // Test PSS auth
-  try {
-    const ts2 = Date.now();
-    const msg2 = `${ts2}GET/portfolio/balance`;
-    const key2 = loadPrivateKey();
-    const sigBuf = crypto.sign("sha256", Buffer.from(msg2), {
-      key: key2,
-      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-      saltLength: -2,
-    });
-    const r = await fetch(`${KALSHI_BASE}/portfolio/balance`, {
-      headers: {
-        "KALSHI-ACCESS-KEY": API_KEY_ID,
-        "KALSHI-ACCESS-SIGNATURE": sigBuf.toString("base64"),
-        "KALSHI-ACCESS-TIMESTAMP": String(ts2),
-        "Content-Type": "application/json",
-      },
-    });
-    const body2 = await r.text();
-    logger.info({ status: r.status, body: body2.slice(0, 300) }, "PSS_AUTH_TEST");
-  } catch (e) {
-    logger.error({ err: String(e) }, "PSS_AUTH_TEST_ERR");
-  }
-  // ────────────────────────────────────────────────────────────────────────────
 
   await refreshBalance();
   await refreshDailyPnl();
