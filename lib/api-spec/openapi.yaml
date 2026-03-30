@@ -1,15 +1,18 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Kalshi Scalping Bot API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: Bot control operations
+  - name: trades
+    description: Trade history
 paths:
   /healthz:
     get:
@@ -24,6 +27,103 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot status
+      description: Returns current bot running status and stats
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the bot
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the bot
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /trades:
+    get:
+      operationId: listTrades
+      tags: [trades]
+      summary: List all trades
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeList"
+
+  /trades/stats:
+    get:
+      operationId: getTradeStats
+      tags: [trades]
+      summary: Get trade statistics
+      responses:
+        "200":
+          description: Trade stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeStats"
+
+  /logs:
+    get:
+      operationId: getBotLogs
+      tags: [bot]
+      summary: Get recent bot logs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Bot logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogList"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +134,138 @@ components:
       required:
         - status
 
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        startedAt:
+          type: ["string", "null"]
+        marketsScanned:
+          type: integer
+        tradesAttempted:
+          type: integer
+        tradesSucceeded:
+          type: integer
+        totalPnlCents:
+          type: integer
+      required:
+        - running
+        - startedAt
+        - marketsScanned
+        - tradesAttempted
+        - tradesSucceeded
+        - totalPnlCents
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        marketId:
+          type: string
+        marketTitle:
+          type: string
+        side:
+          type: string
+        buyPriceCents:
+          type: integer
+        sellPriceCents:
+          type: ["integer", "null"]
+        contractCount:
+          type: integer
+        feeCents:
+          type: integer
+        pnlCents:
+          type: ["integer", "null"]
+        status:
+          type: string
+        createdAt:
+          type: string
+        closedAt:
+          type: ["string", "null"]
+        minutesRemaining:
+          type: ["number", "null"]
+      required:
+        - id
+        - marketId
+        - marketTitle
+        - side
+        - buyPriceCents
+        - sellPriceCents
+        - contractCount
+        - feeCents
+        - pnlCents
+        - status
+        - createdAt
+        - closedAt
+        - minutesRemaining
+
+    TradeList:
+      type: object
+      properties:
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trade"
+        total:
+          type: integer
+      required:
+        - trades
+        - total
+
+    TradeStats:
+      type: object
+      properties:
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalPnlCents:
+          type: integer
+        winRate:
+          type: number
+        avgPnlCents:
+          type: number
+      required:
+        - totalTrades
+        - winningTrades
+        - losingTrades
+        - openTrades
+        - totalPnlCents
+        - winRate
+        - avgPnlCents
+
+    LogEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        level:
+          type: string
+        message:
+          type: string
+        data:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+      required:
+        - id
+        - level
+        - message
+        - data
+        - createdAt
+
+    LogList:
+      type: object
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogEntry"
+      required:
+        - logs

@@ -1,0 +1,10 @@
+packages:
+  "date-fns": "For elegant timestamp formatting in logs and tables"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility for merging tailwind classes without style conflicts"
+  "lucide-react": "Beautiful SVG icons for the trading terminal"
+
+notes:
+  - Using a dark mode professional trading terminal aesthetic.
+  - Relying on the @workspace/api-client-react hooks for all data fetching.
+  - Polling intervals: 5s for stats/status, 3s for logs.
