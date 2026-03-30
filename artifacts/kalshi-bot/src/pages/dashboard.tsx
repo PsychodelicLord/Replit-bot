@@ -4,6 +4,7 @@ import { BotHeader } from "@/components/bot-header";
 import { StatsCard } from "@/components/stats-card";
 import { TradeTable } from "@/components/trade-table";
 import { LogViewer } from "@/components/log-viewer";
+import { BotSettings } from "@/components/bot-settings";
 import { Wallet, Target, ActivitySquare, Crosshair, BarChart3 } from "lucide-react";
 
 export function Dashboard() {
@@ -48,6 +49,9 @@ export function Dashboard() {
             icon={BarChart3}
           />
         </div>
+
+        {/* Settings Panel */}
+        <BotSettings />
 
         {/* Main Content Split */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8 items-start">

@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from "./botConfig";
+export * from "./botConfigUpdate";
 export * from "./botStatus";
 export * from "./getBotLogsParams";
 export * from "./healthStatus";

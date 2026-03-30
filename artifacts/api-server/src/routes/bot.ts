@@ -1,11 +1,14 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState } from "../lib/kalshi-bot";
+import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig } from "../lib/kalshi-bot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sum, eq, isNull, isNotNull } from "drizzle-orm";
 import {
   GetBotStatusResponse,
   StartBotResponse,
   StopBotResponse,
+  GetBotConfigResponse,
+  UpdateBotConfigBody,
+  UpdateBotConfigResponse,
   GetBotLogsResponse,
   GetBotLogsQueryParams,
   ListTradesResponse,
@@ -14,6 +17,20 @@ import {
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
+
+router.get("/bot/config", async (_req, res): Promise<void> => {
+  res.json(GetBotConfigResponse.parse(getBotConfig()));
+});
+
+router.patch("/bot/config", async (req, res): Promise<void> => {
+  const parsed = UpdateBotConfigBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const updated = updateBotConfig(parsed.data);
+  res.json(UpdateBotConfigResponse.parse(updated));
+});
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
   const s = getBotState();

@@ -9,6 +9,30 @@ export interface HealthStatus {
   status: string;
 }
 
+export interface BotConfig {
+  /** Only enter if ask price per contract is at or below this (cents) */
+  maxEntryPriceCents: number;
+  /** Minimum net profit to exit (cents, after fees) */
+  minNetProfitCents: number;
+  /** Maximum net profit target (cents, after fees) */
+  maxNetProfitCents: number;
+  /** Skip market if this many minutes or fewer remain */
+  minMinutesRemaining: number;
+  /** Kalshi fee rate on profit (e.g. 0.07 = 7%) */
+  feeRate: number;
+  /** How often to scan markets (seconds) */
+  pollIntervalSecs: number;
+}
+
+export interface BotConfigUpdate {
+  maxEntryPriceCents?: number;
+  minNetProfitCents?: number;
+  maxNetProfitCents?: number;
+  minMinutesRemaining?: number;
+  feeRate?: number;
+  pollIntervalSecs?: number;
+}
+
 export interface BotStatus {
   running: boolean;
   /** @nullable */

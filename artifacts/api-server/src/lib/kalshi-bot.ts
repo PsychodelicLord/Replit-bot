@@ -8,20 +8,33 @@ const KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
 const PRIVATE_KEY_PEM = (process.env.KALSHI_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
 
-// ─── Bot parameters ──────────────────────────────────────────────────────────
-// Entry: only enter if ask price per contract is ≤ 59 cents
-const MAX_ENTRY_PRICE_CENTS = 59;
-// Exit: take profit when NET profit (after fees) is between 5 and 25 cents
-const MIN_NET_PROFIT_CENTS = 5;
-const MAX_NET_PROFIT_CENTS = 25;
-// Skip any market with 10 minutes or less remaining
-const MIN_MINUTES_REMAINING = 10;
-// Kalshi fee rate on profit
-const KALSHI_FEE_RATE = 0.07;
-// How often to scan for new opportunities
-const POLL_INTERVAL_MS = 20_000;
-// How often to retry selling open positions
-const SELL_RETRY_MS = 8_000;
+// ─── Live-editable bot config ────────────────────────────────────────────────
+export interface BotConfig {
+  maxEntryPriceCents: number;   // Enter if ask ≤ this value (cents)
+  minNetProfitCents: number;    // Exit when net profit ≥ this (cents, after fees)
+  maxNetProfitCents: number;    // Upper bound for target profit range (cents)
+  minMinutesRemaining: number;  // Skip market if ≤ this many minutes left
+  feeRate: number;              // Kalshi fee rate on profit (0.07 = 7%)
+  pollIntervalSecs: number;     // How often to scan markets (seconds)
+}
+
+export const botConfig: BotConfig = {
+  maxEntryPriceCents: 59,
+  minNetProfitCents: 5,
+  maxNetProfitCents: 25,
+  minMinutesRemaining: 10,
+  feeRate: 0.07,
+  pollIntervalSecs: 20,
+};
+
+export function updateBotConfig(updates: Partial<BotConfig>): BotConfig {
+  Object.assign(botConfig, updates);
+  return { ...botConfig };
+}
+
+export function getBotConfig(): BotConfig {
+  return { ...botConfig };
+}
 
 // ─── In-memory bot state ─────────────────────────────────────────────────────
 export interface BotState {
@@ -87,19 +100,16 @@ async function kalshiFetch(method: string, path: string, body?: unknown): Promis
 //   Net profit   = gross_profit - fee
 
 function grossToNet(grossProfitCents: number): number {
-  const fee = Math.floor(KALSHI_FEE_RATE * grossProfitCents);
+  const fee = Math.floor(botConfig.feeRate * grossProfitCents);
   return grossProfitCents - fee;
 }
 
-// Minimum gross price movement needed to achieve a target net profit
 function netToRequiredGross(netTargetCents: number): number {
-  // net = gross * (1 - FEE_RATE), solve for gross
-  return Math.ceil(netTargetCents / (1 - KALSHI_FEE_RATE));
+  return Math.ceil(netTargetCents / (1 - botConfig.feeRate));
 }
 
-// The limit sell price that gives exactly MIN_NET_PROFIT_CENTS after fees
 function calcTargetSellPrice(buyPriceCents: number): number {
-  return buyPriceCents + netToRequiredGross(MIN_NET_PROFIT_CENTS);
+  return buyPriceCents + netToRequiredGross(botConfig.minNetProfitCents);
 }
 
 // ─── Logging helper ──────────────────────────────────────────────────────────
@@ -138,7 +148,7 @@ async function scanMarkets(): Promise<void> {
     const eligible = markets.filter((m) => {
       if (!m.close_time) return false;
       const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
-      return minutesLeft > MIN_MINUTES_REMAINING && minutesLeft <= 16;
+      return minutesLeft > botConfig.minMinutesRemaining && minutesLeft <= 16;
     });
 
     state.marketsScanned += eligible.length;
@@ -157,7 +167,7 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
 
   // Double-check time gate
   const minutesLeft = (new Date(close_time).getTime() - Date.now()) / 60_000;
-  if (minutesLeft <= MIN_MINUTES_REMAINING) return;
+  if (minutesLeft <= botConfig.minMinutesRemaining) return;
 
   // Skip if we already have an open position in this market
   if (openMarkets.has(ticker)) return;
@@ -169,14 +179,14 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
 
     const yesAsk = m.yes_ask ?? 0;
     const noAsk = m.no_ask ?? 0;
+    const { maxEntryPriceCents, minNetProfitCents } = botConfig;
 
-    // Check YES side: enter if ask ≤ 59¢
-    if (yesAsk > 0 && yesAsk <= MAX_ENTRY_PRICE_CENTS) {
+    // Check YES side: enter if ask ≤ maxEntryPriceCents
+    if (yesAsk > 0 && yesAsk <= maxEntryPriceCents) {
       const targetSell = calcTargetSellPrice(yesAsk);
-      // Sanity: target sell must be below 100 and yield net profit in range
-      const maxNet = grossToNet((MAX_ENTRY_PRICE_CENTS + 1) - yesAsk);
-      if (targetSell < 100 && maxNet >= MIN_NET_PROFIT_CENTS) {
-        await botLog("info", `Entry signal: ${title} — buy YES at ${yesAsk}¢, target sell ${targetSell}¢ (≥${MIN_NET_PROFIT_CENTS}¢ net)`, {
+      const maxNet = grossToNet((maxEntryPriceCents + 1) - yesAsk);
+      if (targetSell < 100 && maxNet >= minNetProfitCents) {
+        await botLog("info", `Entry signal: ${title} — buy YES at ${yesAsk}¢, target sell ${targetSell}¢ (≥${minNetProfitCents}¢ net)`, {
           ticker, yesAsk, targetSell, minutesLeft: minutesLeft.toFixed(1),
         });
         state.tradesAttempted++;
@@ -185,12 +195,12 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
       }
     }
 
-    // Check NO side: enter if no_ask ≤ 59¢
-    if (noAsk > 0 && noAsk <= MAX_ENTRY_PRICE_CENTS) {
+    // Check NO side: enter if no_ask ≤ maxEntryPriceCents
+    if (noAsk > 0 && noAsk <= maxEntryPriceCents) {
       const targetSell = calcTargetSellPrice(noAsk);
-      const maxNet = grossToNet((MAX_ENTRY_PRICE_CENTS + 1) - noAsk);
-      if (targetSell < 100 && maxNet >= MIN_NET_PROFIT_CENTS) {
-        await botLog("info", `Entry signal: ${title} — buy NO at ${noAsk}¢, target sell ${targetSell}¢ (≥${MIN_NET_PROFIT_CENTS}¢ net)`, {
+      const maxNet = grossToNet((maxEntryPriceCents + 1) - noAsk);
+      if (targetSell < 100 && maxNet >= minNetProfitCents) {
+        await botLog("info", `Entry signal: ${title} — buy NO at ${noAsk}¢, target sell ${targetSell}¢ (≥${minNetProfitCents}¢ net)`, {
           ticker, noAsk, targetSell, minutesLeft: minutesLeft.toFixed(1),
         });
         state.tradesAttempted++;
@@ -339,8 +349,8 @@ async function retryOpenPositions(): Promise<void> {
         const grossProfit = currentBid - trade.buyPriceCents;
         const netProfit = grossToNet(grossProfit);
 
-        // Exit if net profit is in the 5–25 cent target range
-        if (netProfit >= MIN_NET_PROFIT_CENTS) {
+        // Exit if net profit has reached the minimum target
+        if (netProfit >= botConfig.minNetProfitCents) {
           await botLog("info",
             `🎯 Price hit target for trade ${trade.id}: bid ${currentBid}¢, net profit ${netProfit}¢ — exiting`,
             { tradeId: trade.id, currentBid, netProfit },
@@ -378,8 +388,8 @@ export async function startBot(): Promise<BotState> {
   );
 
   scanMarkets();
-  scanTimer = setInterval(scanMarkets, POLL_INTERVAL_MS);
-  sellTimer = setInterval(retryOpenPositions, SELL_RETRY_MS);
+  scanTimer = setInterval(scanMarkets, botConfig.pollIntervalSecs * 1000);
+  sellTimer = setInterval(retryOpenPositions, 8_000);
 
   return getBotState();
 }

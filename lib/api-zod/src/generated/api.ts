@@ -29,6 +29,63 @@ export const GetBotStatusResponse = zod.object({
 });
 
 /**
+ * @summary Get bot configuration
+ */
+export const GetBotConfigResponse = zod.object({
+  maxEntryPriceCents: zod
+    .number()
+    .describe(
+      "Only enter if ask price per contract is at or below this (cents)",
+    ),
+  minNetProfitCents: zod
+    .number()
+    .describe("Minimum net profit to exit (cents, after fees)"),
+  maxNetProfitCents: zod
+    .number()
+    .describe("Maximum net profit target (cents, after fees)"),
+  minMinutesRemaining: zod
+    .number()
+    .describe("Skip market if this many minutes or fewer remain"),
+  feeRate: zod.number().describe("Kalshi fee rate on profit (e.g. 0.07 = 7%)"),
+  pollIntervalSecs: zod
+    .number()
+    .describe("How often to scan markets (seconds)"),
+});
+
+/**
+ * @summary Update bot configuration
+ */
+export const UpdateBotConfigBody = zod.object({
+  maxEntryPriceCents: zod.number().optional(),
+  minNetProfitCents: zod.number().optional(),
+  maxNetProfitCents: zod.number().optional(),
+  minMinutesRemaining: zod.number().optional(),
+  feeRate: zod.number().optional(),
+  pollIntervalSecs: zod.number().optional(),
+});
+
+export const UpdateBotConfigResponse = zod.object({
+  maxEntryPriceCents: zod
+    .number()
+    .describe(
+      "Only enter if ask price per contract is at or below this (cents)",
+    ),
+  minNetProfitCents: zod
+    .number()
+    .describe("Minimum net profit to exit (cents, after fees)"),
+  maxNetProfitCents: zod
+    .number()
+    .describe("Maximum net profit target (cents, after fees)"),
+  minMinutesRemaining: zod
+    .number()
+    .describe("Skip market if this many minutes or fewer remain"),
+  feeRate: zod.number().describe("Kalshi fee rate on profit (e.g. 0.07 = 7%)"),
+  pollIntervalSecs: zod
+    .number()
+    .describe("How often to scan markets (seconds)"),
+});
+
+/**
  * @summary Start the bot
  */
 export const StartBotResponse = zod.object({
