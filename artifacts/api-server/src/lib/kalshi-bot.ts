@@ -707,6 +707,12 @@ export async function startBot(): Promise<BotState> {
   zeroPriceTs.clear();     // fresh start — re-evaluate all markets
   lastIdleScanLogMs = 0;   // always show first scan result
 
+  // Re-hydrate openMarkets from DB so the in-memory set is accurate after a restart
+  const existingOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+  openMarkets.clear();
+  for (const t of existingOpen) openMarkets.add(t.marketId);
+  state.openPositionCount = openMarkets.size;
+
   await refreshBalance();
   await refreshDailyPnl();
 
@@ -867,8 +873,10 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       return { success: false, message: "Safety limit reached (balance floor / daily limit) — coin flip blocked." };
     }
 
-    // Respect max open positions — don't add a bet if one is already open
-    if (openMarkets.size >= botConfig.maxOpenPositions) {
+    // Respect max open positions — query DB directly so this is always accurate after restarts
+    const openRows = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+    const effectiveOpen = Math.max(openMarkets.size, openRows.length);
+    if (effectiveOpen >= botConfig.maxOpenPositions) {
       return { success: false, message: `Max open positions (${botConfig.maxOpenPositions}) already reached — coin flip blocked.` };
     }
 
