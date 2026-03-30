@@ -141,11 +141,23 @@ let balanceTimer: NodeJS.Timeout | null = null;
 function signRequest(method: string, path: string, timestampMs: number): string {
   const msg = `${timestampMs}${method.toUpperCase()}${path}`;
   const key = loadPrivateKey();
-  const sig = crypto.sign("sha256", Buffer.from(msg), {
-    key,
-    padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-    saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
-  });
+  const keyType = key.asymmetricKeyType ?? "";
+
+  let sig: Buffer;
+  if (keyType === "ed25519" || keyType === "ed448") {
+    // EdDSA keys — no hash algorithm needed
+    sig = crypto.sign(null, Buffer.from(msg), key);
+  } else if (keyType === "ec") {
+    // ECDSA keys
+    sig = crypto.sign("sha256", Buffer.from(msg), key);
+  } else {
+    // RSA / RSA-PSS (default Kalshi format)
+    sig = crypto.sign("sha256", Buffer.from(msg), {
+      key,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+    });
+  }
   return sig.toString("base64");
 }
 
