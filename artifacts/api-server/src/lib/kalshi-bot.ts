@@ -707,39 +707,41 @@ export async function startBot(): Promise<BotState> {
     const diagKey = loadPrivateKey();
     const keyType = diagKey.asymmetricKeyType ?? "unknown";
     const keyIdLen = API_KEY_ID.length;
-    const pemFirstLine = PRIVATE_KEY_PEM.split("\n")[0];
-    const testTs = Date.now();
-    const testMsg = `${testTs}GET/portfolio/balance`;
-    logger.info({ keyType, keyIdLen, pemFirstLine, testMsg }, "KEY_DIAGNOSTIC");
+    const pemLines = PRIVATE_KEY_PEM.split("\n").length;
+    // Derive and log the public key so we can compare against what's on Kalshi
+    const pubKey = crypto.createPublicKey(diagKey);
+    const pubPem = pubKey.export({ type: "pkcs1", format: "pem" }).toString();
+    const pubB64 = pubPem
+      .replace(/-----BEGIN.*-----/, "")
+      .replace(/-----END.*-----/, "")
+      .replace(/\s/g, "");
+    logger.info({ keyType, keyIdLen, pemLines, pubKeyB64Prefix: pubB64.slice(0, 40) }, "KEY_DIAGNOSTIC");
+    logger.info({ pubKeyPem: pubPem }, "PUBLIC_KEY_DERIVED");
   } catch (e) {
     logger.error({ err: String(e) }, "KEY_LOAD_FAILED");
   }
-  // Test both PSS and PKCS1v15 to determine which Kalshi accepts
-  for (const [label, padding, saltLen] of [
-    ["PKCS1v15", crypto.constants.RSA_PKCS1_PADDING, undefined] as const,
-    ["PSS-MAX",  crypto.constants.RSA_PKCS1_PSS_PADDING, -2]    as const,
-  ]) {
-    try {
-      const ts2 = Date.now();
-      const msg2 = `${ts2}GET/portfolio/balance`;
-      const key2 = loadPrivateKey();
-      const sigBuf = saltLen !== undefined
-        ? crypto.sign("sha256", Buffer.from(msg2), { key: key2, padding, saltLength: saltLen })
-        : crypto.sign("sha256", Buffer.from(msg2), { key: key2, padding });
-      const sig2 = sigBuf.toString("base64");
-      const r = await fetch(`${KALSHI_BASE}/portfolio/balance`, {
-        headers: {
-          "KALSHI-ACCESS-KEY": API_KEY_ID,
-          "KALSHI-ACCESS-SIGNATURE": sig2,
-          "KALSHI-ACCESS-TIMESTAMP": String(ts2),
-          "Content-Type": "application/json",
-        },
-      });
-      const body2 = await r.text();
-      logger.info({ label, status: r.status, body: body2.slice(0, 200) }, "AUTH_TEST");
-    } catch (e) {
-      logger.error({ label, err: String(e) }, "AUTH_TEST_ERR");
-    }
+  // Test PSS auth
+  try {
+    const ts2 = Date.now();
+    const msg2 = `${ts2}GET/portfolio/balance`;
+    const key2 = loadPrivateKey();
+    const sigBuf = crypto.sign("sha256", Buffer.from(msg2), {
+      key: key2,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: -2,
+    });
+    const r = await fetch(`${KALSHI_BASE}/portfolio/balance`, {
+      headers: {
+        "KALSHI-ACCESS-KEY": API_KEY_ID,
+        "KALSHI-ACCESS-SIGNATURE": sigBuf.toString("base64"),
+        "KALSHI-ACCESS-TIMESTAMP": String(ts2),
+        "Content-Type": "application/json",
+      },
+    });
+    const body2 = await r.text();
+    logger.info({ status: r.status, body: body2.slice(0, 300) }, "PSS_AUTH_TEST");
+  } catch (e) {
+    logger.error({ err: String(e) }, "PSS_AUTH_TEST_ERR");
   }
   // ────────────────────────────────────────────────────────────────────────────
 
