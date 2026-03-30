@@ -6,7 +6,50 @@ import { eq, gte, sql } from "drizzle-orm";
 // ─── Kalshi API config ───────────────────────────────────────────────────────
 const KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
-const PRIVATE_KEY_PEM = (process.env.KALSHI_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
+
+function normalizePrivateKey(raw: string): string {
+  // Replace literal \n sequences with real newlines
+  let pem = raw.replace(/\\n/g, "\n");
+
+  // If it looks like it has no newlines at all and contains PEM markers,
+  // split the base64 body into 64-char lines
+  if (!pem.includes("\n") && pem.includes("-----")) {
+    const beginMatch = pem.match(/(-----BEGIN [^-]+-----)/);
+    const endMatch   = pem.match(/(-----END [^-]+-----)/);
+    if (beginMatch && endMatch) {
+      const begin = beginMatch[1];
+      const end   = endMatch[1];
+      const b64   = pem.slice(begin.length, pem.indexOf(end)).replace(/\s/g, "");
+      const lines = b64.match(/.{1,64}/g) ?? [];
+      pem = `${begin}\n${lines.join("\n")}\n${end}`;
+    }
+  }
+
+  // If the secret is raw base64 (no PEM headers), wrap it as PKCS8
+  if (!pem.includes("-----BEGIN")) {
+    const b64    = pem.replace(/\s/g, "");
+    const lines  = b64.match(/.{1,64}/g) ?? [];
+    pem = `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----`;
+  }
+
+  return pem.trim();
+}
+
+const PRIVATE_KEY_PEM = normalizePrivateKey(process.env.KALSHI_PRIVATE_KEY ?? "");
+
+function loadPrivateKey(): crypto.KeyObject {
+  // Try PKCS8 first (-----BEGIN PRIVATE KEY-----), then PKCS1 (-----BEGIN RSA PRIVATE KEY-----)
+  const types: Array<"pkcs8" | "pkcs1"> = ["pkcs8", "pkcs1"];
+  for (const type of types) {
+    try {
+      return crypto.createPrivateKey({ key: PRIVATE_KEY_PEM, format: "pem", type });
+    } catch (_) {
+      // try next type
+    }
+  }
+  // Final fallback — let Node auto-detect
+  return crypto.createPrivateKey({ key: PRIVATE_KEY_PEM, format: "pem" });
+}
 
 // ─── Crypto series ticker prefixes ───────────────────────────────────────────
 const CRYPTO_COIN_SERIES: Record<string, string[]> = {
@@ -97,7 +140,7 @@ let balanceTimer: NodeJS.Timeout | null = null;
 // ─── Kalshi signing helper ───────────────────────────────────────────────────
 function signRequest(method: string, path: string, timestampMs: number): string {
   const msg = `${timestampMs}${method.toUpperCase()}${path}`;
-  const key = crypto.createPrivateKey({ key: PRIVATE_KEY_PEM, format: "pem" });
+  const key = loadPrivateKey();
   const sig = crypto.sign("sha256", Buffer.from(msg), {
     key,
     padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
