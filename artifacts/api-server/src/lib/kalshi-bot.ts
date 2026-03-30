@@ -856,6 +856,12 @@ export interface CoinFlipResult {
 
 export async function coinFlipTrade(): Promise<CoinFlipResult> {
   try {
+    // Respect the same safety guards as the main bot
+    const safe = await checkSafetyLimits();
+    if (!safe) {
+      return { success: false, message: "Safety limit reached (balance floor / daily limit) — coin flip blocked." };
+    }
+
     const now = Date.now();
     const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
     const resp = await kalshiFetch("GET", `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`) as { markets?: KalshiMarket[] };
