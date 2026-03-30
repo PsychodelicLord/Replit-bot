@@ -53,13 +53,13 @@ function loadPrivateKey(): crypto.KeyObject {
 
 // ─── Crypto series ticker prefixes ───────────────────────────────────────────
 const CRYPTO_COIN_SERIES: Record<string, string[]> = {
-  BTC:  ["KXBTC", "BTCUSD"],
-  ETH:  ["KXETH", "ETHUSD"],
-  SOL:  ["KXSOL", "SOLUSD"],
-  DOGE: ["KXDOGE", "DOGEUSD"],
-  XRP:  ["KXXRP", "XRPUSD"],
-  ADA:  ["KXADA", "ADAUSD"],
-  MATIC:["KXMATIC","MATICUSD"],
+  BTC:  ["KXBTC15M"],
+  ETH:  ["KXETH15M"],
+  SOL:  ["KXSOL15M"],
+  DOGE: ["KXDOGE15M"],
+  XRP:  ["KXXRP15M"],
+  ADA:  ["KXADA15M"],
+  MATIC:["KXMATIC15M"],
 };
 
 const SPORTS_KEYWORDS = ["NFL", "NBA", "MLB", "NHL", "NCAAB", "NCAAF", "MLS", "EPL", "FIFA", "UEFA", "tennis", "golf"];
