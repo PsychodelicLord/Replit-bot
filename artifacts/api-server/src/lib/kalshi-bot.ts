@@ -4,7 +4,7 @@ import { logger } from "./logger";
 import { eq, gte, sql } from "drizzle-orm";
 
 // ─── Kalshi API config ───────────────────────────────────────────────────────
-const KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2";
+const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
 
 function normalizePrivateKey(raw: string): string {
