@@ -159,11 +159,10 @@ function signRequest(method: string, path: string, timestampMs: number): string 
     // ECDSA keys
     sig = crypto.sign("sha256", Buffer.from(msg), key);
   } else {
-    // RSA / RSA-PSS (default Kalshi format)
+    // RSA PKCS1 v1.5 (SHA-256) — required by elections.kalshi.com trade API
     sig = crypto.sign("sha256", Buffer.from(msg), {
       key,
-      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+      padding: crypto.constants.RSA_PKCS1_PADDING,
     });
   }
   return sig.toString("base64");
@@ -702,6 +701,26 @@ export async function startBot(): Promise<BotState> {
   state.stoppedReason = null;
   zeroPriceTs.clear();     // fresh start — re-evaluate all markets
   lastIdleScanLogMs = 0;   // always show first scan result
+
+  // ── Startup diagnostic ──────────────────────────────────────────────────────
+  try {
+    const diagKey = loadPrivateKey();
+    const keyType = diagKey.asymmetricKeyType ?? "unknown";
+    const keyIdLen = API_KEY_ID.length;
+    const pemFirstLine = PRIVATE_KEY_PEM.split("\n")[0];
+    const testTs = Date.now();
+    const testMsg = `${testTs}GET/portfolio/balance`;
+    logger.info({ keyType, keyIdLen, pemFirstLine, testMsg }, "KEY_DIAGNOSTIC");
+  } catch (e) {
+    logger.error({ err: String(e) }, "KEY_LOAD_FAILED");
+  }
+  try {
+    const balRaw = await kalshiFetch("GET", "/portfolio/balance");
+    logger.info({ balRaw }, "BALANCE_RAW_RESPONSE");
+  } catch (e) {
+    logger.error({ err: String(e) }, "BALANCE_FETCH_FAILED");
+  }
+  // ────────────────────────────────────────────────────────────────────────────
 
   await refreshBalance();
   await refreshDailyPnl();
