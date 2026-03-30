@@ -906,8 +906,8 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const fallbackSide: "YES" | "NO" = coinYes ? "NO" : "YES";
     const fallbackAsk  = coinYes ? noAsk : yesAsk;
 
-    // Coin flip respects the same max entry price as the main bot
-    const COIN_FLIP_MAX_CENTS = botConfig.maxEntryPriceCents;
+    // Coin flip hard cap: never spend more than 60¢ per flip
+    const COIN_FLIP_MAX_CENTS = 60;
 
     // Pick the flipped side if valid, otherwise try the other side
     let side: "YES" | "NO" | null = null;
