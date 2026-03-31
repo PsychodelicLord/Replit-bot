@@ -827,15 +827,26 @@ const coinFlipAuto: CoinFlipAutoState = {
 
 let coinFlipTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Returns ms until 90 seconds into the next :00/:15/:30/:45 UTC cycle boundary. */
+function msToNextCycleStart(): number {
+  const now = Date.now();
+  const CYCLE_MS = 15 * 60_000;
+  const remainder = now % CYCLE_MS;
+  const msToNextBoundary = CYCLE_MS - remainder;
+  // Fire 90s after the boundary so new markets are open and priced
+  return msToNextBoundary + 90_000;
+}
+
 function scheduleCoinFlip() {
   if (coinFlipTimer) clearTimeout(coinFlipTimer);
   if (!coinFlipAuto.enabled) return;
-  coinFlipAuto.nextFlipAt = Date.now() + coinFlipAuto.intervalSecs * 1000;
+  const delay = msToNextCycleStart();
+  coinFlipAuto.nextFlipAt = Date.now() + delay;
   coinFlipTimer = setTimeout(async () => {
     if (!coinFlipAuto.enabled) return;
     // Don't fire when the main bot is stopped
     if (!state.running) {
-      scheduleCoinFlip(); // reschedule — will fire once bot is back on
+      scheduleCoinFlip(); // reschedule for next cycle
       return;
     }
     try {
@@ -843,7 +854,7 @@ function scheduleCoinFlip() {
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
     } catch (_) {}
     scheduleCoinFlip();
-  }, coinFlipAuto.intervalSecs * 1000);
+  }, delay);
 }
 
 export function startCoinFlipAuto(intervalSecs: number): CoinFlipAutoState {
