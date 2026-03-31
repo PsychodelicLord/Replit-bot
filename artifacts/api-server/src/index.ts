@@ -1,6 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { retryOpenPositions } from "./lib/kalshi-bot";
+import { retryOpenPositions, refreshBalance } from "./lib/kalshi-bot";
 
 const rawPort = process.env["PORT"];
 
@@ -28,4 +28,8 @@ app.listen(port, (err) => {
   // This ensures coin flip trades (and any other open positions) are auto-sold
   // even when the main bot hasn't been started.
   setInterval(retryOpenPositions, 5_000);
+
+  // Global balance refresh — keeps the dashboard balance live even when main bot is off.
+  refreshBalance();
+  setInterval(refreshBalance, 60_000);
 });

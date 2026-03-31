@@ -264,7 +264,7 @@ async function botLog(level: string, message: string, data?: unknown): Promise<v
 }
 
 // ─── Fetch and update account balance ────────────────────────────────────────
-async function refreshBalance(): Promise<void> {
+export async function refreshBalance(): Promise<void> {
   try {
     const resp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { balance?: number } };
     const balanceDollars = resp?.balance?.balance ?? 0;
