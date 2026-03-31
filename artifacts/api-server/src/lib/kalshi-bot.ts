@@ -939,27 +939,14 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const yesAsk = priceCents(m, "yes_ask");
     const noAsk  = priceCents(m, "no_ask");
 
-    // Flip the coin
+    // Flip the coin — strictly follow the result, no fallback to other side
     const coinYes = Math.random() < 0.5;
-    const preferredSide: "YES" | "NO" = coinYes ? "YES" : "NO";
-    const preferredAsk = coinYes ? yesAsk : noAsk;
-    const fallbackSide: "YES" | "NO" = coinYes ? "NO" : "YES";
-    const fallbackAsk  = coinYes ? noAsk : yesAsk;
+    const side: "YES" | "NO" = coinYes ? "YES" : "NO";
+    const ask = coinYes ? yesAsk : noAsk;
 
-    // Coin flip hard cap: never spend more than 60¢ per flip
-    const COIN_FLIP_MAX_CENTS = 60;
-
-    // Pick the flipped side if valid, otherwise try the other side
-    let side: "YES" | "NO" | null = null;
-    let ask = 0;
-    if (preferredAsk > 0 && preferredAsk <= COIN_FLIP_MAX_CENTS) {
-      side = preferredSide; ask = preferredAsk;
-    } else if (fallbackAsk > 0 && fallbackAsk <= COIN_FLIP_MAX_CENTS) {
-      side = fallbackSide; ask = fallbackAsk;
-    }
-
-    if (!side) {
-      return { success: false, message: `Flipped ${preferredSide} on ${ticker} but no valid ask price under ${COIN_FLIP_MAX_CENTS}¢ (YES:${yesAsk}¢ NO:${noAsk}¢).` };
+    // Only block if price is 90¢ or above
+    if (ask <= 0 || ask >= 90) {
+      return { success: false, message: `Coin landed ${side} on ${ticker} but ask is ${ask}¢ — skipping (must be under 90¢).` };
     }
 
     const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
@@ -994,7 +981,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     state.tradesSucceeded++;
 
     await botLog("info",
-      `🪙 Coin flip: ${side === preferredSide ? "called it!" : "landed " + side} — bought 1x ${side} on "${title}" at ${ask}¢`,
+      `🪙 Coin flip: landed ${side} — bought 1x ${side} on "${title}" at ${ask}¢`,
       { tradeId: trade.id, buyOrderId, ticker, side, ask },
     );
 
