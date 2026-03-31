@@ -632,10 +632,14 @@ async function placeLimitSell(
 let sellMonitorRunning = false;
 export async function retryOpenPositions(): Promise<void> {
   if (sellMonitorRunning) return; // prevent overlapping runs
+  // Fast in-memory check — skip DB round-trip when nothing is open
+  if (openMarkets.size === 0 && state.openPositionCount === 0) return;
   sellMonitorRunning = true;
   try {
     const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
     state.openPositionCount = openTrades.length;
+    // Sync in-memory set with DB (handles restarts where openMarkets was empty but DB has open trades)
+    if (openTrades.length === 0) { openMarkets.clear(); return; }
 
     for (const trade of openTrades) {
       const now = Date.now();
