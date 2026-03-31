@@ -593,14 +593,14 @@ async function placeLimitSell(
   tradeId: number,
   ticker: string,
   side: string,
-  buyPriceCents: number,
+  _buyPriceCents: number,
   sellPriceCents: number,
   contracts: number,
 ): Promise<void> {
   try {
     const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
-      client_order_id: `scalp-sell-${Date.now()}`,
+      client_order_id: `scalp-sell-${tradeId}-${Date.now()}`,
       type: "limit",
       action: "sell",
       side: side.toLowerCase(),
@@ -609,28 +609,19 @@ async function placeLimitSell(
     }) as { order?: { order_id?: string } };
 
     const sellOrderId = sellResp?.order?.order_id;
-    const grossProfit = (sellPriceCents - buyPriceCents) * contracts;
-    const fee = Math.floor(botConfig.feeRate * grossProfit);
-    const netPnl = grossProfit - fee;
+    if (!sellOrderId) {
+      await botLog("warn", `Trade ${tradeId}: sell order accepted but no order ID returned — will retry next cycle`);
+      return;
+    }
 
-    await db.update(tradesTable).set({
-      sellPriceCents,
-      pnlCents: netPnl,
-      feeCents: fee,
-      status: "closed",
-      kalshiSellOrderId: sellOrderId,
-      closedAt: new Date(),
-    }).where(eq(tradesTable.id, tradeId));
+    // Save sell order ID only — keep trade "open" until fill is confirmed by the monitor loop
+    await db.update(tradesTable)
+      .set({ kalshiSellOrderId: sellOrderId })
+      .where(eq(tradesTable.id, tradeId));
 
-    openMarkets.delete(ticker);
-    state.openPositionCount = openMarkets.size;
-    state.totalPnlCents += netPnl;
-    state.dailyPnlCents += netPnl;
-
-    await botLog(
-      netPnl > 0 ? "info" : "warn",
-      `📤 Sold 1x ${side} on ${ticker} at ${sellPriceCents}¢ — net P&L: ${netPnl > 0 ? "+" : ""}${netPnl}¢ (fee: ${fee}¢)`,
-      { tradeId, sellPriceCents, grossProfit, fee, netPnl },
+    await botLog("info",
+      `📋 Trade ${tradeId}: limit sell @ ${sellPriceCents}¢ placed (order ${sellOrderId}) — waiting for fill`,
+      { tradeId, sellPriceCents, sellOrderId },
     );
   } catch (err) {
     await botLog("warn", `Failed to place limit sell for trade ${tradeId}`, String(err));
@@ -713,8 +704,6 @@ export async function retryOpenPositions(): Promise<void> {
 
           openMarkets.delete(trade.marketId);
           state.openPositionCount = openMarkets.size;
-          state.totalPnlCents += pnlCents;
-          state.dailyPnlCents += pnlCents;
           await botLog(ourSideWon ? "info" : "warn", logMsg, { tradeId: trade.id });
           continue;
         }
@@ -755,8 +744,6 @@ export async function retryOpenPositions(): Promise<void> {
                 }).where(eq(tradesTable.id, trade.id));
                 openMarkets.delete(trade.marketId);
                 state.openPositionCount = openMarkets.size;
-                state.totalPnlCents += netPnl;
-                state.dailyPnlCents += netPnl;
                 await botLog("info", `✅ Sell order filled — trade ${trade.id} closed at ${fillPrice}¢, net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`, { tradeId: trade.id });
               } else {
                 await botLog("info", `📋 Trade ${trade.id}: resting sell @ ${targetSellPrice}¢ pending | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left`);
@@ -830,12 +817,12 @@ export async function retryOpenPositions(): Promise<void> {
           }).where(eq(tradesTable.id, trade.id));
           openMarkets.delete(trade.marketId);
           state.openPositionCount = openMarkets.size;
-          state.totalPnlCents -= trade.buyPriceCents;
-          state.dailyPnlCents -= trade.buyPriceCents;
           await botLog("warn", `⚠️ Trade ${trade.id} force-expired after 20min (API unreachable)`, { tradeId: trade.id });
         }
       }
     }
+    // Refresh daily P&L from DB after processing all trades — single source of truth
+    await refreshDailyPnl();
   } catch (err) {
     logger.error({ err }, "retryOpenPositions failed");
   } finally {

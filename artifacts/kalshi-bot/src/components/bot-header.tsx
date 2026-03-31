@@ -1,4 +1,4 @@
-import { useGetBotStatus, useStartBot, useStopBot } from "@workspace/api-client-react";
+import { useGetBotStatus, useGetTradeStats, useStartBot, useStopBot } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Switch } from "@/components/ui/switch";
 import { Zap, Power, TrendingUp, Wallet } from "lucide-react";
@@ -6,6 +6,7 @@ import { Zap, Power, TrendingUp, Wallet } from "lucide-react";
 export function BotHeader() {
   const queryClient = useQueryClient();
   const { data: status } = useGetBotStatus({ query: { refetchInterval: 3000 } });
+  const { data: stats } = useGetTradeStats({ query: { refetchInterval: 5000 } });
 
   const startMutation = useStartBot({
     mutation: { onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] }) },
@@ -17,7 +18,8 @@ export function BotHeader() {
   const isRunning = status?.running || false;
   const isPending = startMutation.isPending || stopMutation.isPending;
 
-  const dailyPnl = status?.dailyPnlCents ?? 0;
+  // Use DB-sourced today P&L from stats — avoids in-memory state overwrite issues
+  const dailyPnl = stats?.todayPnlCents ?? 0;
   const balanceCents = status?.balanceCents ?? 0;
 
   const handleToggle = (checked: boolean) => {
