@@ -605,7 +605,7 @@ async function placeLimitSell(
       action: "sell",
       side: side.toLowerCase(),
       count: contracts,
-      ...(side === "YES" ? { yes_price: sellPriceCents } : { no_price: sellPriceCents }),
+      ...(side === "YES" ? { yes_price: sellPriceCents / 100 } : { no_price: sellPriceCents / 100 }),
     }) as { order?: { order_id?: string } };
 
     const sellOrderId = sellResp?.order?.order_id;
