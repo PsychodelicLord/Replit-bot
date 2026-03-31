@@ -11,6 +11,13 @@ if (!process.env.DATABASE_URL) {
 }
 
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Prevent unhandled 'error' events from crashing the process when the DB
+// drops a connection (e.g. admin restart, idle timeout). The pool auto-reconnects.
+pool.on("error", (err) => {
+  console.error("[db-pool] unexpected connection error (non-fatal):", err.message);
+});
+
 export const db = drizzle(pool, { schema });
 
 export * from "./schema";
