@@ -70,6 +70,7 @@ export interface BotConfig {
   minNetProfitCents: number;
   maxNetProfitCents: number;
   minMinutesRemaining: number;
+  exitWindowMins: number;       // place limit sell when this many minutes remain
   feeRate: number;
   pollIntervalSecs: number;
   marketCategories: string[];   // ["crypto"], ["sports"], ["crypto","sports"] = all
@@ -85,6 +86,7 @@ export const botConfig: BotConfig = {
   minNetProfitCents: 5,
   maxNetProfitCents: 99,
   minMinutesRemaining: 10,
+  exitWindowMins: 7,
   feeRate: 0.07,
   pollIntervalSecs: 5,
   marketCategories: ["crypto", "sports"],
@@ -716,29 +718,91 @@ export async function retryOpenPositions(): Promise<void> {
         }
 
         const currentBid = trade.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
-        const grossProfit = currentBid - trade.buyPriceCents;
-        const netProfit = grossToNet(grossProfit);
         const ageMins = (tradeAgeMs / 60_000).toFixed(1);
         const minsLeft = (new Date(m.close_time).getTime() - now) / 60_000;
+        const targetSellPrice = calcTargetSellPrice(trade.buyPriceCents);
 
-        if (netProfit >= botConfig.minNetProfitCents) {
-          // Hit profit target — exit
+        // ── Sell order already placed on Kalshi — check fill status ──────────
+        if (trade.kalshiSellOrderId) {
+          if (minsLeft <= 2) {
+            // Panic window: cancel resting sell and re-place at current bid
+            try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiSellOrderId}`); } catch (_) {}
+            await db.update(tradesTable).set({ kalshiSellOrderId: null }).where(eq(tradesTable.id, trade.id));
+            if (currentBid > 0) {
+              await botLog("warn", `⏰ Trade ${trade.id} panic — cancelled resting sell, re-placing at bid ${currentBid}¢`, { tradeId: trade.id });
+              await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+            }
+          } else {
+            // Check if the resting sell order was filled
+            try {
+              const sellOrderResp = await kalshiFetch("GET", `/portfolio/orders/${trade.kalshiSellOrderId}`) as {
+                order?: { status?: string; filled_count?: number; yes_price?: number; no_price?: number }
+              };
+              const sellOrder = sellOrderResp.order;
+              const filled = (sellOrder?.filled_count ?? 0) > 0;
+              if (filled) {
+                // Fill confirmed — record P&L
+                const fillPrice = trade.side === "YES"
+                  ? Math.round((sellOrder?.yes_price ?? targetSellPrice / 100) * 100)
+                  : Math.round((sellOrder?.no_price ?? targetSellPrice / 100) * 100);
+                const gross = fillPrice - trade.buyPriceCents;
+                const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
+                const netPnl = gross - fee;
+                await db.update(tradesTable).set({
+                  status: "closed", sellPriceCents: fillPrice, pnlCents: netPnl, feeCents: fee, closedAt: new Date(),
+                }).where(eq(tradesTable.id, trade.id));
+                openMarkets.delete(trade.marketId);
+                state.openPositionCount = openMarkets.size;
+                state.totalPnlCents += netPnl;
+                state.dailyPnlCents += netPnl;
+                await botLog("info", `✅ Sell order filled — trade ${trade.id} closed at ${fillPrice}¢, net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`, { tradeId: trade.id });
+              } else {
+                await botLog("info", `📋 Trade ${trade.id}: resting sell @ ${targetSellPrice}¢ pending | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left`);
+              }
+            } catch (_) {
+              await botLog("info", `📋 Trade ${trade.id}: sell order pending | ${minsLeft.toFixed(1)}min left`);
+            }
+          }
+
+        // ── Exit window reached — place resting limit sell on Kalshi ─────────
+        } else if (minsLeft <= botConfig.exitWindowMins) {
+          if (targetSellPrice >= 100) {
+            // Target unreachable (e.g. bought at 96¢ trying for 5¢ net) — exit at bid
+            const fallbackPrice = Math.max(currentBid, trade.buyPriceCents + 1);
+            await botLog("warn", `⚠️ Trade ${trade.id} target ${targetSellPrice}¢ unreachable — placing sell at ${fallbackPrice}¢`);
+            await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, fallbackPrice, trade.contractCount);
+          } else {
+            // Place resting limit sell at target — don't mark trade closed yet
+            try {
+              const priceField = trade.side === "YES" ? "yes_price" : "no_price";
+              const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
+                ticker: trade.marketId,
+                client_order_id: `sell-${trade.id}-${Date.now()}`,
+                type: "limit",
+                action: "sell",
+                side: trade.side.toLowerCase(),
+                [priceField]: targetSellPrice / 100,
+                count: trade.contractCount,
+              }) as { order?: { order_id?: string } };
+              const sellOrderId = sellResp.order?.order_id;
+              if (sellOrderId) {
+                await db.update(tradesTable).set({ kalshiSellOrderId: sellOrderId }).where(eq(tradesTable.id, trade.id));
+                await botLog("info",
+                  `📋 Trade ${trade.id}: placed limit sell @ ${targetSellPrice}¢ (net +${botConfig.minNetProfitCents}¢) | ${minsLeft.toFixed(1)}min left`,
+                  { tradeId: trade.id, targetSellPrice },
+                );
+              } else {
+                await botLog("warn", `Trade ${trade.id}: sell order placed but no order ID returned`);
+              }
+            } catch (sellErr) {
+              await botLog("warn", `Trade ${trade.id}: failed to place limit sell — ${String(sellErr)}`);
+            }
+          }
+
+        // ── Still holding — exit window not yet open ──────────────────────────
+        } else {
           await botLog("info",
-            `🎯 Target hit trade ${trade.id}: bid ${currentBid}¢, net +${netProfit}¢ | held ${ageMins}min — exiting`,
-            { tradeId: trade.id, currentBid, netProfit },
-          );
-          await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
-        } else if (minsLeft <= 2 && currentBid > 0) {
-          // <2 min left — panic exit at whatever price to recover something
-          await botLog("warn",
-            `⏰ Trade ${trade.id} panic exit — ${minsLeft.toFixed(1)}min left, bid ${currentBid}¢, net ${netProfit >= 0 ? "+" : ""}${netProfit}¢`,
-            { tradeId: trade.id, currentBid, netProfit },
-          );
-          await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
-        } else if (currentBid > 0) {
-          // Log position status so user can see how close we are
-          await botLog("info",
-            `⏳ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢): bid now ${currentBid}¢, net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | need +${botConfig.minNetProfitCents}¢ | ${ageMins}min held | ${minsLeft.toFixed(1)}min left`,
+            `⏸ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢) holding | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left | sell order opens at ${botConfig.exitWindowMins}min`,
           );
         }
       } catch (err) {

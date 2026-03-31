@@ -19,6 +19,7 @@ interface FormState {
   minNetProfitCents: string;
   maxNetProfitCents: string;
   minMinutesRemaining: string;
+  exitWindowMins: string;
   feeRateDisplay: string;
   pollIntervalSecs: string;
   maxOpenPositions: string;
@@ -40,6 +41,7 @@ const defaults: FormState = {
   minNetProfitCents: "5",
   maxNetProfitCents: "99",
   minMinutesRemaining: "10",
+  exitWindowMins: "7",
   feeRateDisplay: "7",
   pollIntervalSecs: "5",
   maxOpenPositions: "1",
@@ -73,6 +75,7 @@ export function BotSettings() {
       minNetProfitCents: String(config.minNetProfitCents ?? 5),
       maxNetProfitCents: String(config.maxNetProfitCents ?? 25),
       minMinutesRemaining: String(config.minMinutesRemaining ?? 10),
+      exitWindowMins: String((config as any).exitWindowMins ?? 7),
       feeRateDisplay: config.feeRate ? String(Math.round(config.feeRate * 10000) / 100) : "7",
       pollIntervalSecs: String(config.pollIntervalSecs ?? 20),
       maxOpenPositions: String(config.maxOpenPositions ?? 3),
@@ -126,6 +129,7 @@ export function BotSettings() {
           minNetProfitCents: parseInt(form.minNetProfitCents),
           maxNetProfitCents: parseInt(form.maxNetProfitCents),
           minMinutesRemaining: parseInt(form.minMinutesRemaining),
+          exitWindowMins: parseInt(form.exitWindowMins),
           feeRate: parseFloat(form.feeRateDisplay) / 100,
           pollIntervalSecs: parseInt(form.pollIntervalSecs),
           maxOpenPositions: parseInt(form.maxOpenPositions),
@@ -235,10 +239,11 @@ export function BotSettings() {
               <SlidersHorizontal className="w-3.5 h-3.5" />
               Trading Parameters
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
               <SettingField label="Max Entry (¢)" hint="Skip if ask > this" {...field("maxEntryPriceCents")} type="number" />
-              <SettingField label="Min Profit (¢)" hint="Exit when net ≥ this — no upper cap" {...field("minNetProfitCents")} type="number" />
-              <SettingField label="Min Time Left (min)" hint="Skip if ≤ this left" {...field("minMinutesRemaining")} type="number" />
+              <SettingField label="Min Profit (¢)" hint="Target net profit per trade" {...field("minNetProfitCents")} type="number" />
+              <SettingField label="Min Time Left (min)" hint="Skip market if ≤ this left" {...field("minMinutesRemaining")} type="number" />
+              <SettingField label="Sell Window (min)" hint="Place limit sell when this many min remain" {...field("exitWindowMins")} type="number" />
               <SettingField label="Fee Rate (%)" hint="Kalshi fee on profit" {...field("feeRateDisplay")} type="number" step="0.01" />
               <SettingField label="Scan Every (sec)" hint="Lower = faster, more API calls" {...field("pollIntervalSecs")} type="number" />
             </div>

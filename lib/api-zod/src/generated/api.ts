@@ -76,6 +76,9 @@ export const GetBotConfigResponse = zod.object({
   dailyLossLimitCents: zod
     .number()
     .describe("Auto-stop when daily loss reaches this (cents, 0 = disabled)"),
+  exitWindowMins: zod
+    .number()
+    .describe("Place limit sell order when this many minutes remain (e.g. 7)"),
 });
 
 /**
@@ -94,6 +97,7 @@ export const UpdateBotConfigBody = zod.object({
   balanceFloorCents: zod.number().optional(),
   dailyProfitTargetCents: zod.number().optional(),
   dailyLossLimitCents: zod.number().optional(),
+  exitWindowMins: zod.number().optional(),
 });
 
 export const UpdateBotConfigResponse = zod.object({
@@ -139,6 +143,9 @@ export const UpdateBotConfigResponse = zod.object({
   dailyLossLimitCents: zod
     .number()
     .describe("Auto-stop when daily loss reaches this (cents, 0 = disabled)"),
+  exitWindowMins: zod
+    .number()
+    .describe("Place limit sell order when this many minutes remain (e.g. 7)"),
 });
 
 /**
