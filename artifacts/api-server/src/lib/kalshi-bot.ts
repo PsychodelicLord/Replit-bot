@@ -801,9 +801,20 @@ export async function retryOpenPositions(): Promise<void> {
 
         // ── Still holding — exit window not yet open ──────────────────────────
         } else {
-          await botLog("info",
-            `⏸ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢) holding | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left | sell order opens at ${botConfig.exitWindowMins}min`,
-          );
+          const grossProfit = currentBid - trade.buyPriceCents;
+          const netProfit = grossToNet(grossProfit);
+          if (netProfit >= botConfig.minNetProfitCents && currentBid > 0) {
+            // Price already at target — sell immediately, don't wait for exit window
+            await botLog("info",
+              `🎯 Trade ${trade.id}: price hit target early (bid ${currentBid}¢, net +${netProfit}¢) — selling now`,
+              { tradeId: trade.id, currentBid, netProfit },
+            );
+            await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+          } else {
+            await botLog("info",
+              `⏸ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢) holding | bid ${currentBid}¢ | net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | ${minsLeft.toFixed(1)}min left | sell window opens at ${botConfig.exitWindowMins}min`,
+            );
+          }
         }
       } catch (err) {
         await botLog("warn", `Failed to check position ${trade.id}`, String(err));
