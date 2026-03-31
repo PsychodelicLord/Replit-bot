@@ -1073,9 +1073,10 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const side: "YES" | "NO" = coinYes ? "YES" : "NO";
     const ask = coinYes ? yesAsk : noAsk;
 
-    // Only block if price is 90¢ or above
-    if (ask <= 0 || ask >= 90) {
-      return { success: false, message: `Coin landed ${side} on ${ticker} but ask is ${ask}¢ — skipping (must be under 90¢).` };
+    // Respect maxEntryPriceCents setting (also hard-block at 90¢ as absolute ceiling)
+    const maxAsk = Math.min(botConfig.maxEntryPriceCents, 90);
+    if (ask <= 0 || ask > maxAsk) {
+      return { success: false, message: `Coin landed ${side} on ${ticker} but ask is ${ask}¢ — skipping (max entry is ${maxAsk}¢).` };
     }
 
     const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
