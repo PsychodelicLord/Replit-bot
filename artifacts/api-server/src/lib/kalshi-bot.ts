@@ -345,6 +345,8 @@ interface KalshiMarket {
   ticker: string;
   title: string;
   close_time: string;
+  status?: string;         // "open" | "closed" | "settled" | "finalized"
+  result?: string;         // "yes" | "no" (once settled)
   // Legacy cent fields (may be absent — Kalshi now returns _dollars variants)
   yes_bid?: number;
   yes_ask?: number;
@@ -671,48 +673,90 @@ export async function retryOpenPositions(): Promise<void> {
         }
       }
 
-      if (tradeAgeMs > 13 * 60_000) {
-        await db.update(tradesTable).set({
-          status: "expired",
-          pnlCents: -trade.buyPriceCents,
-          closedAt: new Date(),
-        }).where(eq(tradesTable.id, trade.id));
-
-        openMarkets.delete(trade.marketId);
-        state.openPositionCount = openMarkets.size;
-        state.totalPnlCents -= trade.buyPriceCents;
-        state.dailyPnlCents -= trade.buyPriceCents;
-        await botLog("warn",
-          `⚠️ Trade ${trade.id} expired without exit — lost ${trade.buyPriceCents}¢`,
-          { tradeId: trade.id },
-        );
-        continue;
-      }
-
       try {
         const resp = await kalshiFetch("GET", `/markets/${trade.marketId}`) as { market?: KalshiMarket };
         const m = resp.market;
-        if (!m) continue;
+
+        // ── Market settled/closed — record actual outcome ───────────────────
+        if (!m || (m.status && m.status !== "open")) {
+          const settled = m?.status === "settled" || m?.status === "finalized";
+          const ourSideWon = settled && m?.result?.toLowerCase() === trade.side.toLowerCase();
+
+          let pnlCents: number;
+          let logMsg: string;
+
+          if (ourSideWon) {
+            // We won — contract pays out 100¢
+            const gross = 100 - trade.buyPriceCents;
+            const fee = Math.floor(botConfig.feeRate * gross);
+            pnlCents = gross - fee;
+            logMsg = `🏆 Trade ${trade.id} settled YES — won! Net +${pnlCents}¢ (fee: ${fee}¢)`;
+          } else if (settled) {
+            // Settled but our side lost
+            pnlCents = -trade.buyPriceCents;
+            logMsg = `💸 Trade ${trade.id} settled — lost ${trade.buyPriceCents}¢`;
+          } else {
+            // Market closed but not yet settled — use a neutral expiry
+            pnlCents = -trade.buyPriceCents;
+            logMsg = `⚠️ Trade ${trade.id} market closed (status: ${m?.status ?? "unknown"}) — marking expired`;
+          }
+
+          await db.update(tradesTable).set({
+            status: settled && ourSideWon ? "closed" : "expired",
+            pnlCents,
+            closedAt: new Date(),
+          }).where(eq(tradesTable.id, trade.id));
+
+          openMarkets.delete(trade.marketId);
+          state.openPositionCount = openMarkets.size;
+          state.totalPnlCents += pnlCents;
+          state.dailyPnlCents += pnlCents;
+          await botLog(ourSideWon ? "info" : "warn", logMsg, { tradeId: trade.id });
+          continue;
+        }
 
         const currentBid = trade.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const grossProfit = currentBid - trade.buyPriceCents;
         const netProfit = grossToNet(grossProfit);
         const ageMins = (tradeAgeMs / 60_000).toFixed(1);
+        const minsLeft = (new Date(m.close_time).getTime() - now) / 60_000;
 
         if (netProfit >= botConfig.minNetProfitCents) {
+          // Hit profit target — exit
           await botLog("info",
             `🎯 Target hit trade ${trade.id}: bid ${currentBid}¢, net +${netProfit}¢ | held ${ageMins}min — exiting`,
+            { tradeId: trade.id, currentBid, netProfit },
+          );
+          await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+        } else if (minsLeft <= 2 && currentBid > 0) {
+          // <2 min left — panic exit at whatever price to recover something
+          await botLog("warn",
+            `⏰ Trade ${trade.id} panic exit — ${minsLeft.toFixed(1)}min left, bid ${currentBid}¢, net ${netProfit >= 0 ? "+" : ""}${netProfit}¢`,
             { tradeId: trade.id, currentBid, netProfit },
           );
           await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
         } else if (currentBid > 0) {
           // Log position status so user can see how close we are
           await botLog("info",
-            `⏳ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢): bid now ${currentBid}¢, net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | need +${botConfig.minNetProfitCents}¢ | ${ageMins}min held`,
+            `⏳ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢): bid now ${currentBid}¢, net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | need +${botConfig.minNetProfitCents}¢ | ${ageMins}min held | ${minsLeft.toFixed(1)}min left`,
           );
         }
       } catch (err) {
         await botLog("warn", `Failed to check position ${trade.id}`, String(err));
+
+        // Fallback expiry if we can't reach the API and trade is very old
+        if (tradeAgeMs > 20 * 60_000) {
+          await db.update(tradesTable).set({
+            status: "expired",
+            pnlCents: -trade.buyPriceCents,
+            closedAt: new Date(),
+          }).where(eq(tradesTable.id, trade.id));
+          openMarkets.delete(trade.marketId);
+          state.openPositionCount = openMarkets.size;
+          state.totalPnlCents -= trade.buyPriceCents;
+          state.dailyPnlCents -= trade.buyPriceCents;
+          await botLog("warn", `⚠️ Trade ${trade.id} force-expired after 20min (API unreachable)`, { tradeId: trade.id });
+        }
       }
     }
   } catch (err) {
