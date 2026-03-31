@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { retryOpenPositions } from "./lib/kalshi-bot";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,9 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Global sell monitor — runs every 5 s regardless of whether the main bot is on.
+  // This ensures coin flip trades (and any other open positions) are auto-sold
+  // even when the main bot hasn't been started.
+  setInterval(retryOpenPositions, 5_000);
 });

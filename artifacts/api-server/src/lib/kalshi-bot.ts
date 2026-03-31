@@ -634,7 +634,10 @@ async function placeLimitSell(
 }
 
 // ─── Retry open positions ─────────────────────────────────────────────────────
-async function retryOpenPositions(): Promise<void> {
+let sellMonitorRunning = false;
+export async function retryOpenPositions(): Promise<void> {
+  if (sellMonitorRunning) return; // prevent overlapping runs
+  sellMonitorRunning = true;
   try {
     const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
     state.openPositionCount = openTrades.length;
@@ -714,6 +717,8 @@ async function retryOpenPositions(): Promise<void> {
     }
   } catch (err) {
     logger.error({ err }, "retryOpenPositions failed");
+  } finally {
+    sellMonitorRunning = false;
   }
 }
 
