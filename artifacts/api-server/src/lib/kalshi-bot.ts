@@ -865,11 +865,6 @@ function scheduleCoinFlip() {
   coinFlipAuto.nextFlipAt = Date.now() + delay;
   coinFlipTimer = setTimeout(async () => {
     if (!coinFlipAuto.enabled) return;
-    // Don't fire when the main bot is stopped
-    if (!state.running) {
-      scheduleCoinFlip(); // reschedule for next cycle
-      return;
-    }
     try {
       const result = await coinFlipTrade();
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
