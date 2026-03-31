@@ -751,6 +751,7 @@ export async function startBot(): Promise<BotState> {
     `🤖 Instinct Scalper started — trading ${cats} | entry ≤${botConfig.maxEntryPriceCents}¢ | target ${botConfig.minNetProfitCents}–${botConfig.maxNetProfitCents}¢ net | max ${botConfig.maxOpenPositions} positions`,
   );
 
+  retryOpenPositions(); // immediate pass — clears any stale open trades from before restart
   scanMarkets();
   scanTimer = setInterval(scanMarkets, botConfig.pollIntervalSecs * 1000);
   sellTimer = setInterval(retryOpenPositions, botConfig.pollIntervalSecs * 1000);
