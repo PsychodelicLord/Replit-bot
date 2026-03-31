@@ -290,6 +290,7 @@ async function refreshDailyPnl(): Promise<void> {
 }
 
 // ─── Safety checks ───────────────────────────────────────────────────────────
+// Full check — used by main bot: stops the bot if a limit is hit
 async function checkSafetyLimits(): Promise<boolean> {
   await refreshBalance();
   await refreshDailyPnl();
@@ -318,6 +319,25 @@ async function checkSafetyLimits(): Promise<boolean> {
   }
 
   return true;
+}
+
+// Lightweight check for coin flip — same limits but never stops the main bot
+async function checkSafetyLimitsPassive(): Promise<{ ok: boolean; reason?: string }> {
+  await refreshBalance();
+  await refreshDailyPnl();
+
+  const { balanceFloorCents, dailyProfitTargetCents, dailyLossLimitCents } = botConfig;
+
+  if (balanceFloorCents > 0 && state.balanceCents > 0 && state.balanceCents <= balanceFloorCents) {
+    return { ok: false, reason: `Balance floor hit ($${(state.balanceCents / 100).toFixed(2)} ≤ $${(balanceFloorCents / 100).toFixed(2)})` };
+  }
+  if (dailyProfitTargetCents > 0 && state.dailyPnlCents >= dailyProfitTargetCents) {
+    return { ok: false, reason: `Daily profit target already reached` };
+  }
+  if (dailyLossLimitCents > 0 && state.dailyPnlCents <= -dailyLossLimitCents) {
+    return { ok: false, reason: `Daily loss limit hit` };
+  }
+  return { ok: true };
 }
 
 // ─── Market types ────────────────────────────────────────────────────────────
@@ -892,10 +912,10 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
   }
   tradeMutex = true;
   try {
-    // Respect the same safety guards as the main bot
-    const safe = await checkSafetyLimits();
-    if (!safe) {
-      return { success: false, message: "Safety limit reached (balance floor / daily limit) — coin flip blocked." };
+    // Check safety limits without stopping the main bot
+    const safety = await checkSafetyLimitsPassive();
+    if (!safety.ok) {
+      return { success: false, message: `Coin flip blocked — ${safety.reason}` };
     }
 
     // Respect max open positions — query DB directly so this is always accurate after restarts
