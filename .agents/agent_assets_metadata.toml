@@ -1,5 +1,10 @@
 uploads = []
-generated = []
+
+[[generated]]
+id = "gc3LqLC9uHWjuxDqNSJ0C"
+uri = "file://artifacts/kalshi-bot/public/opengraph.png"
+type = "image"
+title = "Trading bot dashboard thumbnail"
 
 [[outputs]]
 id = "ytbBt3C5IgTUR8KK6SwWD"
