@@ -899,11 +899,12 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const resp = await kalshiFetch("GET", `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`) as { markets?: KalshiMarket[] };
     const markets = resp.markets ?? [];
 
-    // Coin flip only enters when more than 10 min remain — same rule as main bot
+    // Coin flip only enters 15-min crypto markets with >10 min remaining — same rules as main bot
     const eligible = markets.filter((m) => {
       if (!m.close_time) return false;
       const mins = (new Date(m.close_time).getTime() - now) / 60_000;
-      return mins > botConfig.minMinutesRemaining && mins <= 16;
+      if (mins <= botConfig.minMinutesRemaining || mins > 16) return false;
+      return marketPassesCategoryFilter(m.ticker, m.title);
     });
 
     if (eligible.length === 0) {
