@@ -648,8 +648,15 @@ export async function retryOpenPositions(): Promise<void> {
             order?: { status?: string; remaining_count?: number; filled_count?: number }
           };
           const order = orderResp.order;
-          const filled = (order?.filled_count ?? 0) > 0;
-          if (!filled) {
+          const status = order?.status ?? "";
+          // Consider filled if: filled_count > 0 OR status is a terminal fill state
+          const filled = (order?.filled_count ?? 0) > 0
+            || status === "filled"
+            || status === "settled"
+            || status === "executed";
+          // Only cancel if we are CERTAIN it is still resting/open and not filled
+          const definitelyUnfilled = !filled && (status === "resting" || status === "open" || status === "pending");
+          if (definitelyUnfilled) {
             // Cancel the unfilled order and clean up
             try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiBuyOrderId}`); } catch (_) {}
             await db.update(tradesTable).set({ status: "cancelled", closedAt: new Date() })
@@ -657,9 +664,14 @@ export async function retryOpenPositions(): Promise<void> {
             openMarkets.delete(trade.marketId);
             state.openPositionCount = openMarkets.size;
             await botLog("warn",
-              `🚫 Trade ${trade.id} cancelled — buy order never filled after 60s`, { tradeId: trade.id }
+              `🚫 Trade ${trade.id} cancelled — buy order still ${status} after 60s (not filled)`, { tradeId: trade.id }
             );
             continue;
+          } else if (!filled) {
+            // Unknown status — log and keep holding rather than cancelling
+            await botLog("info",
+              `Trade ${trade.id}: buy order status="${status}" filled_count=${order?.filled_count ?? 0} — keeping position open`, { tradeId: trade.id }
+            );
           }
         } catch (_) {
           // Can't verify — continue holding the position
