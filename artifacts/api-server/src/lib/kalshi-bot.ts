@@ -680,7 +680,9 @@ export async function retryOpenPositions(): Promise<void> {
         const m = resp.market;
 
         // ── Market settled/closed — record actual outcome ───────────────────
-        if (!m || (m.status && m.status !== "open")) {
+        // Kalshi returns "active" for live markets and "open" in some contexts — treat both as live
+        const isLive = !m?.status || m.status === "open" || m.status === "active";
+        if (!m || !isLive) {
           const settled = m?.status === "settled" || m?.status === "finalized";
           const ourSideWon = settled && m?.result?.toLowerCase() === trade.side.toLowerCase();
 
