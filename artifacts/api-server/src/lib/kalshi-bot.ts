@@ -713,6 +713,11 @@ export async function retryOpenPositions(): Promise<void> {
         const minsLeft = (new Date(m.close_time).getTime() - now) / 60_000;
         const targetSellPrice = calcTargetSellPrice(trade.buyPriceCents);
 
+        // Debug: log when approaching exit window
+        if (minsLeft > 0 && minsLeft <= (botConfig.exitWindowMins + 1)) {
+          await botLog("debug", `Trade ${trade.id}: minsLeft=${minsLeft.toFixed(1)}, exitWindow=${botConfig.exitWindowMins}, hasOrderId=${!!trade.kalshiSellOrderId}`);
+        }
+
         // ── Sell order already placed on Kalshi — check fill status ──────────
         if (trade.kalshiSellOrderId) {
           if (minsLeft <= 2) {
