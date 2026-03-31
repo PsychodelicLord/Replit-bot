@@ -918,6 +918,12 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const detailResp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     const m = detailResp.market ?? market;
 
+    // Re-check time remaining with fresh data — list data can be stale
+    const freshMinsLeft = (new Date(m.close_time).getTime() - Date.now()) / 60_000;
+    if (freshMinsLeft <= botConfig.minMinutesRemaining) {
+      return { success: false, message: `${ticker} now has only ${freshMinsLeft.toFixed(1)} min left — too close to expiry, skipping.` };
+    }
+
     const yesAsk = priceCents(m, "yes_ask");
     const noAsk  = priceCents(m, "no_ask");
 
