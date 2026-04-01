@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:20-alpine
 
 RUN npm install -g pnpm
 
@@ -6,7 +6,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN pnpm install --no-frozen-lockfile
+RUN pnpm install --no-frozen-lockfile --filter @workspace/api-server...
 
 RUN pnpm --filter @workspace/api-server run build
 
