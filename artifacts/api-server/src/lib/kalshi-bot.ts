@@ -279,6 +279,52 @@ function calcTargetSellPrice(buyPriceCents: number): number {
   return buyPriceCents + netToRequiredGross(botConfig.minNetProfitCents);
 }
 
+// ─── Order price helper ───────────────────────────────────────────────────────
+// Kalshi expects YES/NO prices as INTEGERS (cents), e.g. 36 not 0.36.
+// This function validates, clamps, and returns the integer value.
+function toKalshiPrice(cents: number): number {
+  const p = Math.round(cents);
+  if (p < 1 || p > 99) {
+    logger.warn({ cents, clamped: Math.min(99, Math.max(1, p)) }, "kalshi price out of 1-99 range — clamping");
+  }
+  return Math.min(99, Math.max(1, p));
+}
+
+function buildOrderPayload(
+  ticker: string,
+  clientOrderId: string,
+  type: "limit" | "market",
+  action: "buy" | "sell",
+  side: "YES" | "NO",
+  count: number,
+  priceCentsOrNull?: number,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    ticker,
+    client_order_id: clientOrderId,
+    type,
+    action,
+    side: side.toLowerCase(),
+    count,
+  };
+
+  if (type === "limit" && priceCentsOrNull !== undefined) {
+    const price = toKalshiPrice(priceCentsOrNull);
+    base[side === "YES" ? "yes_price" : "no_price"] = price;
+  }
+
+  logger.info({ payload: base }, `kalshi-order-payload`);
+
+  // Validate no decimal price fields were accidentally added
+  for (const [k, v] of Object.entries(base)) {
+    if ((k === "yes_price" || k === "no_price") && typeof v === "number" && !Number.isInteger(v)) {
+      throw new Error(`PRICE FORMAT BUG: ${k}=${v} is not an integer — refusing to send`);
+    }
+  }
+
+  return base;
+}
+
 // ─── Logging helper ──────────────────────────────────────────────────────────
 async function botLog(level: string, message: string, data?: unknown): Promise<void> {
   logger.info({ level, botMessage: message }, "bot-log");
@@ -580,15 +626,9 @@ async function enterTrade(
   }
   tradeMutex = true;
   try {
-    const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker,
-      client_order_id: `scalp-buy-${Date.now()}`,
-      type: "limit",
-      action: "buy",
-      side: side.toLowerCase(),
-      count: 1,
-      ...(side === "YES" ? { yes_price: buyPriceCents / 100 } : { no_price: buyPriceCents / 100 }),
-    }) as { order?: { order_id?: string } };
+    const buyResp = await kalshiFetch("POST", "/portfolio/orders",
+      buildOrderPayload(ticker, `scalp-buy-${Date.now()}`, "limit", "buy", side, 1, buyPriceCents),
+    ) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
 
@@ -657,14 +697,9 @@ async function executeSell(
   );
 
   try {
-    const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker:           pos.marketId,
-      client_order_id: `sell-${pos.tradeId}-${Date.now()}`,
-      type:             "market",
-      action:           "sell",
-      side:             pos.side.toLowerCase(),
-      count:            pos.contractCount,
-    }) as { order?: { order_id?: string; yes_price?: number; no_price?: number } };
+    const sellResp = await kalshiFetch("POST", "/portfolio/orders",
+      buildOrderPayload(pos.marketId, `sell-${pos.tradeId}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount),
+    ) as { order?: { order_id?: string; yes_price?: number; no_price?: number } };
 
     // Use actual fill price when returned; market orders often return 0, so fall back to bid
     const rawPrice  = pos.side === "YES"
@@ -1057,15 +1092,9 @@ export async function manualTrade(
     const { title, close_time } = resp.market;
     const minutesLeft = (new Date(close_time).getTime() - Date.now()) / 60_000;
 
-    const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker,
-      client_order_id: `manual-${Date.now()}`,
-      type: "limit",
-      action: "buy",
-      side: side.toLowerCase(),
-      count: quantity,
-      ...(side === "YES" ? { yes_price: limitCents / 100 } : { no_price: limitCents / 100 }),
-    }) as { order?: { order_id?: string } };
+    const buyResp = await kalshiFetch("POST", "/portfolio/orders",
+      buildOrderPayload(ticker, `manual-${Date.now()}`, "limit", "buy", side as "YES" | "NO", quantity, limitCents),
+    ) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
 
@@ -1327,15 +1356,9 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     // Add 1¢ buffer above ask to cross the spread and ensure fill even if price ticks up
     const orderPriceCents = ask + 1;
 
-    const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker,
-      client_order_id: `coinflip-${Date.now()}`,
-      type: "limit",
-      action: "buy",
-      side: side.toLowerCase(),
-      count: 1,
-      ...(side === "YES" ? { yes_price: orderPriceCents / 100 } : { no_price: orderPriceCents / 100 }),
-    }) as { order?: { order_id?: string } };
+    const buyResp = await kalshiFetch("POST", "/portfolio/orders",
+      buildOrderPayload(ticker, `coinflip-${Date.now()}`, "limit", "buy", side, 1, orderPriceCents),
+    ) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
 
