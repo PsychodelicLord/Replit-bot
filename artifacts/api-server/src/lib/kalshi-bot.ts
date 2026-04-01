@@ -997,7 +997,21 @@ function msToNextCycleStart(): number {
 function scheduleCoinFlip(retryDelaySecs?: number) {
   if (coinFlipTimer) clearTimeout(coinFlipTimer);
   if (!coinFlipAuto.enabled) return;
-  const delay = retryDelaySecs ? retryDelaySecs * 1000 : msToNextCycleStart();
+
+  let delay: number;
+  if (retryDelaySecs !== undefined) {
+    delay = retryDelaySecs * 1000;
+  } else {
+    // If we're early enough in the current cycle, fire right away (2s grace)
+    const CYCLE_MS = 15 * 60_000;
+    const minsUntilCycleEnd = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
+    if (minsUntilCycleEnd > botConfig.minMinutesRemaining + 1) {
+      delay = 2_000; // fire in 2 seconds
+    } else {
+      delay = msToNextCycleStart(); // wait for the next cycle
+    }
+  }
+
   coinFlipAuto.nextFlipAt = Date.now() + delay;
   coinFlipTimer = setTimeout(async () => {
     if (!coinFlipAuto.enabled) return;
