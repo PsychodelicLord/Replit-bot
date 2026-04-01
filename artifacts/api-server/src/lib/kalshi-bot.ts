@@ -1397,12 +1397,13 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       const noAsk  = priceCents(m, "no_ask");
 
       // Flip the coin — strictly follow the result, no fallback to other side
+      // Only skip if there is genuinely no quote (ask = 0). Time window already checked above.
       const coinYes = Math.random() < 0.5;
       const trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
       const tryAsk = coinYes ? yesAsk : noAsk;
 
-      if (tryAsk <= 0 || tryAsk > maxAsk) {
-        await botLog("info", `Coin flip: landed ${trySide} on ${candidate.ticker} but ask ${tryAsk}¢ exceeds limit ${maxAsk}¢ — trying next market`);
+      if (tryAsk <= 0) {
+        await botLog("info", `Coin flip: landed ${trySide} on ${candidate.ticker} but no quote available — trying next market`);
         continue;
       }
 
@@ -1414,14 +1415,13 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     }
 
     if (!market) {
-      return { success: false, message: `No tradeable markets — checked ${triedAll} markets, none had valid ask ≤ ${maxAsk}¢` };
+      return { success: false, message: `No tradeable markets — checked ${triedAll} markets, none with a live quote in the time window` };
     }
 
     const { ticker, title } = market;
 
     // Add 1¢ buffer above ask to cross the spread and ensure fill even if price ticks up
-    // Cap at maxAsk so we never overpay beyond the user's limit
-    const orderPriceCents = Math.min(ask + 1, maxAsk);
+    const orderPriceCents = ask + 1;
 
     const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
