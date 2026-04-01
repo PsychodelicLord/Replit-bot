@@ -32,7 +32,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
-const frontendDist = "/app/public";
+const frontendDist = path.resolve(process.cwd(), "artifacts/kalshi-bot/dist/public");
 app.use(express.static(frontendDist));
 app.get("*", (_req, res) => {
   res.sendFile(path.join(frontendDist, "index.html"), (err) => {
