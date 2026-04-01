@@ -394,15 +394,20 @@ interface KalshiMarket {
  *  Handles both number and string values — Kalshi sometimes returns prices as strings.
  */
 function priceCents(m: KalshiMarket, field: "yes_ask" | "yes_bid" | "no_ask" | "no_bid" | "last_price"): number {
+  // Prefer explicit _dollars field (decimal 0.0–1.0) → multiply by 100 to get cents
   const rawDollars = (m as any)[`${field}_dollars`];
   if (rawDollars !== undefined && rawDollars !== null) {
     const v = typeof rawDollars === "number" ? rawDollars : parseFloat(String(rawDollars));
     if (!isNaN(v) && v > 0) return Math.round(v * 100);
   }
-  const rawCents = (m as any)[field];
-  if (rawCents !== undefined && rawCents !== null) {
-    const v = typeof rawCents === "number" ? rawCents : parseFloat(String(rawCents));
-    if (!isNaN(v) && v > 0) return Math.round(v);
+  // Fallback to non-dollars field — handle both decimal (0.47) and integer (47) formats
+  const raw = (m as any)[field];
+  if (raw !== undefined && raw !== null) {
+    const v = typeof raw === "number" ? raw : parseFloat(String(raw));
+    if (!isNaN(v) && v > 0) {
+      // If <= 1.0 it's already a decimal probability (0.47 = 47¢); if > 1 it's integer cents (47)
+      return v <= 1.0 ? Math.round(v * 100) : Math.round(v);
+    }
   }
   return 0;
 }
@@ -582,7 +587,7 @@ async function enterTrade(
       action: "buy",
       side: side.toLowerCase(),
       count: 1,
-      ...(side === "YES" ? { yes_price: buyPriceCents } : { no_price: buyPriceCents }),
+      ...(side === "YES" ? { yes_price: buyPriceCents / 100 } : { no_price: buyPriceCents / 100 }),
     }) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
@@ -1151,7 +1156,7 @@ export async function manualTrade(
       action: "buy",
       side: side.toLowerCase(),
       count: quantity,
-      ...(side === "YES" ? { yes_price: limitCents } : { no_price: limitCents }),
+      ...(side === "YES" ? { yes_price: limitCents / 100 } : { no_price: limitCents / 100 }),
     }) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
@@ -1206,14 +1211,14 @@ const coinFlipAuto: CoinFlipAutoState = {
 
 let coinFlipTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Returns ms until 90 seconds into the next :00/:15/:30/:45 UTC cycle boundary. */
+/** Returns ms until 30s into the next :00/:15/:30/:45 UTC cycle boundary. */
 function msToNextCycleStart(): number {
   const now = Date.now();
   const CYCLE_MS = 15 * 60_000;
   const remainder = now % CYCLE_MS;
   const msToNextBoundary = CYCLE_MS - remainder;
-  // Fire 60s after the boundary — new markets are open by then, gives more buffer time
-  return msToNextBoundary + 60_000;
+  // Fire 30s after the boundary — Kalshi has new markets live by then
+  return msToNextBoundary + 30_000;
 }
 
 function scheduleCoinFlip(retryDelaySecs?: number) {
@@ -1242,11 +1247,11 @@ function scheduleCoinFlip(retryDelaySecs?: number) {
       coinFlipAuto.lastResult = { success: result.success, message: result.message, side: result.side };
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
       if (!result.success && result.message.includes("No markets")) {
-        // Only retry mid-cycle if there's genuinely enough time left; otherwise jump to next cycle
+        // Retry mid-cycle if there's still enough time, otherwise wait for next cycle
         const CYCLE_MS = 15 * 60_000;
         const minsLeft = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
-        if (minsLeft > botConfig.minMinutesRemaining + 4) {
-          scheduleCoinFlip(180); // retry in 3 min — still plenty of time
+        if (minsLeft > botConfig.minMinutesRemaining + 2) {
+          scheduleCoinFlip(120); // retry in 2 min — still enough time
         } else {
           scheduleCoinFlip(); // too late in cycle — wait for next cycle start
         }
@@ -1357,35 +1362,49 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       return { success: false, message: `No markets found — fetched ${allMarkets.length} from ${enabledCoins.join("/")} series, ${timeOk} in time window` };
     }
 
-    // Pick a random market
-    const market = uniqueEligible[Math.floor(Math.random() * uniqueEligible.length)];
-    const { ticker, title } = market;
-
-    // Get live prices
-    const detailResp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
-    const m = detailResp.market ?? market;
-
-    // Re-check time remaining with fresh data — list data can be stale
-    const freshMinsLeft = (new Date(m.close_time).getTime() - Date.now()) / 60_000;
-    if (freshMinsLeft <= botConfig.minMinutesRemaining) {
-      return { success: false, message: `${ticker} now has only ${freshMinsLeft.toFixed(1)} min left — too close to expiry, skipping.` };
-    }
-
-    const yesAsk = priceCents(m, "yes_ask");
-    const noAsk  = priceCents(m, "no_ask");
-
-    // Flip the coin — strictly follow the result, no fallback to other side
-    const coinYes = Math.random() < 0.5;
-    const side: "YES" | "NO" = coinYes ? "YES" : "NO";
-    const ask = coinYes ? yesAsk : noAsk;
-
-    // Respect maxEntryPriceCents setting (also hard-block at 90¢ as absolute ceiling)
+    // Shuffle eligible markets and try each in turn until one has live prices
+    const shuffled = [...uniqueEligible].sort(() => Math.random() - 0.5);
     const maxAsk = Math.min(botConfig.maxEntryPriceCents, 90);
-    if (ask <= 0 || ask > maxAsk) {
-      return { success: false, message: `Coin landed ${side} on ${ticker} but ask is ${ask}¢ — skipping (max entry is ${maxAsk}¢).` };
+
+    let market!: KalshiMarket;
+    let side!: "YES" | "NO";
+    let ask!: number;
+    let minutesLeft!: number;
+
+    let triedAll = 0;
+    for (const candidate of shuffled) {
+      triedAll++;
+      const detailResp = await kalshiFetch("GET", `/markets/${candidate.ticker}`) as { market?: KalshiMarket };
+      const m = detailResp.market ?? candidate;
+
+      const freshMins = (new Date(m.close_time).getTime() - Date.now()) / 60_000;
+      if (freshMins <= botConfig.minMinutesRemaining) continue; // stale — expired
+
+      const yesAsk = priceCents(m, "yes_ask");
+      const noAsk  = priceCents(m, "no_ask");
+
+      // Flip the coin
+      const coinYes = Math.random() < 0.5;
+      const trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
+      const tryAsk = coinYes ? yesAsk : noAsk;
+
+      if (tryAsk <= 0 || tryAsk > maxAsk) {
+        await botLog("info", `Coin flip: ${candidate.ticker} ${trySide} ask ${tryAsk}¢ not tradeable — trying next market`);
+        continue;
+      }
+
+      market = m;
+      side = trySide;
+      ask = tryAsk;
+      minutesLeft = freshMins;
+      break;
     }
 
-    const minutesLeft = (new Date(m.close_time).getTime() - now) / 60_000;
+    if (!market) {
+      return { success: false, message: `No tradeable markets — checked ${triedAll} markets, none had valid ask ≤ ${maxAsk}¢` };
+    }
+
+    const { ticker, title } = market;
 
     const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
@@ -1394,7 +1413,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       action: "buy",
       side: side.toLowerCase(),
       count: 1,
-      ...(side === "YES" ? { yes_price: ask } : { no_price: ask }),
+      ...(side === "YES" ? { yes_price: ask / 100 } : { no_price: ask / 100 }),
     }) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
