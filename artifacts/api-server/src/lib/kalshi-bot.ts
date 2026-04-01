@@ -696,20 +696,41 @@ async function executeSell(
     { tradeId: pos.tradeId },
   );
 
+  // ── Step 1: Place the sell on Kalshi — this MUST succeed ──────────────────
+  let sellResp: { order?: { order_id?: string; yes_price?: number; no_price?: number } };
   try {
-    const sellResp = await kalshiFetch("POST", "/portfolio/orders",
+    sellResp = await kalshiFetch("POST", "/portfolio/orders",
       buildOrderPayload(pos.marketId, `sell-${pos.tradeId}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount),
     ) as { order?: { order_id?: string; yes_price?: number; no_price?: number } };
+  } catch (err) {
+    await botLog("warn",
+      `❌ SELL FAILED (Kalshi rejected) — Trade ${pos.tradeId}: ${String(err)}`,
+      { tradeId: pos.tradeId },
+    );
+    return false;
+  }
 
-    // Use actual fill price when returned; market orders often return 0, so fall back to bid
-    const rawPrice  = pos.side === "YES"
-      ? (sellResp?.order?.yes_price ?? 0)
-      : (sellResp?.order?.no_price  ?? 0);
-    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
-    const gross     = fillPrice - pos.entryPriceCents;
-    const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-    const netPnl    = gross - fee;
+  // ── Step 2: Sell placed on Kalshi — remove from in-memory list immediately ─
+  const rawPrice  = pos.side === "YES"
+    ? (sellResp?.order?.yes_price ?? 0)
+    : (sellResp?.order?.no_price  ?? 0);
+  const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
+  const gross     = fillPrice - pos.entryPriceCents;
+  const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
+  const netPnl    = gross - fee;
 
+  const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+  if (idx >= 0) openPositions.splice(idx, 1);
+  openMarkets.delete(pos.marketId);
+  state.openPositionCount = openPositions.length;
+
+  await botLog("info",
+    `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢ (fee ${fee}¢)`,
+    { tradeId: pos.tradeId, fillPrice, netPnl },
+  );
+
+  // ── Step 3: Persist to DB — non-fatal if DB is unavailable ─────────────────
+  try {
     await db.update(tradesTable).set({
       status:            "closed",
       sellPriceCents:    fillPrice,
@@ -718,25 +739,14 @@ async function executeSell(
       kalshiSellOrderId: sellResp?.order?.order_id ?? null,
       closedAt:          new Date(),
     }).where(eq(tradesTable.id, pos.tradeId));
-
-    // Remove from in-memory list
-    const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-    if (idx >= 0) openPositions.splice(idx, 1);
-    openMarkets.delete(pos.marketId);
-    state.openPositionCount = openPositions.length;
-
-    await botLog("info",
-      `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢ (fee ${fee}¢)`,
-      { tradeId: pos.tradeId, fillPrice, netPnl },
-    );
-    return true;
-  } catch (err) {
+  } catch (dbErr) {
     await botLog("warn",
-      `❌ SELL FAILED — Trade ${pos.tradeId}: ${String(err)}`,
+      `⚠️ SELL DB WRITE FAILED — Trade ${pos.tradeId} was sold on Kalshi but DB not updated: ${String(dbErr)}`,
       { tradeId: pos.tradeId },
     );
-    return false;
   }
+
+  return true;
 }
 
 // ─── Startup portfolio sync ──────────────────────────────────────────────────
@@ -826,28 +836,35 @@ export async function retryOpenPositions(): Promise<void> {
 
   try {
     // ── Sync openPositions with DB (recovers after restart) ──────────────────
-    const dbOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-    positionsInitialized = true;
+    // Non-fatal: if DB is unavailable, use the in-memory array (populated by
+    // registerOpenPosition when each trade was placed) and proceed with sells.
+    try {
+      const dbOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+      positionsInitialized = true;
 
-    // Add DB trades missing from the in-memory list
-    for (const t of dbOpen) {
-      if (!openPositions.some(p => p.tradeId === t.id)) {
-        openPositions.push({
-          tradeId:         t.id,
-          marketId:        t.marketId,
-          side:            t.side as "YES" | "NO",
-          entryPriceCents: t.buyPriceCents,
-          contractCount:   t.contractCount,
-          enteredAt:       t.createdAt.getTime(),
-          buyOrderId:      t.kalshiBuyOrderId ?? null,
-        });
-        openMarkets.add(t.marketId);
+      for (const t of dbOpen) {
+        if (!openPositions.some(p => p.tradeId === t.id)) {
+          openPositions.push({
+            tradeId:         t.id,
+            marketId:        t.marketId,
+            side:            t.side as "YES" | "NO",
+            entryPriceCents: t.buyPriceCents,
+            contractCount:   t.contractCount,
+            enteredAt:       t.createdAt.getTime(),
+            buyOrderId:      t.kalshiBuyOrderId ?? null,
+          });
+          openMarkets.add(t.marketId);
+        }
       }
-    }
-    // Drop positions no longer open in DB
-    const dbIds = new Set(dbOpen.map(t => t.id));
-    for (let i = openPositions.length - 1; i >= 0; i--) {
-      if (!dbIds.has(openPositions[i].tradeId)) openPositions.splice(i, 1);
+      const dbIds = new Set(dbOpen.map(t => t.id));
+      for (let i = openPositions.length - 1; i >= 0; i--) {
+        if (!dbIds.has(openPositions[i].tradeId)) openPositions.splice(i, 1);
+      }
+    } catch (dbErr) {
+      // DB unavailable — continue with whatever is already in openPositions.
+      // Positions added via registerOpenPosition() are still valid.
+      positionsInitialized = true; // stop retrying on every tick
+      logger.warn({ err: dbErr }, "sell-monitor: DB sync failed — using in-memory positions");
     }
 
     state.openPositionCount = openPositions.length;
@@ -1040,11 +1057,16 @@ export async function startBot(): Promise<BotState> {
   zeroPriceTs.clear();     // fresh start — re-evaluate all markets
   lastIdleScanLogMs = 0;   // always show first scan result
 
-  // Re-hydrate openMarkets from DB so the in-memory set is accurate after a restart
-  const existingOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-  openMarkets.clear();
-  for (const t of existingOpen) openMarkets.add(t.marketId);
-  state.openPositionCount = openMarkets.size;
+  // Re-hydrate openMarkets from DB so the in-memory set is accurate after a restart.
+  // Non-fatal: if the DB is suspended (Neon cold-start), the sell monitor will sync on its next tick.
+  try {
+    const existingOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+    openMarkets.clear();
+    for (const t of existingOpen) openMarkets.add(t.marketId);
+    state.openPositionCount = openMarkets.size;
+  } catch (dbErr) {
+    logger.warn({ err: dbErr }, "startBot: DB hydration failed — will sync on first sell-monitor tick");
+  }
 
   await refreshBalance();
   await refreshDailyPnl();
@@ -1056,9 +1078,14 @@ export async function startBot(): Promise<BotState> {
 
   retryOpenPositions(); // immediate pass — clears any stale open trades from before restart
   scanMarkets();
-  scanTimer = setInterval(scanMarkets, botConfig.pollIntervalSecs * 1000);
-  sellTimer = setInterval(retryOpenPositions, botConfig.pollIntervalSecs * 1000);
-  balanceTimer = setInterval(refreshBalance, 60_000);
+  scanTimer    = setInterval(scanMarkets,           botConfig.pollIntervalSecs * 1000);
+  sellTimer    = setInterval(retryOpenPositions,    2_000);   // sell monitor: every 2s
+  balanceTimer = setInterval(refreshBalance,        60_000);
+
+  // Keep-alive ping every 20s so Neon PostgreSQL never suspends between calls
+  setInterval(async () => {
+    try { await db.execute(sql`SELECT 1`); } catch (_) { /* non-fatal */ }
+  }, 20_000);
 
   return getBotState();
 }
