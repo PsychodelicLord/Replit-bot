@@ -1,12 +1,12 @@
 FROM node:20-alpine
 
-RUN corepack enable && corepack prepare pnpm@9 --activate
+RUN npm install -g pnpm
 
 WORKDIR /app
 
 COPY . .
 
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 RUN pnpm --filter @workspace/api-server run build
 
