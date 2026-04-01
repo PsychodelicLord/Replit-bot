@@ -816,7 +816,7 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
           }
         } catch (_) { /* use fallback */ }
 
-        await db.insert(tradesTable).values({
+        const [importedTrade] = await db.insert(tradesTable).values({
           marketId: ticker,
           marketTitle: m.title ?? ticker,
           side,
@@ -827,8 +827,20 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
           minutesRemaining: m.close_time
             ? (new Date(m.close_time).getTime() - Date.now()) / 60_000
             : null,
-        });
+        }).returning();
         openMarkets.add(ticker);
+        // Also register in openPositions so the sell monitor can act on it immediately
+        if (importedTrade) {
+          openPositions.push({
+            tradeId:         importedTrade.id,
+            marketId:        ticker,
+            side,
+            entryPriceCents: buyPriceCents,
+            contractCount:   pos.position ?? 1,
+            enteredAt:       Date.now(),
+            buyOrderId:      null,
+          });
+        }
         imported++;
         await botLog("warn",
           `🔄 Portfolio sync: imported orphaned position — ${ticker} (${side} @${buyPriceCents}¢)`,
