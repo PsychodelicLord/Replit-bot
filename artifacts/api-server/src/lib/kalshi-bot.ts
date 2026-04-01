@@ -644,7 +644,7 @@ async function enterTrade(
     openMarkets.add(ticker);
     state.openPositionCount = openMarkets.size;
     state.tradesSucceeded++;
-    registerOpenPosition({
+    const posRef = registerOpenPosition({
       tradeId:         provisId,
       marketId:        ticker,
       side:            side as "YES" | "NO",
@@ -665,8 +665,7 @@ async function enterTrade(
       contractCount: 1, feeCents: 0, status: "open",
       kalshiBuyOrderId: buyOrderId, minutesRemaining,
     }).returning().then(([trade]) => {
-      const pos = openPositions.find(p => p.tradeId === provisId);
-      if (pos) pos.tradeId = trade.id;
+      posRef.tradeId = trade.id; // direct ref — works even if removed from openPositions
     }).catch(err => logger.warn({ err }, "enterTrade: DB write failed — position tracked in memory only"));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -693,12 +692,13 @@ interface OpenPosition {
 const openPositions: OpenPosition[] = [];
 
 // Called immediately after a trade is inserted to DB so the monitor picks it up.
-export function registerOpenPosition(pos: OpenPosition): void {
+export function registerOpenPosition(pos: OpenPosition): OpenPosition {
   if (!openPositions.some(p => p.tradeId === pos.tradeId)) {
     openPositions.push(pos);
   }
   openMarkets.add(pos.marketId);
   state.openPositionCount = openPositions.length;
+  return pos;
 }
 
 // ─── Execute a sell immediately via market order ──────────────────────────────
@@ -753,25 +753,35 @@ async function executeSell(
 
   // ── DB update — fully fire-and-forget, never blocks ───────────────────────
   // pos.tradeId may still be a provisional negative ID if the buy DB write
-  // hasn't completed yet. Retry after 3 s to give it time to land.
-  const persistSell = (tradeId: number) => {
-    if (tradeId <= 0) {
-      logger.warn({ provisId: tradeId }, "sell: DB write skipped — buy DB write never resolved");
-      return;
+  // hasn't completed yet. We try by real ID first; fall back to buyOrderId.
+  const sellFields = {
+    status: "closed" as const, sellPriceCents: fillPrice,
+    pnlCents: netPnl, feeCents: fee,
+    kalshiSellOrderId: sellOrderId, closedAt: new Date(),
+  };
+
+  const persistSell = () => {
+    if (pos.tradeId > 0) {
+      // Normal path: update by primary key
+      db.update(tradesTable).set(sellFields)
+        .where(eq(tradesTable.id, pos.tradeId))
+        .catch(err => logger.warn({ err, tradeId: pos.tradeId }, "sell: DB update failed"));
+    } else if (pos.buyOrderId) {
+      // Fallback: buy DB write never resolved — update by Kalshi buy order ID
+      logger.warn({ buyOrderId: pos.buyOrderId }, "sell: using buyOrderId fallback for DB update");
+      db.update(tradesTable).set(sellFields)
+        .where(eq(tradesTable.kalshiBuyOrderId, pos.buyOrderId))
+        .catch(err => logger.warn({ err, buyOrderId: pos.buyOrderId }, "sell: buyOrderId fallback DB update failed"));
+    } else {
+      logger.warn({ provisId: pos.tradeId }, "sell: DB write skipped — no ID or buyOrderId available");
     }
-    db.update(tradesTable).set({
-      status: "closed", sellPriceCents: fillPrice,
-      pnlCents: netPnl, feeCents: fee,
-      kalshiSellOrderId: sellOrderId, closedAt: new Date(),
-    }).where(eq(tradesTable.id, tradeId))
-      .catch(err => logger.warn({ err, tradeId }, "sell: DB update failed — trade closed on Kalshi"));
   };
 
   if (pos.tradeId > 0) {
-    persistSell(pos.tradeId);
+    persistSell();
   } else {
-    // Wait 3 s for the async buy DB write to swap in the real ID, then persist
-    setTimeout(() => persistSell(pos.tradeId), 3_000);
+    // Wait 5 s for the async buy DB write to swap in the real ID, then persist
+    setTimeout(persistSell, 5_000);
   }
 
   refreshDailyPnl().catch(() => {});
@@ -1170,7 +1180,7 @@ export async function manualTrade(
     // ── Register IMMEDIATELY in memory ────────────────────────────────────────
     openMarkets.add(ticker);
     state.openPositionCount = openMarkets.size;
-    registerOpenPosition({
+    const posRef = registerOpenPosition({
       tradeId:         provisId,
       marketId:        ticker,
       side,
@@ -1186,15 +1196,12 @@ export async function manualTrade(
     );
 
     // ── DB write fire-and-forget ───────────────────────────────────────────────
-    let realTradeId = provisId;
     db.insert(tradesTable).values({
       marketId: ticker, marketTitle: title ?? ticker, side,
       buyPriceCents: limitCents, contractCount: quantity, feeCents: 0,
       status: "open", kalshiBuyOrderId: buyOrderId, minutesRemaining: minutesLeft,
     }).returning().then(([trade]) => {
-      realTradeId = trade.id;
-      const pos = openPositions.find(p => p.tradeId === provisId);
-      if (pos) pos.tradeId = trade.id;
+      posRef.tradeId = trade.id; // direct ref — works even if removed from openPositions
     }).catch(err => logger.warn({ err }, "manualTrade: DB write failed — position tracked in memory only"));
 
     return {
@@ -1449,7 +1456,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const provisId   = -Date.now();
 
     // ── Register IMMEDIATELY in memory — sell monitor works even if DB is down ─
-    registerOpenPosition({
+    const posRef = registerOpenPosition({
       tradeId:         provisId,
       marketId:        ticker,
       side,
@@ -1472,8 +1479,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       buyPriceCents: ask, contractCount: 1, feeCents: 0, status: "open",
       kalshiBuyOrderId: buyOrderId, minutesRemaining: minutesLeft,
     }).returning().then(([trade]) => {
-      const pos = openPositions.find(p => p.tradeId === provisId);
-      if (pos) pos.tradeId = trade.id;
+      posRef.tradeId = trade.id; // direct ref — works even if removed from openPositions
     }).catch(err => logger.warn({ err }, "coinFlip: DB write failed — position tracked in memory only"));
 
     return {
