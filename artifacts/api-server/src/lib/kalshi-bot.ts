@@ -691,26 +691,38 @@ async function executeSell(
   currentBidCents: number,
   reason: string,
 ): Promise<boolean> {
+  console.log("STEP 2: executeSell ENTERED", JSON.stringify({
+    tradeId: pos.tradeId, marketId: pos.marketId, side: pos.side,
+    entryPriceCents: pos.entryPriceCents, currentBidCents, reason,
+  }));
+
   await botLog("info",
     `🔔 SELL TRIGGERED — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | reason: ${reason} | current bid: ${currentBidCents}¢`,
     { tradeId: pos.tradeId },
   );
 
-  // ── Step 1: Place the sell on Kalshi — this MUST succeed ──────────────────
+  // ── Place the sell on Kalshi ───────────────────────────────────────────────
+  const payload = buildOrderPayload(
+    pos.marketId, `sell-${pos.tradeId}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount,
+  );
+  console.log("STEP 3: Sending sell request to Kalshi", JSON.stringify(payload));
+
   let sellResp: { order?: { order_id?: string; yes_price?: number; no_price?: number } };
   try {
-    sellResp = await kalshiFetch("POST", "/portfolio/orders",
-      buildOrderPayload(pos.marketId, `sell-${pos.tradeId}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount),
-    ) as { order?: { order_id?: string; yes_price?: number; no_price?: number } };
+    sellResp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
+      order?: { order_id?: string; yes_price?: number; no_price?: number }
+    };
+    console.log("STEP 4: Kalshi response", JSON.stringify(sellResp));
   } catch (err) {
+    console.error("STEP 5: SELL FAILED", err);
     await botLog("warn",
       `❌ SELL FAILED (Kalshi rejected) — Trade ${pos.tradeId}: ${String(err)}`,
-      { tradeId: pos.tradeId },
+      { tradeId: pos.tradeId, error: String(err) },
     );
     return false;
   }
 
-  // ── Step 2: Sell placed on Kalshi — remove from in-memory list immediately ─
+  // ── Remove from in-memory list immediately ────────────────────────────────
   const rawPrice  = pos.side === "YES"
     ? (sellResp?.order?.yes_price ?? 0)
     : (sellResp?.order?.no_price  ?? 0);
@@ -724,12 +736,13 @@ async function executeSell(
   openMarkets.delete(pos.marketId);
   state.openPositionCount = openPositions.length;
 
+  console.log("STEP 5: SELL SUCCESS CONFIRMED", JSON.stringify({ tradeId: pos.tradeId, fillPrice, netPnl }));
   await botLog("info",
-    `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢ (fee ${fee}¢)`,
+    `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`,
     { tradeId: pos.tradeId, fillPrice, netPnl },
   );
 
-  // ── Step 3: Persist to DB — non-fatal if DB is unavailable ─────────────────
+  // ── Persist to DB — non-fatal if DB is unavailable ────────────────────────
   try {
     await db.update(tradesTable).set({
       status:            "closed",
@@ -740,8 +753,9 @@ async function executeSell(
       closedAt:          new Date(),
     }).where(eq(tradesTable.id, pos.tradeId));
   } catch (dbErr) {
+    console.error("SELL DB WRITE FAILED", dbErr);
     await botLog("warn",
-      `⚠️ SELL DB WRITE FAILED — Trade ${pos.tradeId} was sold on Kalshi but DB not updated: ${String(dbErr)}`,
+      `⚠️ SELL DB WRITE FAILED — Trade ${pos.tradeId} sold on Kalshi but DB not updated: ${String(dbErr)}`,
       { tradeId: pos.tradeId },
     );
   }
@@ -989,6 +1003,17 @@ export async function retryOpenPositions(): Promise<void> {
         const currentBid  = pos.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const minsLeft    = (new Date(m.close_time).getTime() - now) / 60_000;
         const grossProfit = currentBid - pos.entryPriceCents;
+
+        // ── DEBUG: force-sell every position unconditionally ─────────────────
+        console.log("STEP 1: About to call executeSell", JSON.stringify({
+          tradeId: pos.tradeId, marketId: pos.marketId, side: pos.side,
+          entryPriceCents: pos.entryPriceCents, currentBid, grossProfit, minsLeft,
+        }));
+        // eslint-disable-next-line no-constant-condition
+        if (true) {
+          await executeSell(pos, currentBid > 0 ? currentBid : 1, "DEBUG FORCED SELL");
+          continue;
+        }
 
         await botLog("info",
           `🔍 Checking sell conditions — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | profit: ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢ | ${minsLeft.toFixed(1)}min left`,
