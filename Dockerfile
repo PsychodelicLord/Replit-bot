@@ -8,8 +8,6 @@ COPY . .
 
 RUN pnpm install --no-frozen-lockfile
 
-RUN BASE_PATH=/ PORT=3000 NODE_ENV=production pnpm --filter @workspace/kalshi-bot run build
-
 RUN pnpm --filter @workspace/api-server run build
 
 EXPOSE 3000
