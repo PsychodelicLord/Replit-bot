@@ -34,7 +34,7 @@ app.use("/api", router);
 
 const frontendDist = path.resolve(process.cwd(), "artifacts/kalshi-bot/dist/public");
 app.use(express.static(frontendDist));
-app.get("*", (_req, res) => {
+app.use((_req, res) => {
   res.sendFile(path.join(frontendDist, "index.html"), (err) => {
     if (err) {
       res.status(200).send("Bot is running.");
