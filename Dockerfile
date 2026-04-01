@@ -14,4 +14,4 @@ EXPOSE 3000
 
 ENV PORT=3000
 
-CMD ["node", "artifacts/api-server/dist/index.mjs"]
+CMD pnpm --filter @workspace/db run push-force && node artifacts/api-server/dist/index.mjs
