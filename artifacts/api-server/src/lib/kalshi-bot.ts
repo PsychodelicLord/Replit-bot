@@ -720,17 +720,40 @@ export async function retryOpenPositions(): Promise<void> {
         const livePos = livePositions.find(p => p.ticker_name === trade.marketId);
         const remaining = livePos?.position ?? 0;
         if (remaining === 0) {
-          // Position is gone on Kalshi — likely manually sold
+          // Position gone on Kalshi — try to get actual sell price from fill history
+          let pnlCents = 0;
+          let sellPriceCents: number | undefined;
+          try {
+            const fillsResp = await kalshiFetch("GET", `/portfolio/fills?ticker=${trade.marketId}&limit=20`) as {
+              fills?: Array<{ action?: string; side?: string; yes_price?: number; no_price?: number; count?: number }>
+            };
+            const sells = (fillsResp.fills ?? []).filter(f => f.action === "sell");
+            if (sells.length > 0) {
+              const f = sells[0];
+              const fp = trade.side === "YES"
+                ? Math.round((f.yes_price ?? 0) * 100)
+                : Math.round((f.no_price ?? 0) * 100);
+              if (fp > 0) {
+                sellPriceCents = fp;
+                const gross = fp - trade.buyPriceCents;
+                const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
+                pnlCents = gross - fee;
+              }
+            }
+          } catch (_) { /* non-fatal — fall back to 0 */ }
+
           await db.update(tradesTable).set({
             status: "closed",
-            pnlCents: 0,  // unknown P&L since we didn't execute the sell
+            pnlCents,
+            sellPriceCents,
             closedAt: new Date(),
           }).where(eq(tradesTable.id, trade.id));
           openMarkets.delete(trade.marketId);
+          sellOrderPlacedAt.delete(trade.id);
           state.openPositionCount = openMarkets.size;
           await botLog("warn",
-            `🖐 Trade ${trade.id}: position no longer on Kalshi — marked closed (manual sell or external closure)`,
-            { tradeId: trade.id },
+            `🖐 Trade ${trade.id}: manually closed — sell ~${sellPriceCents ?? "?"}¢, net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
+            { tradeId: trade.id, pnlCents },
           );
           continue;
         }
@@ -1059,8 +1082,8 @@ function msToNextCycleStart(): number {
   const CYCLE_MS = 15 * 60_000;
   const remainder = now % CYCLE_MS;
   const msToNextBoundary = CYCLE_MS - remainder;
-  // Fire 90s after the boundary so new markets are open and priced
-  return msToNextBoundary + 90_000;
+  // Fire 60s after the boundary — new markets are open by then, gives more buffer time
+  return msToNextBoundary + 60_000;
 }
 
 function scheduleCoinFlip(retryDelaySecs?: number) {
@@ -1088,9 +1111,15 @@ function scheduleCoinFlip(retryDelaySecs?: number) {
       const result = await coinFlipTrade();
       coinFlipAuto.lastResult = { success: result.success, message: result.message, side: result.side };
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
-      // If no eligible markets found, retry in 3 min instead of waiting full cycle
       if (!result.success && result.message.includes("No markets")) {
-        scheduleCoinFlip(180);
+        // Only retry mid-cycle if there's genuinely enough time left; otherwise jump to next cycle
+        const CYCLE_MS = 15 * 60_000;
+        const minsLeft = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
+        if (minsLeft > botConfig.minMinutesRemaining + 4) {
+          scheduleCoinFlip(180); // retry in 3 min — still plenty of time
+        } else {
+          scheduleCoinFlip(); // too late in cycle — wait for next cycle start
+        }
       } else {
         scheduleCoinFlip();
       }
