@@ -972,20 +972,19 @@ export async function retryOpenPositions(): Promise<void> {
         const currentBid  = pos.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const minsLeft    = (new Date(m.close_time).getTime() - now) / 60_000;
         const grossProfit = currentBid - pos.entryPriceCents;
-        const netProfit   = grossToNet(grossProfit);
 
         await botLog("info",
-          `🔍 Checking sell conditions — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | net: ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | ${minsLeft.toFixed(1)}min left`,
+          `🔍 Checking sell conditions — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | profit: ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢ | ${minsLeft.toFixed(1)}min left`,
           { tradeId: pos.tradeId },
         );
 
-        // Take-profit check
-        const tpMet = currentBid > 0 && netProfit >= botConfig.minNetProfitCents;
+        // Take-profit check — compare raw profit directly, no fee deduction
+        const tpMet = currentBid > 0 && grossProfit >= botConfig.minNetProfitCents;
         await botLog("info",
-          `📊 Take-profit: ${tpMet ? "TRUE ✓" : "FALSE"} | need +${botConfig.minNetProfitCents}¢ net, have ${netProfit >= 0 ? "+" : ""}${netProfit}¢`,
+          `📊 Take-profit: ${tpMet ? "TRUE ✓" : "FALSE"} | need +${botConfig.minNetProfitCents}¢, have ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢`,
         );
         if (tpMet) {
-          await executeSell(pos, currentBid, `take-profit (net ${netProfit >= 0 ? "+" : ""}${netProfit}¢)`);
+          await executeSell(pos, currentBid, `take-profit (+${grossProfit}¢)`);
           continue;
         }
 
