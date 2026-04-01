@@ -1,17 +1,10 @@
 import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
-import { BotHeader } from "@/components/bot-header";
-import { StatsCard } from "@/components/stats-card";
-import { TradeTable } from "@/components/trade-table";
-import { LogViewer } from "@/components/log-viewer";
-import { BotSettings } from "@/components/bot-settings";
-import { ManualTrade } from "@/components/manual-trade";
 import { CoinFlip } from "@/components/coin-flip";
-import {
-  Wallet, Target, ActivitySquare, Crosshair,
-  BarChart3, TrendingUp, ShieldCheck,
-} from "lucide-react";
+import { CoinFlipSettings } from "@/components/coin-flip-settings";
+import { TradeTable } from "@/components/trade-table";
+import { Coins, Wallet, TrendingUp, TrendingDown } from "lucide-react";
 
-function formatMoney(cents: number) {
+function fmt(cents: number) {
   const sign = cents < 0 ? "-" : cents > 0 ? "+" : "";
   return `${sign}$${(Math.abs(cents) / 100).toFixed(2)}`;
 }
@@ -20,76 +13,51 @@ export function Dashboard() {
   const { data: stats } = useGetTradeStats({ query: { refetchInterval: 5000 } });
   const { data: status } = useGetBotStatus({ query: { refetchInterval: 3000 } });
 
-  const totalPnl  = stats?.totalPnlCents ?? 0;
-  const dailyPnl  = status?.dailyPnlCents ?? 0;
-  const winRate   = stats?.winRate ? (stats.winRate * 100).toFixed(1) : "0.0";
-  const openCount = status?.openPositionCount ?? stats?.openTrades ?? 0;
+  const totalPnl = stats?.totalPnlCents ?? 0;
+  const dailyPnl = stats?.todayPnlCents ?? 0;
+  const balance = status?.balanceCents ?? 0;
 
   return (
-    <div className="min-h-screen flex flex-col bg-background pb-12">
-      <BotHeader />
-
-      <main className="flex-1 max-w-[1600px] w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
-
-        {/* Stats Row */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 lg:gap-4">
-          <StatsCard
-            title="All-Time P&L"
-            value={formatMoney(totalPnl)}
-            valueClassName={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-            icon={Wallet}
-          />
-          <StatsCard
-            title="Today's P&L"
-            value={formatMoney(dailyPnl)}
-            valueClassName={dailyPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-            icon={TrendingUp}
-          />
-          <StatsCard
-            title="Win Rate"
-            value={`${winRate}%`}
-            icon={Target}
-            valueClassName={parseFloat(winRate) >= 50 ? "text-sky-300" : "text-slate-300"}
-          />
-          <StatsCard
-            title="Total Trades"
-            value={stats?.totalTrades ?? 0}
-            icon={ActivitySquare}
-          />
-          <StatsCard
-            title="Open Positions"
-            value={openCount}
-            icon={Crosshair}
-            valueClassName={openCount > 0 ? "text-sky-300" : undefined}
-          />
-          <StatsCard
-            title="Markets Scanned"
-            value={status?.marketsScanned ?? 0}
-            icon={BarChart3}
-          />
-        </div>
-
-        {/* Settings + Manual Trade + Coin Flip */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-          <div className="lg:col-span-2">
-            <BotSettings />
+    <div className="min-h-screen flex flex-col bg-background">
+      <header className="sticky top-0 z-50 border-b border-white/5 bg-black/60 backdrop-blur-xl">
+        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center border border-yellow-400/30 bg-yellow-400/10">
+              <Coins className="w-5 h-5 text-yellow-400" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-white leading-none">Instinct Coin Flip</h1>
+              <p className="text-xs text-slate-500 mt-0.5">Kalshi · 15-min markets · 24/7</p>
+            </div>
           </div>
-          <div className="lg:col-span-1 space-y-6">
-            <ManualTrade />
-            <CoinFlip />
+          <div className="flex items-center gap-2 flex-wrap">
+            {balance > 0 && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
+                <Wallet className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-xs text-slate-400">Balance</span>
+                <span className="text-sm font-bold font-mono text-white">${(balance / 100).toFixed(2)}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
+              <TrendingUp className="w-3.5 h-3.5 text-slate-500" />
+              <span className="text-xs text-slate-400">Today</span>
+              <span className={`text-sm font-bold font-mono ${dailyPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(dailyPnl)}</span>
+            </div>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
+              <TrendingDown className="w-3.5 h-3.5 text-slate-500" />
+              <span className="text-xs text-slate-400">All-time</span>
+              <span className={`text-sm font-bold font-mono ${totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(totalPnl)}</span>
+            </div>
           </div>
         </div>
+      </header>
 
-        {/* Trade table + Logs */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-          <div className="lg:col-span-2 h-[600px]">
-            <TradeTable />
-          </div>
-          <div className="lg:col-span-1">
-            <LogViewer />
-          </div>
+      <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6 pb-12">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+          <CoinFlip />
+          <CoinFlipSettings />
         </div>
-
+        <TradeTable />
       </main>
     </div>
   );
