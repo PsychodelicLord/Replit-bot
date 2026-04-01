@@ -10,6 +10,8 @@ RUN pnpm install --no-frozen-lockfile
 
 RUN pnpm --filter @workspace/api-server run build
 
-EXPOSE 3000
+RUN pnpm --filter @workspace/kalshi-bot run build
+
+EXPOSE 8080
 
 CMD ["sh", "-c", "pnpm --filter @workspace/db run push-force; node artifacts/api-server/dist/index.mjs"]
