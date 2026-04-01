@@ -14,4 +14,4 @@ RUN cp -r artifacts/kalshi-bot/dist/public artifacts/api-server/dist/public
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "pnpm --filter @workspace/db run push-force; node artifacts/api-server/dist/index.mjs"]
+CMD ["node", "artifacts/api-server/dist/index.mjs"]
