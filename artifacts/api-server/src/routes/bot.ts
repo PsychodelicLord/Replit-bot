@@ -113,16 +113,19 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
   const totalTrades = all.length;
   const openTrades = all.filter((t) => t.status === "open").length;
   const closedTrades = all.filter((t) => t.status === "closed");
-  const winningTrades = closedTrades.filter((t) => (t.pnlCents ?? 0) > 0).length;
-  const losingTrades = closedTrades.filter((t) => (t.pnlCents ?? 0) <= 0).length;
-  // Only count confirmed closed trades for P&L (not expired/cancelled which may include tracking errors)
+  const wins = closedTrades.filter((t) => (t.pnlCents ?? 0) > 0);
+  const losses = closedTrades.filter((t) => (t.pnlCents ?? 0) < 0);
+  const winningTrades = wins.length;
+  const losingTrades = losses.length;
   const totalPnlCents = closedTrades.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
-  // Today's P&L from DB — includes all closed/expired trades with a closedAt today
+  const totalWinCents = wins.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
+  const totalLossCents = Math.abs(losses.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0));
   const todayPnlCents = all
     .filter((t) => t.closedAt && new Date(t.closedAt) >= todayStart && t.pnlCents != null)
     .reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
-  const winRate = closedTrades.length > 0 ? winningTrades / closedTrades.length : 0;
-  const avgPnlCents = closedTrades.length > 0 ? totalPnlCents / closedTrades.length : 0;
+  const settledTrades = winningTrades + losingTrades;
+  const winRate = settledTrades > 0 ? winningTrades / settledTrades : 0;
+  const avgPnlCents = settledTrades > 0 ? totalPnlCents / settledTrades : 0;
 
   res.json(GetTradeStatsResponse.parse({
     totalTrades,
@@ -130,6 +133,8 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
     losingTrades,
     openTrades,
     totalPnlCents,
+    totalWinCents,
+    totalLossCents,
     todayPnlCents,
     winRate,
     avgPnlCents,

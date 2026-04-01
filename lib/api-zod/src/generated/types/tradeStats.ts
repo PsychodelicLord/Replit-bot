@@ -12,6 +12,9 @@ export interface TradeStats {
   losingTrades: number;
   openTrades: number;
   totalPnlCents: number;
+  totalWinCents: number;
+  totalLossCents: number;
+  todayPnlCents: number;
   winRate: number;
   avgPnlCents: number;
 }

@@ -221,6 +221,8 @@ export const GetTradeStatsResponse = zod.object({
   losingTrades: zod.number(),
   openTrades: zod.number(),
   totalPnlCents: zod.number(),
+  totalWinCents: zod.number(),
+  totalLossCents: zod.number(),
   todayPnlCents: zod.number(),
   winRate: zod.number(),
   avgPnlCents: zod.number(),

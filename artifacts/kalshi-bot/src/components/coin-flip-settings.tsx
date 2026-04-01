@@ -12,6 +12,8 @@ interface FormState {
   balanceFloor: string;
   maxBetCents: string;
   maxConcurrent: string;
+  minProfitCents: string;
+  minMinutesRemaining: string;
 }
 
 export function CoinFlipSettings() {
@@ -24,6 +26,8 @@ export function CoinFlipSettings() {
     balanceFloor: "0.00",
     maxBetCents: "50",
     maxConcurrent: "1",
+    minProfitCents: "5",
+    minMinutesRemaining: "4",
   });
 
   useEffect(() => {
@@ -32,6 +36,8 @@ export function CoinFlipSettings() {
       balanceFloor: ((config.balanceFloorCents ?? 0) / 100).toFixed(2),
       maxBetCents: String(config.maxEntryPriceCents ?? 50),
       maxConcurrent: String(config.maxOpenPositions ?? 1),
+      minProfitCents: String(config.minNetProfitCents ?? 5),
+      minMinutesRemaining: String(config.minMinutesRemaining ?? 4),
     });
   }, [config]);
 
@@ -43,6 +49,8 @@ export function CoinFlipSettings() {
           balanceFloorCents: isNaN(bf) ? 0 : bf,
           maxEntryPriceCents: parseInt(form.maxBetCents) || 50,
           maxOpenPositions: parseInt(form.maxConcurrent) || 1,
+          minNetProfitCents: parseInt(form.minProfitCents) || 5,
+          minMinutesRemaining: parseInt(form.minMinutesRemaining) || 4,
         },
       },
       {
@@ -56,6 +64,9 @@ export function CoinFlipSettings() {
       }
     );
   }
+
+  const set = (key: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setForm((p) => ({ ...p, [key]: e.target.value }));
 
   return (
     <Card className="instinct-border bg-card/60 backdrop-blur-md">
@@ -89,10 +100,10 @@ export function CoinFlipSettings() {
             step="0.01"
             min="0"
             value={form.balanceFloor}
-            onChange={(e) => setForm((p) => ({ ...p, balanceFloor: e.target.value }))}
+            onChange={set("balanceFloor")}
             className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
           />
-          <p className="text-[10px] text-slate-600">Auto-stop flipping if balance drops below this amount</p>
+          <p className="text-[10px] text-slate-600">Auto-stop if balance drops below this</p>
         </div>
 
         <div className="space-y-1.5">
@@ -102,10 +113,35 @@ export function CoinFlipSettings() {
             min="1"
             max="89"
             value={form.maxBetCents}
-            onChange={(e) => setForm((p) => ({ ...p, maxBetCents: e.target.value }))}
+            onChange={set("maxBetCents")}
             className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
           />
-          <p className="text-[10px] text-slate-600">Skip markets where entry costs more than this per contract (1–89¢)</p>
+          <p className="text-[10px] text-slate-600">Skip contracts above this entry price (1–89¢)</p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label className="text-xs text-slate-400">Auto-Sell Profit Target (¢)</Label>
+          <Input
+            type="number"
+            min="1"
+            value={form.minProfitCents}
+            onChange={set("minProfitCents")}
+            className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
+          />
+          <p className="text-[10px] text-slate-600">Sell automatically when net profit hits this amount</p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label className="text-xs text-slate-400">Min Time Remaining (min)</Label>
+          <Input
+            type="number"
+            min="1"
+            max="14"
+            value={form.minMinutesRemaining}
+            onChange={set("minMinutesRemaining")}
+            className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
+          />
+          <p className="text-[10px] text-slate-600">Only bet on markets with at least this many minutes left</p>
         </div>
 
         <div className="space-y-1.5">
@@ -115,10 +151,10 @@ export function CoinFlipSettings() {
             min="1"
             max="10"
             value={form.maxConcurrent}
-            onChange={(e) => setForm((p) => ({ ...p, maxConcurrent: e.target.value }))}
+            onChange={set("maxConcurrent")}
             className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
           />
-          <p className="text-[10px] text-slate-600">Maximum number of open coin flip positions at once</p>
+          <p className="text-[10px] text-slate-600">Max open positions at once (default: 1)</p>
         </div>
       </CardContent>
     </Card>
