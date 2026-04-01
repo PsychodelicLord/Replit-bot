@@ -3,6 +3,12 @@ import { db, tradesTable, botLogsTable } from "@workspace/db";
 import { logger } from "./logger";
 import { eq, gte, sql } from "drizzle-orm";
 
+// ─── DB keepalive ─────────────────────────────────────────────────────────────
+// Pings the database every 15 s from the moment the server starts.
+// This prevents Neon/Railway PostgreSQL from suspending the endpoint between
+// bot ticks, which was the root cause of the "endpoint has been disabled" errors.
+setInterval(() => { db.execute(sql`SELECT 1`).catch(() => {}); }, 15_000);
+
 // ─── Kalshi API config ───────────────────────────────────────────────────────
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
@@ -839,50 +845,19 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
   }
 }
 
-// ─── Sell monitor — runs every 2s via setInterval in index.ts ────────────────
+// ─── Sell monitor — runs every 2s ────────────────────────────────────────────
+// openPositions is the single source of truth. It is populated by
+// registerOpenPosition() whenever a trade is placed and by the one-time DB
+// hydration in startBot(). The monitor never reads the DB — only writes.
 let sellMonitorRunning = false;
-let positionsInitialized = false;
 
 export async function retryOpenPositions(): Promise<void> {
-  if (sellMonitorRunning) return;                                    // lock
-  if (positionsInitialized && openPositions.length === 0) return;   // fast exit
+  if (sellMonitorRunning) return;            // lock
+  if (openPositions.length === 0) return;    // nothing to do
   sellMonitorRunning = true;
 
   try {
-    // ── Sync openPositions with DB (recovers after restart) ──────────────────
-    // Non-fatal: if DB is unavailable, use the in-memory array (populated by
-    // registerOpenPosition when each trade was placed) and proceed with sells.
-    try {
-      const dbOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-      positionsInitialized = true;
-
-      for (const t of dbOpen) {
-        if (!openPositions.some(p => p.tradeId === t.id)) {
-          openPositions.push({
-            tradeId:         t.id,
-            marketId:        t.marketId,
-            side:            t.side as "YES" | "NO",
-            entryPriceCents: t.buyPriceCents,
-            contractCount:   t.contractCount,
-            enteredAt:       t.createdAt.getTime(),
-            buyOrderId:      t.kalshiBuyOrderId ?? null,
-          });
-          openMarkets.add(t.marketId);
-        }
-      }
-      const dbIds = new Set(dbOpen.map(t => t.id));
-      for (let i = openPositions.length - 1; i >= 0; i--) {
-        if (!dbIds.has(openPositions[i].tradeId)) openPositions.splice(i, 1);
-      }
-    } catch (dbErr) {
-      // DB unavailable — continue with whatever is already in openPositions.
-      // Positions added via registerOpenPosition() are still valid.
-      positionsInitialized = true; // stop retrying on every tick
-      logger.warn({ err: dbErr }, "sell-monitor: DB sync failed — using in-memory positions");
-    }
-
     state.openPositionCount = openPositions.length;
-    if (openPositions.length === 0) { openMarkets.clear(); return; }
 
     // ── One portfolio-positions call for manual-sell detection ────────────────
     let livePositions: Array<{ ticker_name?: string; position?: number }> = [];
@@ -912,17 +887,19 @@ export async function retryOpenPositions(): Promise<void> {
 
             if (resting) {
               try { await kalshiFetch("DELETE", `/portfolio/orders/${pos.buyOrderId}`); } catch (_) {}
-              await db.update(tradesTable)
-                .set({ status: "cancelled", closedAt: new Date() })
-                .where(eq(tradesTable.id, pos.tradeId));
+              // Remove from in-memory array immediately (DB write is fire-and-forget)
               const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
               if (idx >= 0) openPositions.splice(idx, 1);
               openMarkets.delete(pos.marketId);
               state.openPositionCount = openPositions.length;
-              await botLog("warn",
+              db.update(tradesTable)
+                .set({ status: "cancelled", closedAt: new Date() })
+                .where(eq(tradesTable.id, pos.tradeId))
+                .catch(e => logger.warn({ err: e }, "sell-monitor: cancel DB write failed"));
+              botLog("warn",
                 `🚫 Trade ${pos.tradeId} cancelled — buy order still resting after 60s`,
                 { tradeId: pos.tradeId },
-              );
+              ).catch(() => {});
               continue;
             }
           } catch (_) { /* can't verify — keep holding */ }
@@ -950,20 +927,21 @@ export async function retryOpenPositions(): Promise<void> {
               }
             } catch (_) {}
 
-            await db.update(tradesTable).set({
-              status: "closed", pnlCents,
-              sellPriceCents: sellPriceCents || undefined,
-              closedAt: new Date(),
-            }).where(eq(tradesTable.id, pos.tradeId));
             const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
             if (idx >= 0) openPositions.splice(idx, 1);
             openMarkets.delete(pos.marketId);
             state.openPositionCount = openPositions.length;
-            await botLog("info",
+            db.update(tradesTable).set({
+              status: "closed", pnlCents,
+              sellPriceCents: sellPriceCents || undefined,
+              closedAt: new Date(),
+            }).where(eq(tradesTable.id, pos.tradeId))
+              .catch(e => logger.warn({ err: e }, "sell-monitor: manual-sell DB write failed"));
+            botLog("info",
               `🖐 Trade ${pos.tradeId} manually closed | sell ~${sellPriceCents}¢ | net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
               { tradeId: pos.tradeId },
-            );
-            await refreshDailyPnl();
+            ).catch(() => {});
+            refreshDailyPnl().catch(() => {});
             continue;
           }
         }
@@ -981,21 +959,22 @@ export async function retryOpenPositions(): Promise<void> {
             ? (() => { const g = 100 - pos.entryPriceCents; return g - Math.floor(botConfig.feeRate * g); })()
             : -pos.entryPriceCents;
 
-          await db.update(tradesTable).set({
-            status:   settled && ourSideWon ? "closed" : "expired",
-            pnlCents, closedAt: new Date(),
-          }).where(eq(tradesTable.id, pos.tradeId));
           const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
           if (idx >= 0) openPositions.splice(idx, 1);
           openMarkets.delete(pos.marketId);
           state.openPositionCount = openPositions.length;
-          await botLog(ourSideWon ? "info" : "warn",
+          db.update(tradesTable).set({
+            status:   settled && ourSideWon ? "closed" : "expired",
+            pnlCents, closedAt: new Date(),
+          }).where(eq(tradesTable.id, pos.tradeId))
+            .catch(e => logger.warn({ err: e }, "sell-monitor: settlement DB write failed"));
+          botLog(ourSideWon ? "info" : "warn",
             ourSideWon
               ? `🏆 Trade ${pos.tradeId} settled — WON +${pnlCents}¢`
               : `💸 Trade ${pos.tradeId} settled — lost ${pos.entryPriceCents}¢`,
             { tradeId: pos.tradeId },
-          );
-          await refreshDailyPnl();
+          ).catch(() => {});
+          refreshDailyPnl().catch(() => {});
           continue;
         }
 
@@ -1054,7 +1033,7 @@ export async function retryOpenPositions(): Promise<void> {
       }
     }
 
-    await refreshDailyPnl();
+    refreshDailyPnl().catch(() => {});
   } catch (err) {
     logger.error({ err }, "sellMonitor failed");
   } finally {
@@ -1082,15 +1061,32 @@ export async function startBot(): Promise<BotState> {
   zeroPriceTs.clear();     // fresh start — re-evaluate all markets
   lastIdleScanLogMs = 0;   // always show first scan result
 
-  // Re-hydrate openMarkets from DB so the in-memory set is accurate after a restart.
-  // Non-fatal: if the DB is suspended (Neon cold-start), the sell monitor will sync on its next tick.
+  // Re-hydrate openPositions + openMarkets from DB so the sell monitor
+  // picks up any trades that were open before this restart.
+  // Non-fatal: if the DB is unavailable, sells won't fire for pre-restart trades
+  // but any NEW trades placed after restart will be tracked via registerOpenPosition().
   try {
     const existingOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
     openMarkets.clear();
-    for (const t of existingOpen) openMarkets.add(t.marketId);
-    state.openPositionCount = openMarkets.size;
+    openPositions.length = 0;
+    for (const t of existingOpen) {
+      openMarkets.add(t.marketId);
+      openPositions.push({
+        tradeId:         t.id,
+        marketId:        t.marketId,
+        side:            t.side as "YES" | "NO",
+        entryPriceCents: t.buyPriceCents,
+        contractCount:   t.contractCount,
+        enteredAt:       t.createdAt.getTime(),
+        buyOrderId:      t.kalshiBuyOrderId ?? null,
+      });
+    }
+    state.openPositionCount = openPositions.length;
+    if (openPositions.length > 0) {
+      logger.info({ count: openPositions.length }, "startBot: hydrated open positions from DB");
+    }
   } catch (dbErr) {
-    logger.warn({ err: dbErr }, "startBot: DB hydration failed — will sync on first sell-monitor tick");
+    logger.warn({ err: dbErr }, "startBot: DB hydration failed — new trades will still be monitored via registerOpenPosition()");
   }
 
   await refreshBalance();
@@ -1106,11 +1102,6 @@ export async function startBot(): Promise<BotState> {
   scanTimer    = setInterval(scanMarkets,           botConfig.pollIntervalSecs * 1000);
   sellTimer    = setInterval(retryOpenPositions,    2_000);   // sell monitor: every 2s
   balanceTimer = setInterval(refreshBalance,        60_000);
-
-  // Keep-alive ping every 20s so Neon PostgreSQL never suspends between calls
-  setInterval(async () => {
-    try { await db.execute(sql`SELECT 1`); } catch (_) { /* non-fatal */ }
-  }, 20_000);
 
   return getBotState();
 }
