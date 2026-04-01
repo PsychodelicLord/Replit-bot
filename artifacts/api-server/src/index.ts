@@ -1,6 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { retryOpenPositions, refreshBalance, startCoinFlipAuto } from "./lib/kalshi-bot";
+import { retryOpenPositions, refreshBalance, startCoinFlipAuto, syncPortfolioFromKalshi } from "./lib/kalshi-bot";
 import { runMigrations } from "./migrate";
 
 const rawPort = process.env["PORT"] ?? "3000";
@@ -18,6 +18,9 @@ runMigrations().then(() => {
     }
 
     logger.info({ port }, "Server listening");
+
+    // Sync any Kalshi positions not in DB (handles DB resets / database migrations)
+    syncPortfolioFromKalshi().catch(() => {});
 
     setInterval(retryOpenPositions, 5_000);
 

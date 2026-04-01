@@ -701,6 +701,82 @@ async function placeAggressiveSell(
 // Track when each sell order was placed (tradeId → timestamp) for stale-order repricing
 const sellOrderPlacedAt = new Map<number, number>();
 
+// ─── Startup portfolio sync ──────────────────────────────────────────────────
+// Queries Kalshi for any open positions not in the DB (e.g. after a DB reset or
+// migration to a new database) and creates synthetic trade records so the monitor
+// can track and auto-sell them.
+export async function syncPortfolioFromKalshi(): Promise<void> {
+  try {
+    const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
+      positions?: Array<{ ticker_name?: string; position?: number; market_exposure?: number }>
+    };
+    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0);
+    if (positions.length === 0) {
+      await botLog("info", "🔄 Portfolio sync: no open Kalshi positions found");
+      return;
+    }
+
+    // Get all open trades currently in DB
+    const dbOpen = await db.select({ marketId: tradesTable.marketId })
+      .from(tradesTable).where(eq(tradesTable.status, "open"));
+    const dbOpenIds = new Set(dbOpen.map(r => r.marketId));
+
+    let imported = 0;
+    for (const pos of positions) {
+      const ticker = pos.ticker_name ?? "";
+      if (!ticker || dbOpenIds.has(ticker)) continue; // already tracked
+
+      // Fetch market details so we know the side and price
+      try {
+        const mResp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
+        const m = mResp.market;
+        if (!m) continue;
+
+        // Try to determine side and buy price from fill history
+        let side: "YES" | "NO" = "YES";
+        let buyPriceCents = 50; // fallback mid-point
+        try {
+          const fillsResp = await kalshiFetch("GET", `/portfolio/fills?ticker=${ticker}&limit=10`) as {
+            fills?: Array<{ action?: string; side?: string; yes_price?: number; no_price?: number }>
+          };
+          const buyFill = (fillsResp.fills ?? []).find(f => f.action === "buy");
+          if (buyFill) {
+            side = (buyFill.side?.toUpperCase() ?? "YES") as "YES" | "NO";
+            buyPriceCents = side === "YES"
+              ? Math.round((buyFill.yes_price ?? 0.5) * 100)
+              : Math.round((buyFill.no_price ?? 0.5) * 100);
+          }
+        } catch (_) { /* use fallback */ }
+
+        await db.insert(tradesTable).values({
+          marketId: ticker,
+          marketTitle: m.title ?? ticker,
+          side,
+          buyPriceCents,
+          contractCount: pos.position ?? 1,
+          feeCents: 0,
+          status: "open",
+          minutesRemaining: m.close_time
+            ? (new Date(m.close_time).getTime() - Date.now()) / 60_000
+            : null,
+        });
+        openMarkets.add(ticker);
+        imported++;
+        await botLog("warn",
+          `🔄 Portfolio sync: imported orphaned position — ${ticker} (${side} @${buyPriceCents}¢)`,
+          { ticker, side, buyPriceCents },
+        );
+      } catch (err) {
+        await botLog("warn", `🔄 Portfolio sync: failed to import ${ticker} — ${String(err)}`);
+      }
+    }
+
+    await botLog("info", `🔄 Portfolio sync complete — ${imported} position(s) imported, ${positions.length - imported} already tracked`);
+  } catch (err) {
+    await botLog("warn", `🔄 Portfolio sync failed — ${String(err)}`);
+  }
+}
+
 // ─── Retry open positions ─────────────────────────────────────────────────────
 let sellMonitorRunning = false;
 let positionsInitialized = false; // false until first DB check after startup
