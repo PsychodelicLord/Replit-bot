@@ -708,13 +708,13 @@ async function executeSell(
   reason: string,
 ): Promise<boolean> {
   await botLog("info",
-    `🔔 SELL TRIGGERED — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | reason: ${reason} | current bid: ${currentBidCents}¢`,
+    `🔔 SELL TRIGGERED — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | reason: ${reason} | bid: ${currentBidCents}¢`,
     { tradeId: pos.tradeId },
   );
 
   // ── Place the sell on Kalshi ───────────────────────────────────────────────
   const payload = buildOrderPayload(
-    pos.marketId, `sell-${pos.tradeId}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount,
+    pos.marketId, `sell-${Math.abs(pos.tradeId)}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount,
   );
 
   let sellResp: { order?: { order_id?: string; yes_price?: number; no_price?: number } };
@@ -730,7 +730,7 @@ async function executeSell(
     return false;
   }
 
-  // ── Remove from in-memory list immediately ────────────────────────────────
+  // ── Remove from in-memory list FIRST — sell monitor never blocks on DB ────
   const rawPrice  = pos.side === "YES"
     ? (sellResp?.order?.yes_price ?? 0)
     : (sellResp?.order?.no_price  ?? 0);
@@ -738,6 +738,7 @@ async function executeSell(
   const gross     = fillPrice - pos.entryPriceCents;
   const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
   const netPnl    = gross - fee;
+  const sellOrderId = sellResp?.order?.order_id ?? null;
 
   const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
   if (idx >= 0) openPositions.splice(idx, 1);
@@ -749,35 +750,30 @@ async function executeSell(
     { tradeId: pos.tradeId, fillPrice, netPnl },
   );
 
-  // ── Persist to DB — non-fatal if DB is unavailable ────────────────────────
-  // If tradeId is still provisional (negative), the buy DB write hasn't completed
-  // yet — wait up to 5s for it to land before writing the sell record.
-  let dbTradeId = pos.tradeId;
-  if (dbTradeId < 0) {
-    for (let i = 0; i < 10; i++) {
-      await new Promise(r => setTimeout(r, 500));
-      // The async buy write swaps the provisional ID in place on the same object
-      if (pos.tradeId > 0) { dbTradeId = pos.tradeId; break; }
+  // ── DB update — fully fire-and-forget, never blocks ───────────────────────
+  // pos.tradeId may still be a provisional negative ID if the buy DB write
+  // hasn't completed yet. Retry after 3 s to give it time to land.
+  const persistSell = (tradeId: number) => {
+    if (tradeId <= 0) {
+      logger.warn({ provisId: tradeId }, "sell: DB write skipped — buy DB write never resolved");
+      return;
     }
-  }
-
-  if (dbTradeId > 0) {
     db.update(tradesTable).set({
-      status:            "closed",
-      sellPriceCents:    fillPrice,
-      pnlCents:          netPnl,
-      feeCents:          fee,
-      kalshiSellOrderId: sellResp?.order?.order_id ?? null,
-      closedAt:          new Date(),
-    }).where(eq(tradesTable.id, dbTradeId))
-      .catch(dbErr => botLog("warn",
-        `⚠️ Sell DB write failed — Trade ${dbTradeId} sold on Kalshi but DB not updated: ${String(dbErr)}`,
-        { tradeId: dbTradeId },
-      ).catch(() => {}));
+      status: "closed", sellPriceCents: fillPrice,
+      pnlCents: netPnl, feeCents: fee,
+      kalshiSellOrderId: sellOrderId, closedAt: new Date(),
+    }).where(eq(tradesTable.id, tradeId))
+      .catch(err => logger.warn({ err, tradeId }, "sell: DB update failed — trade closed on Kalshi"));
+  };
+
+  if (pos.tradeId > 0) {
+    persistSell(pos.tradeId);
   } else {
-    logger.warn({ provisId: dbTradeId }, "executeSell: buy DB write never resolved — sell not persisted to DB");
+    // Wait 3 s for the async buy DB write to swap in the real ID, then persist
+    setTimeout(() => persistSell(pos.tradeId), 3_000);
   }
 
+  refreshDailyPnl().catch(() => {});
   return true;
 }
 
@@ -870,20 +866,30 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
 }
 
 // ─── Sell monitor — runs every 2s ────────────────────────────────────────────
-// openPositions is the single source of truth. It is populated by
-// registerOpenPosition() whenever a trade is placed and by the one-time DB
-// hydration in startBot(). The monitor never reads the DB — only writes.
+// DB-INDEPENDENT: openPositions[] is the ONLY source of truth.
+// No DB reads ever. All DB writes are fire-and-forget. One position failing
+// never stops the others. Bot continues even if DB is completely offline.
 let sellMonitorRunning = false;
+let sellMonitorTick    = 0;
 
 export async function retryOpenPositions(): Promise<void> {
-  if (sellMonitorRunning) return;            // lock
-  if (openPositions.length === 0) return;    // nothing to do
+  // ── Single-instance lock ─────────────────────────────────────────────────
+  if (sellMonitorRunning) return;
   sellMonitorRunning = true;
+  sellMonitorTick++;
 
   try {
     state.openPositionCount = openPositions.length;
 
-    // ── One portfolio-positions call for manual-sell detection ────────────────
+    // ── Heartbeat every tick (goes to Railway stdout) ────────────────────────
+    logger.info(
+      { tick: sellMonitorTick, openPositions: openPositions.length },
+      "sell-monitor running",
+    );
+
+    if (openPositions.length === 0) return;
+
+    // ── One portfolio-positions call for manual-sell detection (non-fatal) ───
     let livePositions: Array<{ ticker_name?: string; position?: number }> = [];
     try {
       const pr = await kalshiFetch("GET", "/portfolio/positions") as {
@@ -895,6 +901,7 @@ export async function retryOpenPositions(): Promise<void> {
     const now = Date.now();
 
     for (const pos of [...openPositions]) {
+      // ── Per-position try/catch: one bad position never kills the others ────
       try {
         const tradeAgeMs = now - pos.enteredAt;
 
@@ -911,22 +918,24 @@ export async function retryOpenPositions(): Promise<void> {
 
             if (resting) {
               try { await kalshiFetch("DELETE", `/portfolio/orders/${pos.buyOrderId}`); } catch (_) {}
-              // Remove from in-memory array immediately (DB write is fire-and-forget)
               const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
               if (idx >= 0) openPositions.splice(idx, 1);
               openMarkets.delete(pos.marketId);
               state.openPositionCount = openPositions.length;
-              db.update(tradesTable)
-                .set({ status: "cancelled", closedAt: new Date() })
-                .where(eq(tradesTable.id, pos.tradeId))
-                .catch(e => logger.warn({ err: e }, "sell-monitor: cancel DB write failed"));
+              // DB write — fire-and-forget, non-blocking
+              if (pos.tradeId > 0) {
+                db.update(tradesTable)
+                  .set({ status: "cancelled", closedAt: new Date() })
+                  .where(eq(tradesTable.id, pos.tradeId))
+                  .catch(e => logger.warn({ err: e }, "sell-monitor: cancel DB write failed"));
+              }
               botLog("warn",
                 `🚫 Trade ${pos.tradeId} cancelled — buy order still resting after 60s`,
                 { tradeId: pos.tradeId },
               ).catch(() => {});
               continue;
             }
-          } catch (_) { /* can't verify — keep holding */ }
+          } catch (_) { /* can't verify fill status — keep holding */ }
         }
 
         // ── Detect manual sell (position gone from Kalshi) ──────────────────
@@ -949,18 +958,21 @@ export async function retryOpenPositions(): Promise<void> {
                   pnlCents       = gross - fee;
                 }
               }
-            } catch (_) {}
+            } catch (_) { /* fill lookup failed — use zero */ }
 
             const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
             if (idx >= 0) openPositions.splice(idx, 1);
             openMarkets.delete(pos.marketId);
             state.openPositionCount = openPositions.length;
-            db.update(tradesTable).set({
-              status: "closed", pnlCents,
-              sellPriceCents: sellPriceCents || undefined,
-              closedAt: new Date(),
-            }).where(eq(tradesTable.id, pos.tradeId))
-              .catch(e => logger.warn({ err: e }, "sell-monitor: manual-sell DB write failed"));
+            // DB write — fire-and-forget
+            if (pos.tradeId > 0) {
+              db.update(tradesTable).set({
+                status: "closed", pnlCents,
+                sellPriceCents: sellPriceCents || undefined,
+                closedAt: new Date(),
+              }).where(eq(tradesTable.id, pos.tradeId))
+                .catch(e => logger.warn({ err: e }, "sell-monitor: manual-sell DB write failed"));
+            }
             botLog("info",
               `🖐 Trade ${pos.tradeId} manually closed | sell ~${sellPriceCents}¢ | net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
               { tradeId: pos.tradeId },
@@ -970,7 +982,7 @@ export async function retryOpenPositions(): Promise<void> {
           }
         }
 
-        // ── Fetch current market ─────────────────────────────────────────────
+        // ── Fetch current market from Kalshi (only Kalshi API, no DB) ────────
         const mResp  = await kalshiFetch("GET", `/markets/${pos.marketId}`) as { market?: KalshiMarket };
         const m      = mResp.market;
         const isLive = !m?.status || m.status === "open" || m.status === "active";
@@ -987,11 +999,14 @@ export async function retryOpenPositions(): Promise<void> {
           if (idx >= 0) openPositions.splice(idx, 1);
           openMarkets.delete(pos.marketId);
           state.openPositionCount = openPositions.length;
-          db.update(tradesTable).set({
-            status:   settled && ourSideWon ? "closed" : "expired",
-            pnlCents, closedAt: new Date(),
-          }).where(eq(tradesTable.id, pos.tradeId))
-            .catch(e => logger.warn({ err: e }, "sell-monitor: settlement DB write failed"));
+          // DB write — fire-and-forget
+          if (pos.tradeId > 0) {
+            db.update(tradesTable).set({
+              status:   settled && ourSideWon ? "closed" : "expired",
+              pnlCents, closedAt: new Date(),
+            }).where(eq(tradesTable.id, pos.tradeId))
+              .catch(e => logger.warn({ err: e }, "sell-monitor: settlement DB write failed"));
+          }
           botLog(ourSideWon ? "info" : "warn",
             ourSideWon
               ? `🏆 Trade ${pos.tradeId} settled — WON +${pnlCents}¢`
@@ -1002,53 +1017,46 @@ export async function retryOpenPositions(): Promise<void> {
           continue;
         }
 
-        // ── Live market — evaluate sell conditions ───────────────────────────
+        // ── Live market — evaluate sell conditions (no DB) ───────────────────
         const currentBid  = pos.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const minsLeft    = (new Date(m.close_time).getTime() - now) / 60_000;
         const grossProfit = currentBid - pos.entryPriceCents;
 
         await botLog("info",
-          `🔍 Checking sell conditions — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | profit: ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢ | ${minsLeft.toFixed(1)}min left`,
+          `🔍 Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | profit: ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢ | ${minsLeft.toFixed(1)}min left`,
           { tradeId: pos.tradeId },
         );
 
-        // Take-profit check — compare raw profit directly, no fee deduction
-        const tpMet = currentBid > 0 && grossProfit >= botConfig.minNetProfitCents;
-        await botLog("info",
-          `📊 Take-profit: ${tpMet ? "TRUE ✓" : "FALSE"} | need +${botConfig.minNetProfitCents}¢, have ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢`,
-        );
-        if (tpMet) {
+        // Take-profit
+        if (currentBid > 0 && grossProfit >= botConfig.minNetProfitCents) {
           await executeSell(pos, currentBid, `take-profit (+${grossProfit}¢)`);
           continue;
         }
 
-        // Exit-window check — force sell before expiry
-        const exitMet = minsLeft > 0 && minsLeft <= botConfig.exitWindowMins;
-        await botLog("info",
-          `📊 Exit-window: ${exitMet ? "TRUE ✓" : "FALSE"} | ${minsLeft.toFixed(1)}min left (exit at ≤${botConfig.exitWindowMins}min)`,
-        );
-        if (exitMet) {
-          await executeSell(pos, Math.max(currentBid, 1), `exit-window (${minsLeft.toFixed(1)}min remaining)`);
+        // Exit-window — force sell before expiry
+        if (minsLeft > 0 && minsLeft <= botConfig.exitWindowMins) {
+          await executeSell(pos, Math.max(currentBid, 1), `exit-window (${minsLeft.toFixed(1)}min left)`);
           continue;
         }
 
-        // Safety net — force exit if trade is over 20 minutes old with no close
+        // Safety net — force exit if held >20 min
         if (tradeAgeMs > 20 * 60_000) {
           await executeSell(pos, Math.max(currentBid, 1), "force-expiry (>20min held)");
           continue;
         }
 
-      } catch (err) {
-        await botLog("warn",
-          `❌ Sell monitor error — Trade ${pos.tradeId}: ${String(err)}`,
+      } catch (posErr) {
+        // One position erroring never stops the others
+        logger.warn({ err: posErr, tradeId: pos.tradeId }, "sell-monitor: position check failed — continuing");
+        botLog("warn",
+          `❌ Sell monitor error — Trade ${pos.tradeId}: ${String(posErr)}`,
           { tradeId: pos.tradeId },
-        );
+        ).catch(() => {});
       }
     }
 
-    refreshDailyPnl().catch(() => {});
   } catch (err) {
-    logger.error({ err }, "sellMonitor failed");
+    logger.error({ err }, "sell-monitor: unexpected top-level error");
   } finally {
     sellMonitorRunning = false;
   }
