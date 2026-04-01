@@ -22,7 +22,7 @@ runMigrations().then(() => {
     // Sync any Kalshi positions not in DB (handles DB resets / database migrations)
     syncPortfolioFromKalshi().catch(() => {});
 
-    setInterval(retryOpenPositions, 5_000);
+    setInterval(retryOpenPositions, 2_000);
 
     refreshBalance();
     setInterval(refreshBalance, 60_000);

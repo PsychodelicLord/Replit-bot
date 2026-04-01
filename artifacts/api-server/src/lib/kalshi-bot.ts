@@ -1383,14 +1383,24 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       const yesAsk = priceCents(m, "yes_ask");
       const noAsk  = priceCents(m, "no_ask");
 
-      // Flip the coin
+      // Flip the coin — if the landed side is too expensive, use the other side
+      // (both sides must still be within maxAsk; if neither qualifies, skip market)
       const coinYes = Math.random() < 0.5;
-      const trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
-      const tryAsk = coinYes ? yesAsk : noAsk;
+      let trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
+      let tryAsk = coinYes ? yesAsk : noAsk;
 
       if (tryAsk <= 0 || tryAsk > maxAsk) {
-        await botLog("info", `Coin flip: ${candidate.ticker} ${trySide} ask ${tryAsk}¢ not tradeable — trying next market`);
-        continue;
+        // First choice too pricey — flip to the other side
+        const otherSide: "YES" | "NO" = coinYes ? "NO" : "YES";
+        const otherAsk = coinYes ? noAsk : yesAsk;
+        if (otherAsk > 0 && otherAsk <= maxAsk) {
+          trySide = otherSide;
+          tryAsk  = otherAsk;
+          await botLog("info", `Coin flip: ${candidate.ticker} ${coinYes ? "YES" : "NO"} ask ${coinYes ? yesAsk : noAsk}¢ over limit — switching to ${otherSide} at ${otherAsk}¢`);
+        } else {
+          await botLog("info", `Coin flip: ${candidate.ticker} both sides over limit (YES ${yesAsk}¢ / NO ${noAsk}¢) — trying next market`);
+          continue;
+        }
       }
 
       market = m;
@@ -1406,6 +1416,10 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
 
     const { ticker, title } = market;
 
+    // Add 1¢ buffer above ask to cross the spread and ensure fill even if price ticks up
+    // Cap at maxAsk so we never overpay beyond the user's limit
+    const orderPriceCents = Math.min(ask + 1, maxAsk);
+
     const buyResp = await kalshiFetch("POST", "/portfolio/orders", {
       ticker,
       client_order_id: `coinflip-${Date.now()}`,
@@ -1413,7 +1427,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       action: "buy",
       side: side.toLowerCase(),
       count: 1,
-      ...(side === "YES" ? { yes_price: ask / 100 } : { no_price: ask / 100 }),
+      ...(side === "YES" ? { yes_price: orderPriceCents / 100 } : { no_price: orderPriceCents / 100 }),
     }) as { order?: { order_id?: string } };
 
     const buyOrderId = buyResp?.order?.order_id;
