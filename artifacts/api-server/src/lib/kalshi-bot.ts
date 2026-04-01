@@ -1317,6 +1317,12 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       return { success: false, message: `Max open positions (${botConfig.maxOpenPositions}) already reached — coin flip blocked.` };
     }
 
+    // Build set of market tickers already occupied — skip these when selecting a new market
+    const occupiedTickers = new Set<string>([
+      ...openMarkets,
+      ...openRows.map(t => t.marketId),
+    ]);
+
     const now = Date.now();
 
     // Query each enabled coin's series directly — avoids pagination/ordering issues with the
@@ -1377,6 +1383,9 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
 
     let triedAll = 0;
     for (const candidate of shuffled) {
+      // Skip markets already held — each open position must be on a different market
+      if (occupiedTickers.has(candidate.ticker)) continue;
+
       triedAll++;
       const detailResp = await kalshiFetch("GET", `/markets/${candidate.ticker}`) as { market?: KalshiMarket };
       const m = detailResp.market ?? candidate;
