@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useCoinFlipTrade, useGetCoinFlipAuto, useSetCoinFlipAuto, getGetCoinFlipAutoQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, AlertCircle, Coins, RefreshCw } from "lucide-react";
+import { CheckCircle2, AlertCircle, Coins, RefreshCw, Trash2 } from "lucide-react";
 
 type FlipResult = {
   success: boolean;
@@ -31,8 +31,20 @@ export function CoinFlip() {
     },
   });
 
+  const [clearing, setClearing] = useState(false);
   const autoEnabled = autoState?.enabled ?? false;
   const lastResult = autoState?.lastResult ?? null;
+  const isStuck = !lastResult?.success && (lastResult?.message ?? "").includes("Max open positions");
+
+  async function clearStuck() {
+    setClearing(true);
+    try {
+      await fetch("/api/bot/clear-positions", { method: "POST" });
+      queryClient.invalidateQueries({ queryKey: getGetCoinFlipAutoQueryKey() });
+    } finally {
+      setClearing(false);
+    }
+  }
 
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -171,15 +183,36 @@ export function CoinFlip() {
           </div>
         )}
         {autoEnabled && lastResult && (
-          <div className={`mt-2 flex items-start gap-1.5 p-2 rounded-lg text-[10px] ${
+          <div className={`mt-2 p-2 rounded-lg text-[10px] ${
             lastResult.success
               ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300"
+              : isStuck
+              ? "bg-red-500/10 border border-red-500/20 text-red-300"
               : "bg-white/[0.03] border border-white/5 text-slate-400"
           }`}>
-            {lastResult.success
-              ? <CheckCircle2 className="w-3 h-3 mt-0.5 shrink-0 text-emerald-400" />
-              : <AlertCircle className="w-3 h-3 mt-0.5 shrink-0 text-slate-500" />}
-            <span className="break-all">{lastResult.message}</span>
+            <div className="flex items-start gap-1.5">
+              {lastResult.success
+                ? <CheckCircle2 className="w-3 h-3 mt-0.5 shrink-0 text-emerald-400" />
+                : <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />}
+              <div className="flex-1 min-w-0">
+                {lastResult.success && lastResult.side && (
+                  <span className={`inline-block font-bold text-[11px] mr-1 ${lastResult.side === "YES" ? "text-emerald-400" : "text-orange-400"}`}>
+                    {lastResult.side}
+                  </span>
+                )}
+                <span className="break-all">{lastResult.message}</span>
+              </div>
+            </div>
+            {isStuck && (
+              <button
+                onClick={clearStuck}
+                disabled={clearing}
+                className="mt-2 w-full flex items-center justify-center gap-1.5 py-1 rounded bg-red-500/20 border border-red-500/30 text-red-300 hover:bg-red-500/30 transition-colors disabled:opacity-50"
+              >
+                <Trash2 className="w-3 h-3" />
+                {clearing ? "Clearing…" : "Clear Stuck Position"}
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState } from "../lib/kalshi-bot";
+import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count } from "drizzle-orm";
 import {
@@ -169,6 +169,11 @@ router.post("/bot/coin-flip/auto", (req, res): void => {
     ? startCoinFlipAuto(intervalSecs ?? 60)
     : stopCoinFlipAuto();
   res.json(CoinFlipAutoStatus.parse(state));
+});
+
+router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
+  const result = await clearStuckPositions();
+  res.json(result);
 });
 
 export default router;

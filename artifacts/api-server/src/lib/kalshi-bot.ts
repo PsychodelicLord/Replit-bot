@@ -743,8 +743,8 @@ export async function retryOpenPositions(): Promise<void> {
       }
 
       // ── Detect manual sells / external position closure ───────────────────
-      // If we've been open > 2 min and Kalshi shows 0 contracts remaining, the position was closed externally
-      if (livePositions.length > 0 && tradeAgeMs > 120_000) {
+      // If we've been open > 30s and Kalshi shows 0 contracts remaining, the position was closed externally
+      if (livePositions.length > 0 && tradeAgeMs > 30_000) {
         const livePos = livePositions.find(p => p.ticker_name === trade.marketId);
         const remaining = livePos?.position ?? 0;
         if (remaining === 0) {
@@ -1054,7 +1054,7 @@ interface CoinFlipAutoState {
   enabled: boolean;
   intervalSecs: number;
   nextFlipAt: number | null;
-  lastResult: { success: boolean; message: string } | null;
+  lastResult: { success: boolean; message: string; side?: "YES" | "NO" } | null;
 }
 
 const coinFlipAuto: CoinFlipAutoState = {
@@ -1099,7 +1099,7 @@ function scheduleCoinFlip(retryDelaySecs?: number) {
     if (!coinFlipAuto.enabled) return;
     try {
       const result = await coinFlipTrade();
-      coinFlipAuto.lastResult = { success: result.success, message: result.message };
+      coinFlipAuto.lastResult = { success: result.success, message: result.message, side: result.side };
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
       // If no eligible markets found, retry in 3 min instead of waiting full cycle
       if (!result.success && result.message.includes("No markets")) {
@@ -1259,4 +1259,18 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
   } finally {
     tradeMutex = false;
   }
+}
+
+// ─── Force-clear stuck open positions ────────────────────────────────────────
+export async function clearStuckPositions(): Promise<{ cleared: number }> {
+  const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+  for (const trade of openTrades) {
+    await db.update(tradesTable)
+      .set({ status: "closed", pnlCents: 0, closedAt: new Date() })
+      .where(eq(tradesTable.id, trade.id));
+    openMarkets.delete(trade.marketId);
+    await botLog("warn", `🧹 Trade ${trade.id} force-cleared via dashboard reset`, { tradeId: trade.id });
+  }
+  state.openPositionCount = 0;
+  return { cleared: openTrades.length };
 }
