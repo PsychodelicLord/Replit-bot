@@ -257,6 +257,7 @@ export const CoinFlipAutoStatus = zod.object({
   enabled: zod.boolean(),
   intervalSecs: zod.number(),
   nextFlipAt: zod.number().nullable(),
+  lastResult: zod.object({ success: zod.boolean(), message: zod.string() }).nullable().optional(),
 });
 
 /**

@@ -1,6 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { retryOpenPositions, refreshBalance } from "./lib/kalshi-bot";
+import { retryOpenPositions, refreshBalance, startCoinFlipAuto } from "./lib/kalshi-bot";
 
 const rawPort = process.env["PORT"] ?? "3000";
 const port = Number(rawPort);
@@ -25,4 +25,10 @@ app.listen(port, (err) => {
   // Global balance refresh — keeps the dashboard balance live even when main bot is off.
   refreshBalance();
   setInterval(refreshBalance, 60_000);
+
+  // Auto-start coin flip if env var is set (useful for Railway so it survives restarts)
+  if (process.env["COINFLIP_AUTO_START"] === "true") {
+    startCoinFlipAuto(900);
+    logger.info("🪙 Coin flip auto-mode started automatically via COINFLIP_AUTO_START");
+  }
 });

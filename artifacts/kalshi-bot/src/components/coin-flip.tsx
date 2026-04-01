@@ -32,6 +32,7 @@ export function CoinFlip() {
   });
 
   const autoEnabled = autoState?.enabled ?? false;
+  const lastResult = autoState?.lastResult ?? null;
 
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -166,7 +167,19 @@ export function CoinFlip() {
         {autoEnabled && (
           <div className="flex items-center gap-1.5 mt-2 text-[10px] text-yellow-400/70">
             <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
-            <span>Auto flip active — once per 15-min cycle</span>
+            <span>Auto flip active — fires each 15-min cycle</span>
+          </div>
+        )}
+        {autoEnabled && lastResult && (
+          <div className={`mt-2 flex items-start gap-1.5 p-2 rounded-lg text-[10px] ${
+            lastResult.success
+              ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300"
+              : "bg-white/[0.03] border border-white/5 text-slate-400"
+          }`}>
+            {lastResult.success
+              ? <CheckCircle2 className="w-3 h-3 mt-0.5 shrink-0 text-emerald-400" />
+              : <AlertCircle className="w-3 h-3 mt-0.5 shrink-0 text-slate-500" />}
+            <span className="break-all">{lastResult.message}</span>
           </div>
         )}
       </div>

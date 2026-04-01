@@ -972,12 +972,14 @@ interface CoinFlipAutoState {
   enabled: boolean;
   intervalSecs: number;
   nextFlipAt: number | null;
+  lastResult: { success: boolean; message: string } | null;
 }
 
 const coinFlipAuto: CoinFlipAutoState = {
   enabled: false,
   intervalSecs: 900,
   nextFlipAt: null,
+  lastResult: null,
 };
 
 let coinFlipTimer: ReturnType<typeof setTimeout> | null = null;
@@ -992,18 +994,27 @@ function msToNextCycleStart(): number {
   return msToNextBoundary + 90_000;
 }
 
-function scheduleCoinFlip() {
+function scheduleCoinFlip(retryDelaySecs?: number) {
   if (coinFlipTimer) clearTimeout(coinFlipTimer);
   if (!coinFlipAuto.enabled) return;
-  const delay = msToNextCycleStart();
+  const delay = retryDelaySecs ? retryDelaySecs * 1000 : msToNextCycleStart();
   coinFlipAuto.nextFlipAt = Date.now() + delay;
   coinFlipTimer = setTimeout(async () => {
     if (!coinFlipAuto.enabled) return;
     try {
       const result = await coinFlipTrade();
+      coinFlipAuto.lastResult = { success: result.success, message: result.message };
       await botLog("info", `🪙 Auto-flip: ${result.message}`);
-    } catch (_) {}
-    scheduleCoinFlip();
+      // If no eligible markets found, retry in 3 min instead of waiting full cycle
+      if (!result.success && result.message.includes("No markets")) {
+        scheduleCoinFlip(180);
+      } else {
+        scheduleCoinFlip();
+      }
+    } catch (err) {
+      coinFlipAuto.lastResult = { success: false, message: String(err) };
+      scheduleCoinFlip();
+    }
   }, delay);
 }
 
