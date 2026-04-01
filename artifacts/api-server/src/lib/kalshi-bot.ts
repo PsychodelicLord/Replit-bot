@@ -654,6 +654,16 @@ async function enterTrade(
     state.openPositionCount = openMarkets.size;
     state.tradesSucceeded++;
 
+    registerOpenPosition({
+      tradeId:         trade.id,
+      marketId:        ticker,
+      side:            side as "YES" | "NO",
+      entryPriceCents: buyPriceCents,
+      contractCount:   1,
+      enteredAt:       Date.now(),
+      buyOrderId:      buyOrderId ?? null,
+    });
+
     await botLog("info",
       `✅ Bought 1x ${side} on "${title}" at ${buyPriceCents}¢ — monitoring for ≥${botConfig.minNetProfitCents}¢ net (no cap)`,
       { tradeId: trade.id, buyOrderId },
@@ -1146,6 +1156,16 @@ export async function manualTrade(
 
     openMarkets.add(ticker);
     state.openPositionCount = openMarkets.size;
+
+    registerOpenPosition({
+      tradeId:         trade.id,
+      marketId:        ticker,
+      side,
+      entryPriceCents: limitCents,
+      contractCount:   quantity,
+      enteredAt:       Date.now(),
+      buyOrderId:      buyOrderId ?? null,
+    });
 
     await botLog("info",
       `🎯 Manual: bought ${quantity}x ${side} on "${title}" at ${limitCents}¢ — order ${buyOrderId ?? "(no id)"}`,
