@@ -1396,24 +1396,14 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       const yesAsk = priceCents(m, "yes_ask");
       const noAsk  = priceCents(m, "no_ask");
 
-      // Flip the coin — if the landed side is too expensive, use the other side
-      // (both sides must still be within maxAsk; if neither qualifies, skip market)
+      // Flip the coin — strictly follow the result, no fallback to other side
       const coinYes = Math.random() < 0.5;
-      let trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
-      let tryAsk = coinYes ? yesAsk : noAsk;
+      const trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
+      const tryAsk = coinYes ? yesAsk : noAsk;
 
       if (tryAsk <= 0 || tryAsk > maxAsk) {
-        // First choice too pricey — flip to the other side
-        const otherSide: "YES" | "NO" = coinYes ? "NO" : "YES";
-        const otherAsk = coinYes ? noAsk : yesAsk;
-        if (otherAsk > 0 && otherAsk <= maxAsk) {
-          trySide = otherSide;
-          tryAsk  = otherAsk;
-          await botLog("info", `Coin flip: ${candidate.ticker} ${coinYes ? "YES" : "NO"} ask ${coinYes ? yesAsk : noAsk}¢ over limit — switching to ${otherSide} at ${otherAsk}¢`);
-        } else {
-          await botLog("info", `Coin flip: ${candidate.ticker} both sides over limit (YES ${yesAsk}¢ / NO ${noAsk}¢) — trying next market`);
-          continue;
-        }
+        await botLog("info", `Coin flip: landed ${trySide} on ${candidate.ticker} but ask ${tryAsk}¢ exceeds limit ${maxAsk}¢ — trying next market`);
+        continue;
       }
 
       market = m;
