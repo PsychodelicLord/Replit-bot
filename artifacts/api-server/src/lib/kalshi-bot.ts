@@ -649,15 +649,19 @@ const sellOrderPlacedAt = new Map<number, number>();
 
 // ─── Retry open positions ─────────────────────────────────────────────────────
 let sellMonitorRunning = false;
+let positionsInitialized = false; // false until first DB check after startup
 export async function retryOpenPositions(): Promise<void> {
   if (sellMonitorRunning) return; // prevent overlapping runs
-  // Fast in-memory check — skip DB round-trip when nothing is open
-  if (openMarkets.size === 0 && state.openPositionCount === 0) return;
+  // Fast in-memory check — but ALWAYS run DB check on the first tick after startup
+  // (openMarkets and openPositionCount are 0 after a restart even if DB has open trades)
+  if (positionsInitialized && openMarkets.size === 0 && state.openPositionCount === 0) return;
   sellMonitorRunning = true;
   try {
     const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+    positionsInitialized = true; // DB has been checked at least once — fast path now safe
     state.openPositionCount = openTrades.length;
-    // Sync in-memory set with DB (handles restarts where openMarkets was empty but DB has open trades)
+    // Sync in-memory set with DB (recovers any open trades after a server restart)
+    for (const t of openTrades) openMarkets.add(t.marketId);
     if (openTrades.length === 0) { openMarkets.clear(); return; }
 
     // Fetch live portfolio positions once — used below to detect manual sells
