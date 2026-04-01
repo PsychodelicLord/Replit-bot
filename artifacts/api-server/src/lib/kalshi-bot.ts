@@ -712,9 +712,10 @@ async function executeSell(
     { tradeId: pos.tradeId },
   );
 
-  // ── Place the sell on Kalshi ───────────────────────────────────────────────
+  // ── Place the sell on Kalshi — limit at 1¢ guarantees fill (market orders not supported) ──
+  const limitSellCents = Math.max(1, currentBidCents - 2);
   const payload = buildOrderPayload(
-    pos.marketId, `sell-${Math.abs(pos.tradeId)}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount,
+    pos.marketId, `sell-${Math.abs(pos.tradeId)}-${Date.now()}`, "limit", "sell", pos.side, pos.contractCount, limitSellCents,
   );
 
   let sellResp: { order?: { order_id?: string; yes_price?: number; no_price?: number } };
