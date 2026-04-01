@@ -621,90 +621,88 @@ async function enterTrade(
   }
 }
 
-// ─── Place a limit sell ───────────────────────────────────────────────────────
-async function placeLimitSell(
-  tradeId: number,
-  ticker: string,
-  side: string,
-  _buyPriceCents: number,
-  sellPriceCents: number,
-  contracts: number,
-): Promise<void> {
-  try {
-    const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker,
-      client_order_id: `scalp-sell-${tradeId}-${Date.now()}`,
-      type: "limit",
-      action: "sell",
-      side: side.toLowerCase(),
-      count: contracts,
-      ...(side === "YES" ? { yes_price: sellPriceCents / 100 } : { no_price: sellPriceCents / 100 }),
-    }) as { order?: { order_id?: string } };
-
-    const sellOrderId = sellResp?.order?.order_id;
-    if (!sellOrderId) {
-      await botLog("warn", `Trade ${tradeId}: sell order accepted but no order ID returned — will retry next cycle`);
-      return;
-    }
-
-    // Save sell order ID only — keep trade "open" until fill is confirmed by the monitor loop
-    await db.update(tradesTable)
-      .set({ kalshiSellOrderId: sellOrderId })
-      .where(eq(tradesTable.id, tradeId));
-
-    sellOrderPlacedAt.set(tradeId, Date.now());
-    await botLog("info",
-      `📋 Trade ${tradeId}: limit sell @ ${sellPriceCents}¢ placed (order ${sellOrderId}) — waiting for fill`,
-      { tradeId, sellPriceCents, sellOrderId },
-    );
-  } catch (err) {
-    await botLog("warn", `Failed to place limit sell for trade ${tradeId}`, String(err));
-  }
+// ─── Open positions ───────────────────────────────────────────────────────────
+// In-memory list of all active trades — synced from DB on every sell-monitor tick
+// so restarts / crashes never lose track of open positions.
+interface OpenPosition {
+  tradeId:         number;
+  marketId:        string;
+  side:            "YES" | "NO";
+  entryPriceCents: number;
+  contractCount:   number;
+  enteredAt:       number;   // ms timestamp
+  buyOrderId:      string | null;
 }
 
-// Aggressive market sell — fills immediately at whatever the market will pay
-// Trade stays "open" until fill is confirmed on the next monitor tick
-async function placeAggressiveSell(
-  tradeId: number,
-  ticker: string,
-  side: string,
-  buyPriceCents: number,
+const openPositions: OpenPosition[] = [];
+
+// Called immediately after a trade is inserted to DB so the monitor picks it up.
+export function registerOpenPosition(pos: OpenPosition): void {
+  if (!openPositions.some(p => p.tradeId === pos.tradeId)) {
+    openPositions.push(pos);
+  }
+  openMarkets.add(pos.marketId);
+  state.openPositionCount = openPositions.length;
+}
+
+// ─── Execute a sell immediately via market order ──────────────────────────────
+async function executeSell(
+  pos: OpenPosition,
   currentBidCents: number,
-  contracts: number,
-): Promise<void> {
+  reason: string,
+): Promise<boolean> {
+  await botLog("info",
+    `🔔 SELL TRIGGERED — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | reason: ${reason} | current bid: ${currentBidCents}¢`,
+    { tradeId: pos.tradeId },
+  );
+
   try {
     const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker,
-      client_order_id: `scalp-mkt-${tradeId}-${Date.now()}`,
-      type: "market",
-      action: "sell",
-      side: side.toLowerCase(),
-      count: contracts,
-    }) as { order?: { order_id?: string } };
+      ticker:           pos.marketId,
+      client_order_id: `sell-${pos.tradeId}-${Date.now()}`,
+      type:             "market",
+      action:           "sell",
+      side:             pos.side.toLowerCase(),
+      count:            pos.contractCount,
+    }) as { order?: { order_id?: string; yes_price?: number; no_price?: number } };
 
-    const sellOrderId = sellResp?.order?.order_id;
-    if (!sellOrderId) {
-      // Market order might have filled immediately without returning an ID — fall back to limit at bid-1
-      await botLog("warn", `Trade ${tradeId}: market sell accepted but no order ID — falling back to limit at bid-1`);
-      await placeLimitSell(tradeId, ticker, side, buyPriceCents, Math.max(1, currentBidCents - 1), contracts);
-      return;
-    }
+    // Use actual fill price when returned; market orders often return 0, so fall back to bid
+    const rawPrice  = pos.side === "YES"
+      ? (sellResp?.order?.yes_price ?? 0)
+      : (sellResp?.order?.no_price  ?? 0);
+    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
+    const gross     = fillPrice - pos.entryPriceCents;
+    const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
+    const netPnl    = gross - fee;
 
-    await db.update(tradesTable).set({ kalshiSellOrderId: sellOrderId }).where(eq(tradesTable.id, tradeId));
-    sellOrderPlacedAt.set(tradeId, Date.now());
+    await db.update(tradesTable).set({
+      status:            "closed",
+      sellPriceCents:    fillPrice,
+      pnlCents:          netPnl,
+      feeCents:          fee,
+      kalshiSellOrderId: sellResp?.order?.order_id ?? null,
+      closedAt:          new Date(),
+    }).where(eq(tradesTable.id, pos.tradeId));
+
+    // Remove from in-memory list
+    const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+    if (idx >= 0) openPositions.splice(idx, 1);
+    openMarkets.delete(pos.marketId);
+    state.openPositionCount = openPositions.length;
+
     await botLog("info",
-      `📋 Trade ${tradeId}: market sell placed (order ${sellOrderId}) — waiting for fill`,
-      { tradeId, sellOrderId },
+      `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢ (fee ${fee}¢)`,
+      { tradeId: pos.tradeId, fillPrice, netPnl },
     );
+    return true;
   } catch (err) {
-    // Market order failed (e.g. no liquidity) — fall back to limit sell at bid
-    await botLog("warn", `Trade ${tradeId}: market sell failed (${String(err)}) — falling back to limit at bid`);
-    await placeLimitSell(tradeId, ticker, side, buyPriceCents, currentBidCents, contracts);
+    await botLog("warn",
+      `❌ SELL FAILED — Trade ${pos.tradeId}: ${String(err)}`,
+      { tradeId: pos.tradeId },
+    );
+    return false;
   }
 }
-
-// Track when each sell order was placed (tradeId → timestamp) for stale-order repricing
-const sellOrderPlacedAt = new Map<number, number>();
 
 // ─── Startup portfolio sync ──────────────────────────────────────────────────
 // Queries Kalshi for any open positions not in the DB (e.g. after a DB reset or
@@ -782,301 +780,207 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
   }
 }
 
-// ─── Retry open positions ─────────────────────────────────────────────────────
+// ─── Sell monitor — runs every 2s via setInterval in index.ts ────────────────
 let sellMonitorRunning = false;
-let positionsInitialized = false; // false until first DB check after startup
+let positionsInitialized = false;
+
 export async function retryOpenPositions(): Promise<void> {
-  if (sellMonitorRunning) return; // prevent overlapping runs
-  // Fast in-memory check — but ALWAYS run DB check on the first tick after startup
-  // (openMarkets and openPositionCount are 0 after a restart even if DB has open trades)
-  if (positionsInitialized && openMarkets.size === 0 && state.openPositionCount === 0) return;
+  if (sellMonitorRunning) return;                                    // lock
+  if (positionsInitialized && openPositions.length === 0) return;   // fast exit
   sellMonitorRunning = true;
+
   try {
-    const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-    positionsInitialized = true; // DB has been checked at least once — fast path now safe
-    state.openPositionCount = openTrades.length;
-    // Sync in-memory set with DB (recovers any open trades after a server restart)
-    for (const t of openTrades) openMarkets.add(t.marketId);
-    if (openTrades.length === 0) { openMarkets.clear(); return; }
+    // ── Sync openPositions with DB (recovers after restart) ──────────────────
+    const dbOpen = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+    positionsInitialized = true;
 
-    // Fetch live portfolio positions once — used below to detect manual sells
-    let livePositions: Array<{ ticker_name?: string; position?: number }> = [];
-    try {
-      const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
-        positions?: Array<{ ticker_name?: string; position?: number }>
-      };
-      livePositions = posResp.positions ?? [];
-    } catch (_) { /* non-fatal — will skip position check this cycle */ }
-
-    for (const trade of openTrades) {
-      const now = Date.now();
-      const tradeAgeMs = now - trade.createdAt.getTime();
-
-      // Check if buy order was actually filled (after 60s of no exit opportunity)
-      if (tradeAgeMs >= 60_000 && tradeAgeMs < 90_000 && trade.kalshiBuyOrderId) {
-        try {
-          const orderResp = await kalshiFetch("GET", `/portfolio/orders/${trade.kalshiBuyOrderId}`) as {
-            order?: { status?: string; remaining_count?: number; filled_count?: number }
-          };
-          const order = orderResp.order;
-          const status = order?.status ?? "";
-          // Consider filled if: filled_count > 0 OR status is a terminal fill state
-          const filled = (order?.filled_count ?? 0) > 0
-            || status === "filled"
-            || status === "settled"
-            || status === "executed";
-          // Only cancel if we are CERTAIN it is still resting/open and not filled
-          const definitelyUnfilled = !filled && (status === "resting" || status === "open" || status === "pending");
-          if (definitelyUnfilled) {
-            // Cancel the unfilled order and clean up
-            try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiBuyOrderId}`); } catch (_) {}
-            await db.update(tradesTable).set({ status: "cancelled", closedAt: new Date() })
-              .where(eq(tradesTable.id, trade.id));
-            openMarkets.delete(trade.marketId);
-            state.openPositionCount = openMarkets.size;
-            await botLog("warn",
-              `🚫 Trade ${trade.id} cancelled — buy order still ${status} after 60s (not filled)`, { tradeId: trade.id }
-            );
-            continue;
-          } else if (!filled) {
-            // Unknown status — log and keep holding rather than cancelling
-            await botLog("info",
-              `Trade ${trade.id}: buy order status="${status}" filled_count=${order?.filled_count ?? 0} — keeping position open`, { tradeId: trade.id }
-            );
-          }
-        } catch (_) {
-          // Can't verify — continue holding the position
-        }
-      }
-
-      // ── Detect manual sells / external position closure ───────────────────
-      // If we've been open > 30s and Kalshi shows 0 contracts remaining, the position was closed externally
-      if (livePositions.length > 0 && tradeAgeMs > 30_000) {
-        const livePos = livePositions.find(p => p.ticker_name === trade.marketId);
-        const remaining = livePos?.position ?? 0;
-        if (remaining === 0) {
-          // Position gone on Kalshi — try to get actual sell price from fill history
-          let pnlCents = 0;
-          let sellPriceCents: number | undefined;
-          try {
-            const fillsResp = await kalshiFetch("GET", `/portfolio/fills?ticker=${trade.marketId}&limit=20`) as {
-              fills?: Array<{ action?: string; side?: string; yes_price?: number; no_price?: number; count?: number }>
-            };
-            const sells = (fillsResp.fills ?? []).filter(f => f.action === "sell");
-            if (sells.length > 0) {
-              const f = sells[0];
-              const rawFp = trade.side === "YES" ? (f.yes_price ?? 0) : (f.no_price ?? 0);
-              const fp = rawFp > 0
-                ? Math.round(rawFp * 100)
-                : currentBid > 0 ? currentBid : 0;
-              if (fp > 0) {
-                sellPriceCents = fp;
-                const gross = fp - trade.buyPriceCents;
-                const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
-                pnlCents = gross - fee;
-              }
-            }
-          } catch (_) { /* non-fatal — fall back to 0 */ }
-
-          await db.update(tradesTable).set({
-            status: "closed",
-            pnlCents,
-            sellPriceCents,
-            closedAt: new Date(),
-          }).where(eq(tradesTable.id, trade.id));
-          openMarkets.delete(trade.marketId);
-          sellOrderPlacedAt.delete(trade.id);
-          state.openPositionCount = openMarkets.size;
-          await botLog("warn",
-            `🖐 Trade ${trade.id}: manually closed — sell ~${sellPriceCents ?? "?"}¢, net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
-            { tradeId: trade.id, pnlCents },
-          );
-          continue;
-        }
-      }
-
-      try {
-        const resp = await kalshiFetch("GET", `/markets/${trade.marketId}`) as { market?: KalshiMarket };
-        const m = resp.market;
-
-        // ── Market settled/closed — record actual outcome ───────────────────
-        // Kalshi returns "active" for live markets and "open" in some contexts — treat both as live
-        const isLive = !m?.status || m.status === "open" || m.status === "active";
-        if (!m || !isLive) {
-          const settled = m?.status === "settled" || m?.status === "finalized";
-          const ourSideWon = settled && m?.result?.toLowerCase() === trade.side.toLowerCase();
-
-          let pnlCents: number;
-          let logMsg: string;
-
-          if (ourSideWon) {
-            // We won — contract pays out 100¢
-            const gross = 100 - trade.buyPriceCents;
-            const fee = Math.floor(botConfig.feeRate * gross);
-            pnlCents = gross - fee;
-            logMsg = `🏆 Trade ${trade.id} settled YES — won! Net +${pnlCents}¢ (fee: ${fee}¢)`;
-          } else if (settled) {
-            // Settled but our side lost
-            pnlCents = -trade.buyPriceCents;
-            logMsg = `💸 Trade ${trade.id} settled — lost ${trade.buyPriceCents}¢`;
-          } else {
-            // Market closed but not yet settled — use a neutral expiry
-            pnlCents = -trade.buyPriceCents;
-            logMsg = `⚠️ Trade ${trade.id} market closed (status: ${m?.status ?? "unknown"}) — marking expired`;
-          }
-
-          await db.update(tradesTable).set({
-            status: settled && ourSideWon ? "closed" : "expired",
-            pnlCents,
-            closedAt: new Date(),
-          }).where(eq(tradesTable.id, trade.id));
-
-          openMarkets.delete(trade.marketId);
-          state.openPositionCount = openMarkets.size;
-          await botLog(ourSideWon ? "info" : "warn", logMsg, { tradeId: trade.id });
-          continue;
-        }
-
-        const currentBid = trade.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
-        const ageMins = (tradeAgeMs / 60_000).toFixed(1);
-        const minsLeft = (new Date(m.close_time).getTime() - now) / 60_000;
-        const targetSellPrice = calcTargetSellPrice(trade.buyPriceCents);
-
-        // Debug: log when approaching exit window
-        if (minsLeft > 0 && minsLeft <= (botConfig.exitWindowMins + 1)) {
-          await botLog("debug", `Trade ${trade.id}: minsLeft=${minsLeft.toFixed(1)}, exitWindow=${botConfig.exitWindowMins}, hasOrderId=${!!trade.kalshiSellOrderId}`);
-        }
-
-        // ── Sell order already placed on Kalshi — check fill status ──────────
-        if (trade.kalshiSellOrderId) {
-          if (minsLeft <= 2) {
-            // Panic window: cancel resting sell and re-place at current bid
-            try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiSellOrderId}`); } catch (_) {}
-            await db.update(tradesTable).set({ kalshiSellOrderId: null }).where(eq(tradesTable.id, trade.id));
-            if (currentBid > 0) {
-              await botLog("warn", `⏰ Trade ${trade.id} panic — cancelled resting sell, re-placing at bid ${currentBid}¢`, { tradeId: trade.id });
-              await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
-            }
-          } else {
-            // Check if the resting sell order was filled
-            try {
-              const sellOrderResp = await kalshiFetch("GET", `/portfolio/orders/${trade.kalshiSellOrderId}`) as {
-                order?: { status?: string; filled_count?: number; yes_price?: number; no_price?: number }
-              };
-              const sellOrder = sellOrderResp.order;
-              const filled = (sellOrder?.filled_count ?? 0) > 0;
-              if (filled) {
-                // Fill confirmed — record P&L
-                // Market sell orders return yes_price=0 (no fixed price); use currentBid as proxy.
-                // Limit sell orders return the actual limit price — use that directly.
-                const rawPrice = trade.side === "YES" ? (sellOrder?.yes_price ?? 0) : (sellOrder?.no_price ?? 0);
-                const fillPrice = rawPrice > 0
-                  ? Math.round(rawPrice * 100)
-                  : currentBid > 0 ? currentBid : targetSellPrice;
-                const gross = fillPrice - trade.buyPriceCents;
-                const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
-                const netPnl = gross - fee;
-                await db.update(tradesTable).set({
-                  status: "closed", sellPriceCents: fillPrice, pnlCents: netPnl, feeCents: fee, closedAt: new Date(),
-                }).where(eq(tradesTable.id, trade.id));
-                openMarkets.delete(trade.marketId);
-                sellOrderPlacedAt.delete(trade.id);
-                state.openPositionCount = openMarkets.size;
-                await botLog("info", `✅ Sell order filled — trade ${trade.id} closed at ${fillPrice}¢, net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`, { tradeId: trade.id });
-              } else {
-                // Not filled yet — check if stale (> 20s old) and reprice if bid is still profitable
-                const placedAt = sellOrderPlacedAt.get(trade.id) ?? 0;
-                const sellOrderAgeMs = Date.now() - placedAt;
-                const grossProfit = currentBid - trade.buyPriceCents;
-                const currentNet = grossToNet(grossProfit);
-                if (sellOrderAgeMs > 20_000 && currentNet >= botConfig.minNetProfitCents && currentBid > 0) {
-                  // Cancel stale sell and re-place at current bid
-                  try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiSellOrderId}`); } catch (_) {}
-                  await db.update(tradesTable).set({ kalshiSellOrderId: null }).where(eq(tradesTable.id, trade.id));
-                  sellOrderPlacedAt.delete(trade.id);
-                  await botLog("warn", `🔄 Trade ${trade.id}: stale sell repriced — cancelling @ ${targetSellPrice}¢, re-placing at bid ${currentBid}¢`);
-                  await placeAggressiveSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
-                } else {
-                  await botLog("info", `📋 Trade ${trade.id}: resting sell @ ${targetSellPrice}¢ pending | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left`);
-                }
-              }
-            } catch (_) {
-              await botLog("info", `📋 Trade ${trade.id}: sell order pending | ${minsLeft.toFixed(1)}min left`);
-            }
-          }
-
-        // ── Exit window reached — place resting limit sell on Kalshi ─────────
-        } else if (minsLeft <= botConfig.exitWindowMins) {
-          if (targetSellPrice >= 100) {
-            // Target unreachable (e.g. bought at 96¢ trying for 5¢ net) — exit at bid
-            const fallbackPrice = Math.max(currentBid, trade.buyPriceCents + 1);
-            await botLog("warn", `⚠️ Trade ${trade.id} target ${targetSellPrice}¢ unreachable — placing sell at ${fallbackPrice}¢`);
-            await placeLimitSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, fallbackPrice, trade.contractCount);
-          } else {
-            // Place resting limit sell at target — don't mark trade closed yet
-            try {
-              const priceField = trade.side === "YES" ? "yes_price" : "no_price";
-              const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
-                ticker: trade.marketId,
-                client_order_id: `sell-${trade.id}-${Date.now()}`,
-                type: "limit",
-                action: "sell",
-                side: trade.side.toLowerCase(),
-                [priceField]: targetSellPrice / 100,
-                count: trade.contractCount,
-              }) as { order?: { order_id?: string } };
-              const sellOrderId = sellResp.order?.order_id;
-              if (sellOrderId) {
-                await db.update(tradesTable).set({ kalshiSellOrderId: sellOrderId }).where(eq(tradesTable.id, trade.id));
-                await botLog("info",
-                  `📋 Trade ${trade.id}: placed limit sell @ ${targetSellPrice}¢ (net +${botConfig.minNetProfitCents}¢) | ${minsLeft.toFixed(1)}min left`,
-                  { tradeId: trade.id, targetSellPrice },
-                );
-              } else {
-                await botLog("warn", `Trade ${trade.id}: sell order placed but no order ID returned`);
-              }
-            } catch (sellErr) {
-              await botLog("warn", `Trade ${trade.id}: failed to place limit sell — ${String(sellErr)}`);
-            }
-          }
-
-        // ── Still holding — exit window not yet open ──────────────────────────
-        } else {
-          const grossProfit = currentBid - trade.buyPriceCents;
-          const netProfit = grossToNet(grossProfit);
-          if (netProfit >= botConfig.minNetProfitCents && currentBid > 0) {
-            // Price already at target — place aggressive limit sell at bid (fills against existing buy orders)
-            await botLog("info",
-              `🎯 Trade ${trade.id}: price hit target early (bid ${currentBid}¢, net +${netProfit}¢) — selling now`,
-              { tradeId: trade.id, currentBid, netProfit },
-            );
-            await placeAggressiveSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
-          } else {
-            await botLog("info",
-              `⏸ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢) holding | bid ${currentBid}¢ | net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | ${minsLeft.toFixed(1)}min left | sell window opens at ${botConfig.exitWindowMins}min`,
-            );
-          }
-        }
-      } catch (err) {
-        await botLog("warn", `Failed to check position ${trade.id}`, String(err));
-
-        // Fallback expiry if we can't reach the API and trade is very old
-        if (tradeAgeMs > 20 * 60_000) {
-          await db.update(tradesTable).set({
-            status: "expired",
-            pnlCents: -trade.buyPriceCents,
-            closedAt: new Date(),
-          }).where(eq(tradesTable.id, trade.id));
-          openMarkets.delete(trade.marketId);
-          state.openPositionCount = openMarkets.size;
-          await botLog("warn", `⚠️ Trade ${trade.id} force-expired after 20min (API unreachable)`, { tradeId: trade.id });
-        }
+    // Add DB trades missing from the in-memory list
+    for (const t of dbOpen) {
+      if (!openPositions.some(p => p.tradeId === t.id)) {
+        openPositions.push({
+          tradeId:         t.id,
+          marketId:        t.marketId,
+          side:            t.side as "YES" | "NO",
+          entryPriceCents: t.buyPriceCents,
+          contractCount:   t.contractCount,
+          enteredAt:       t.createdAt.getTime(),
+          buyOrderId:      t.kalshiBuyOrderId ?? null,
+        });
+        openMarkets.add(t.marketId);
       }
     }
-    // Refresh daily P&L from DB after processing all trades — single source of truth
+    // Drop positions no longer open in DB
+    const dbIds = new Set(dbOpen.map(t => t.id));
+    for (let i = openPositions.length - 1; i >= 0; i--) {
+      if (!dbIds.has(openPositions[i].tradeId)) openPositions.splice(i, 1);
+    }
+
+    state.openPositionCount = openPositions.length;
+    if (openPositions.length === 0) { openMarkets.clear(); return; }
+
+    // ── One portfolio-positions call for manual-sell detection ────────────────
+    let livePositions: Array<{ ticker_name?: string; position?: number }> = [];
+    try {
+      const pr = await kalshiFetch("GET", "/portfolio/positions") as {
+        positions?: Array<{ ticker_name?: string; position?: number }>
+      };
+      livePositions = pr.positions ?? [];
+    } catch (_) { /* non-fatal — skip manual-sell detection this tick */ }
+
+    const now = Date.now();
+
+    for (const pos of [...openPositions]) {
+      try {
+        const tradeAgeMs = now - pos.enteredAt;
+
+        // ── Cancel if buy never filled (60–90s window) ──────────────────────
+        if (tradeAgeMs >= 60_000 && tradeAgeMs < 90_000 && pos.buyOrderId) {
+          try {
+            const or = await kalshiFetch("GET", `/portfolio/orders/${pos.buyOrderId}`) as {
+              order?: { status?: string; filled_count?: number }
+            };
+            const status  = or.order?.status ?? "";
+            const filled  = (or.order?.filled_count ?? 0) > 0 ||
+              ["filled", "settled", "executed"].includes(status);
+            const resting = !filled && ["resting", "open", "pending"].includes(status);
+
+            if (resting) {
+              try { await kalshiFetch("DELETE", `/portfolio/orders/${pos.buyOrderId}`); } catch (_) {}
+              await db.update(tradesTable)
+                .set({ status: "cancelled", closedAt: new Date() })
+                .where(eq(tradesTable.id, pos.tradeId));
+              const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+              if (idx >= 0) openPositions.splice(idx, 1);
+              openMarkets.delete(pos.marketId);
+              state.openPositionCount = openPositions.length;
+              await botLog("warn",
+                `🚫 Trade ${pos.tradeId} cancelled — buy order still resting after 60s`,
+                { tradeId: pos.tradeId },
+              );
+              continue;
+            }
+          } catch (_) { /* can't verify — keep holding */ }
+        }
+
+        // ── Detect manual sell (position gone from Kalshi) ──────────────────
+        if (livePositions.length > 0 && tradeAgeMs > 30_000) {
+          const remaining = (livePositions.find(p => p.ticker_name === pos.marketId)?.position) ?? 0;
+          if (remaining === 0) {
+            let sellPriceCents = 0;
+            let pnlCents       = 0;
+            try {
+              const fr = await kalshiFetch("GET", `/portfolio/fills?ticker=${pos.marketId}&limit=20`) as {
+                fills?: Array<{ action?: string; yes_price?: number; no_price?: number }>
+              };
+              const sellFill = (fr.fills ?? []).find(f => f.action === "sell");
+              if (sellFill) {
+                const rawFp = pos.side === "YES" ? (sellFill.yes_price ?? 0) : (sellFill.no_price ?? 0);
+                if (rawFp > 0) {
+                  sellPriceCents = Math.round(rawFp * 100);
+                  const gross    = sellPriceCents - pos.entryPriceCents;
+                  const fee      = Math.floor(botConfig.feeRate * Math.max(0, gross));
+                  pnlCents       = gross - fee;
+                }
+              }
+            } catch (_) {}
+
+            await db.update(tradesTable).set({
+              status: "closed", pnlCents,
+              sellPriceCents: sellPriceCents || undefined,
+              closedAt: new Date(),
+            }).where(eq(tradesTable.id, pos.tradeId));
+            const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+            if (idx >= 0) openPositions.splice(idx, 1);
+            openMarkets.delete(pos.marketId);
+            state.openPositionCount = openPositions.length;
+            await botLog("info",
+              `🖐 Trade ${pos.tradeId} manually closed | sell ~${sellPriceCents}¢ | net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
+              { tradeId: pos.tradeId },
+            );
+            await refreshDailyPnl();
+            continue;
+          }
+        }
+
+        // ── Fetch current market ─────────────────────────────────────────────
+        const mResp  = await kalshiFetch("GET", `/markets/${pos.marketId}`) as { market?: KalshiMarket };
+        const m      = mResp.market;
+        const isLive = !m?.status || m.status === "open" || m.status === "active";
+
+        // ── Market settled / expired ─────────────────────────────────────────
+        if (!m || !isLive) {
+          const settled    = m?.status === "settled" || m?.status === "finalized";
+          const ourSideWon = settled && m?.result?.toLowerCase() === pos.side.toLowerCase();
+          const pnlCents   = ourSideWon
+            ? (() => { const g = 100 - pos.entryPriceCents; return g - Math.floor(botConfig.feeRate * g); })()
+            : -pos.entryPriceCents;
+
+          await db.update(tradesTable).set({
+            status:   settled && ourSideWon ? "closed" : "expired",
+            pnlCents, closedAt: new Date(),
+          }).where(eq(tradesTable.id, pos.tradeId));
+          const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+          if (idx >= 0) openPositions.splice(idx, 1);
+          openMarkets.delete(pos.marketId);
+          state.openPositionCount = openPositions.length;
+          await botLog(ourSideWon ? "info" : "warn",
+            ourSideWon
+              ? `🏆 Trade ${pos.tradeId} settled — WON +${pnlCents}¢`
+              : `💸 Trade ${pos.tradeId} settled — lost ${pos.entryPriceCents}¢`,
+            { tradeId: pos.tradeId },
+          );
+          await refreshDailyPnl();
+          continue;
+        }
+
+        // ── Live market — evaluate sell conditions ───────────────────────────
+        const currentBid  = pos.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
+        const minsLeft    = (new Date(m.close_time).getTime() - now) / 60_000;
+        const grossProfit = currentBid - pos.entryPriceCents;
+        const netProfit   = grossToNet(grossProfit);
+
+        await botLog("info",
+          `🔍 Checking sell conditions — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | net: ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | ${minsLeft.toFixed(1)}min left`,
+          { tradeId: pos.tradeId },
+        );
+
+        // Take-profit check
+        const tpMet = currentBid > 0 && netProfit >= botConfig.minNetProfitCents;
+        await botLog("info",
+          `📊 Take-profit: ${tpMet ? "TRUE ✓" : "FALSE"} | need +${botConfig.minNetProfitCents}¢ net, have ${netProfit >= 0 ? "+" : ""}${netProfit}¢`,
+        );
+        if (tpMet) {
+          await executeSell(pos, currentBid, `take-profit (net ${netProfit >= 0 ? "+" : ""}${netProfit}¢)`);
+          continue;
+        }
+
+        // Exit-window check — force sell before expiry
+        const exitMet = minsLeft > 0 && minsLeft <= botConfig.exitWindowMins;
+        await botLog("info",
+          `📊 Exit-window: ${exitMet ? "TRUE ✓" : "FALSE"} | ${minsLeft.toFixed(1)}min left (exit at ≤${botConfig.exitWindowMins}min)`,
+        );
+        if (exitMet) {
+          await executeSell(pos, Math.max(currentBid, 1), `exit-window (${minsLeft.toFixed(1)}min remaining)`);
+          continue;
+        }
+
+        // Safety net — force exit if trade is over 20 minutes old with no close
+        if (tradeAgeMs > 20 * 60_000) {
+          await executeSell(pos, Math.max(currentBid, 1), "force-expiry (>20min held)");
+          continue;
+        }
+
+      } catch (err) {
+        await botLog("warn",
+          `❌ Sell monitor error — Trade ${pos.tradeId}: ${String(err)}`,
+          { tradeId: pos.tradeId },
+        );
+      }
+    }
+
     await refreshDailyPnl();
   } catch (err) {
-    logger.error({ err }, "retryOpenPositions failed");
+    logger.error({ err }, "sellMonitor failed");
   } finally {
     sellMonitorRunning = false;
   }
@@ -1447,8 +1351,15 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       minutesRemaining: minutesLeft,
     }).returning();
 
-    openMarkets.add(ticker);
-    state.openPositionCount = openMarkets.size;
+    registerOpenPosition({
+      tradeId:         trade.id,
+      marketId:        ticker,
+      side,
+      entryPriceCents: ask,
+      contractCount:   1,
+      enteredAt:       Date.now(),
+      buyOrderId:      buyOrderId ?? null,
+    });
     state.tradesAttempted++;
     state.tradesSucceeded++;
 
@@ -1483,7 +1394,8 @@ export async function clearStuckPositions(): Promise<{ cleared: number }> {
       .set({ status: "closed", pnlCents: 0, closedAt: new Date() })
       .where(eq(tradesTable.id, trade.id));
     openMarkets.delete(trade.marketId);
-    sellOrderPlacedAt.delete(trade.id);
+    const idx = openPositions.findIndex(p => p.tradeId === trade.id);
+    if (idx >= 0) openPositions.splice(idx, 1);
     await botLog("warn", `🧹 Trade ${trade.id} force-cleared via dashboard reset`, { tradeId: trade.id });
   }
   state.openPositionCount = 0;
