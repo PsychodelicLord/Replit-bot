@@ -865,9 +865,10 @@ export async function retryOpenPositions(): Promise<void> {
             const sells = (fillsResp.fills ?? []).filter(f => f.action === "sell");
             if (sells.length > 0) {
               const f = sells[0];
-              const fp = trade.side === "YES"
-                ? Math.round((f.yes_price ?? 0) * 100)
-                : Math.round((f.no_price ?? 0) * 100);
+              const rawFp = trade.side === "YES" ? (f.yes_price ?? 0) : (f.no_price ?? 0);
+              const fp = rawFp > 0
+                ? Math.round(rawFp * 100)
+                : currentBid > 0 ? currentBid : 0;
               if (fp > 0) {
                 sellPriceCents = fp;
                 const gross = fp - trade.buyPriceCents;
@@ -966,9 +967,12 @@ export async function retryOpenPositions(): Promise<void> {
               const filled = (sellOrder?.filled_count ?? 0) > 0;
               if (filled) {
                 // Fill confirmed — record P&L
-                const fillPrice = trade.side === "YES"
-                  ? Math.round((sellOrder?.yes_price ?? targetSellPrice / 100) * 100)
-                  : Math.round((sellOrder?.no_price ?? targetSellPrice / 100) * 100);
+                // Market sell orders return yes_price=0 (no fixed price); use currentBid as proxy.
+                // Limit sell orders return the actual limit price — use that directly.
+                const rawPrice = trade.side === "YES" ? (sellOrder?.yes_price ?? 0) : (sellOrder?.no_price ?? 0);
+                const fillPrice = rawPrice > 0
+                  ? Math.round(rawPrice * 100)
+                  : currentBid > 0 ? currentBid : targetSellPrice;
                 const gross = fillPrice - trade.buyPriceCents;
                 const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
                 const netPnl = gross - fee;
