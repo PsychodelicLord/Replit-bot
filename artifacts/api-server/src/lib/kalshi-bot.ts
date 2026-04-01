@@ -636,38 +636,38 @@ async function enterTrade(
       buildOrderPayload(ticker, `scalp-buy-${Date.now()}`, "limit", "buy", side, 1, buyPriceCents),
     ) as { order?: { order_id?: string } };
 
-    const buyOrderId = buyResp?.order?.order_id;
+    const buyOrderId = buyResp?.order?.order_id ?? null;
+    const now        = Date.now();
+    const provisId   = -now; // negative provisional ID until DB write completes
 
-    const [trade] = await db.insert(tradesTable).values({
-      marketId: ticker,
-      marketTitle: title,
-      side,
-      buyPriceCents,
-      contractCount: 1,
-      feeCents: 0,
-      status: "open",
-      kalshiBuyOrderId: buyOrderId,
-      minutesRemaining,
-    }).returning();
-
+    // ── Register IMMEDIATELY in memory — sell monitor works even if DB is down ─
     openMarkets.add(ticker);
     state.openPositionCount = openMarkets.size;
     state.tradesSucceeded++;
-
     registerOpenPosition({
-      tradeId:         trade.id,
+      tradeId:         provisId,
       marketId:        ticker,
       side:            side as "YES" | "NO",
       entryPriceCents: buyPriceCents,
       contractCount:   1,
-      enteredAt:       Date.now(),
-      buyOrderId:      buyOrderId ?? null,
+      enteredAt:       now,
+      buyOrderId,
     });
 
     await botLog("info",
       `✅ Bought 1x ${side} on "${title}" at ${buyPriceCents}¢ — monitoring for ≥${botConfig.minNetProfitCents}¢ net (no cap)`,
-      { tradeId: trade.id, buyOrderId },
+      { buyOrderId },
     );
+
+    // ── DB write is fire-and-forget — swap provisional ID when it completes ────
+    db.insert(tradesTable).values({
+      marketId: ticker, marketTitle: title, side, buyPriceCents,
+      contractCount: 1, feeCents: 0, status: "open",
+      kalshiBuyOrderId: buyOrderId, minutesRemaining,
+    }).returning().then(([trade]) => {
+      const pos = openPositions.find(p => p.tradeId === provisId);
+      if (pos) pos.tradeId = trade.id;
+    }).catch(err => logger.warn({ err }, "enterTrade: DB write failed — position tracked in memory only"));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await botLog("error", `Failed to enter trade on ${ticker}: ${msg}`);
@@ -750,21 +750,32 @@ async function executeSell(
   );
 
   // ── Persist to DB — non-fatal if DB is unavailable ────────────────────────
-  try {
-    await db.update(tradesTable).set({
+  // If tradeId is still provisional (negative), the buy DB write hasn't completed
+  // yet — wait up to 5s for it to land before writing the sell record.
+  let dbTradeId = pos.tradeId;
+  if (dbTradeId < 0) {
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      // The async buy write swaps the provisional ID in place on the same object
+      if (pos.tradeId > 0) { dbTradeId = pos.tradeId; break; }
+    }
+  }
+
+  if (dbTradeId > 0) {
+    db.update(tradesTable).set({
       status:            "closed",
       sellPriceCents:    fillPrice,
       pnlCents:          netPnl,
       feeCents:          fee,
       kalshiSellOrderId: sellResp?.order?.order_id ?? null,
       closedAt:          new Date(),
-    }).where(eq(tradesTable.id, pos.tradeId));
-  } catch (dbErr) {
-    console.error("SELL DB WRITE FAILED", dbErr);
-    await botLog("warn",
-      `⚠️ SELL DB WRITE FAILED — Trade ${pos.tradeId} sold on Kalshi but DB not updated: ${String(dbErr)}`,
-      { tradeId: pos.tradeId },
-    );
+    }).where(eq(tradesTable.id, dbTradeId))
+      .catch(dbErr => botLog("warn",
+        `⚠️ Sell DB write failed — Trade ${dbTradeId} sold on Kalshi but DB not updated: ${String(dbErr)}`,
+        { tradeId: dbTradeId },
+      ).catch(() => {}));
+  } else {
+    logger.warn({ provisId: dbTradeId }, "executeSell: buy DB write never resolved — sell not persisted to DB");
   }
 
   return true;
@@ -1140,41 +1151,43 @@ export async function manualTrade(
       buildOrderPayload(ticker, `manual-${Date.now()}`, "limit", "buy", side as "YES" | "NO", quantity, limitCents),
     ) as { order?: { order_id?: string } };
 
-    const buyOrderId = buyResp?.order?.order_id;
+    const buyOrderId = buyResp?.order?.order_id ?? null;
+    const now        = Date.now();
+    const provisId   = -now;
 
-    const [trade] = await db.insert(tradesTable).values({
-      marketId: ticker,
-      marketTitle: title ?? ticker,
-      side,
-      buyPriceCents: limitCents,
-      contractCount: quantity,
-      feeCents: 0,
-      status: "open",
-      kalshiBuyOrderId: buyOrderId,
-      minutesRemaining: minutesLeft,
-    }).returning();
-
+    // ── Register IMMEDIATELY in memory ────────────────────────────────────────
     openMarkets.add(ticker);
     state.openPositionCount = openMarkets.size;
-
     registerOpenPosition({
-      tradeId:         trade.id,
+      tradeId:         provisId,
       marketId:        ticker,
       side,
       entryPriceCents: limitCents,
       contractCount:   quantity,
-      enteredAt:       Date.now(),
-      buyOrderId:      buyOrderId ?? null,
+      enteredAt:       now,
+      buyOrderId,
     });
 
     await botLog("info",
       `🎯 Manual: bought ${quantity}x ${side} on "${title}" at ${limitCents}¢ — order ${buyOrderId ?? "(no id)"}`,
-      { tradeId: trade.id, buyOrderId },
+      { buyOrderId },
     );
+
+    // ── DB write fire-and-forget ───────────────────────────────────────────────
+    let realTradeId = provisId;
+    db.insert(tradesTable).values({
+      marketId: ticker, marketTitle: title ?? ticker, side,
+      buyPriceCents: limitCents, contractCount: quantity, feeCents: 0,
+      status: "open", kalshiBuyOrderId: buyOrderId, minutesRemaining: minutesLeft,
+    }).returning().then(([trade]) => {
+      realTradeId = trade.id;
+      const pos = openPositions.find(p => p.tradeId === provisId);
+      if (pos) pos.tradeId = trade.id;
+    }).catch(err => logger.warn({ err }, "manualTrade: DB write failed — position tracked in memory only"));
 
     return {
       success: true,
-      tradeId: trade.id,
+      tradeId: provisId,
       orderId: buyOrderId,
       message: `Order placed: ${quantity}x ${side} @ ${limitCents}¢ on ${ticker}`,
     };
@@ -1420,36 +1433,36 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       buildOrderPayload(ticker, `coinflip-${Date.now()}`, "limit", "buy", side, 1, orderPriceCents),
     ) as { order?: { order_id?: string } };
 
-    const buyOrderId = buyResp?.order?.order_id;
+    const buyOrderId = buyResp?.order?.order_id ?? null;
+    const provisId   = -Date.now();
 
-    const [trade] = await db.insert(tradesTable).values({
-      marketId: ticker,
-      marketTitle: title ?? ticker,
-      side,
-      buyPriceCents: ask,
-      contractCount: 1,
-      feeCents: 0,
-      status: "open",
-      kalshiBuyOrderId: buyOrderId,
-      minutesRemaining: minutesLeft,
-    }).returning();
-
+    // ── Register IMMEDIATELY in memory — sell monitor works even if DB is down ─
     registerOpenPosition({
-      tradeId:         trade.id,
+      tradeId:         provisId,
       marketId:        ticker,
       side,
       entryPriceCents: ask,
       contractCount:   1,
       enteredAt:       Date.now(),
-      buyOrderId:      buyOrderId ?? null,
+      buyOrderId,
     });
     state.tradesAttempted++;
     state.tradesSucceeded++;
 
     await botLog("info",
       `🪙 Coin flip: landed ${side} — bought 1x ${side} on "${title}" at ${ask}¢`,
-      { tradeId: trade.id, buyOrderId, ticker, side, ask },
+      { buyOrderId, ticker, side, ask },
     );
+
+    // ── DB write fire-and-forget — swap provisional ID when it completes ────────
+    db.insert(tradesTable).values({
+      marketId: ticker, marketTitle: title ?? ticker, side,
+      buyPriceCents: ask, contractCount: 1, feeCents: 0, status: "open",
+      kalshiBuyOrderId: buyOrderId, minutesRemaining: minutesLeft,
+    }).returning().then(([trade]) => {
+      const pos = openPositions.find(p => p.tradeId === provisId);
+      if (pos) pos.tradeId = trade.id;
+    }).catch(err => logger.warn({ err }, "coinFlip: DB write failed — position tracked in memory only"));
 
     return {
       success: true,
