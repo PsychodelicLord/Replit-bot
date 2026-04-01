@@ -787,30 +787,30 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
       positions?: Array<{ ticker_name?: string; position?: number; market_exposure?: number }>
     };
     const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0);
+
+    logger.info({ count: positions.length }, "syncPortfolioFromKalshi: Kalshi positions found");
+
     if (positions.length === 0) {
       await botLog("info", "🔄 Portfolio sync: no open Kalshi positions found");
       return;
     }
 
-    // Get all open trades currently in DB
-    const dbOpen = await db.select({ marketId: tradesTable.marketId })
-      .from(tradesTable).where(eq(tradesTable.status, "open"));
-    const dbOpenIds = new Set(dbOpen.map(r => r.marketId));
+    // Use IN-MEMORY openPositions to detect duplicates — no DB read needed.
+    // This works even when Neon is suspended.
+    const trackedMarkets = new Set(openPositions.map(p => p.marketId));
 
     let imported = 0;
     for (const pos of positions) {
       const ticker = pos.ticker_name ?? "";
-      if (!ticker || dbOpenIds.has(ticker)) continue; // already tracked
+      if (!ticker || trackedMarkets.has(ticker)) continue; // already in memory
 
-      // Fetch market details so we know the side and price
       try {
         const mResp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
         const m = mResp.market;
         if (!m) continue;
 
-        // Try to determine side and buy price from fill history
         let side: "YES" | "NO" = "YES";
-        let buyPriceCents = 50; // fallback mid-point
+        let buyPriceCents = 50;
         try {
           const fillsResp = await kalshiFetch("GET", `/portfolio/fills?ticker=${ticker}&limit=10`) as {
             fills?: Array<{ action?: string; side?: string; yes_price?: number; no_price?: number }>
@@ -822,45 +822,48 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
               ? Math.round((buyFill.yes_price ?? 0.5) * 100)
               : Math.round((buyFill.no_price ?? 0.5) * 100);
           }
-        } catch (_) { /* use fallback */ }
+        } catch (_) { /* use fallback 50¢ */ }
 
-        const [importedTrade] = await db.insert(tradesTable).values({
-          marketId: ticker,
-          marketTitle: m.title ?? ticker,
+        // Register in memory IMMEDIATELY — no DB required
+        const provisId = -(Date.now() + imported);
+        registerOpenPosition({
+          tradeId:         provisId,
+          marketId:        ticker,
           side,
-          buyPriceCents,
-          contractCount: pos.position ?? 1,
-          feeCents: 0,
-          status: "open",
-          minutesRemaining: m.close_time
-            ? (new Date(m.close_time).getTime() - Date.now()) / 60_000
-            : null,
-        }).returning();
-        openMarkets.add(ticker);
-        // Also register in openPositions so the sell monitor can act on it immediately
-        if (importedTrade) {
-          openPositions.push({
-            tradeId:         importedTrade.id,
-            marketId:        ticker,
-            side,
-            entryPriceCents: buyPriceCents,
-            contractCount:   pos.position ?? 1,
-            enteredAt:       Date.now(),
-            buyOrderId:      null,
-          });
-        }
+          entryPriceCents: buyPriceCents,
+          contractCount:   pos.position ?? 1,
+          enteredAt:       Date.now(),
+          buyOrderId:      null,
+        });
         imported++;
+
+        logger.info({ ticker, side, buyPriceCents, provisId }, "syncPortfolioFromKalshi: registered orphaned position");
         await botLog("warn",
           `🔄 Portfolio sync: imported orphaned position — ${ticker} (${side} @${buyPriceCents}¢)`,
           { ticker, side, buyPriceCents },
         );
+
+        // DB write fire-and-forget — swap provisional ID when it completes
+        db.insert(tradesTable).values({
+          marketId: ticker, marketTitle: m.title ?? ticker, side, buyPriceCents,
+          contractCount: pos.position ?? 1, feeCents: 0, status: "open",
+          minutesRemaining: m.close_time
+            ? (new Date(m.close_time).getTime() - Date.now()) / 60_000 : null,
+        }).returning().then(([trade]) => {
+          const memPos = openPositions.find(p => p.tradeId === provisId);
+          if (memPos) memPos.tradeId = trade.id;
+        }).catch(err => logger.warn({ err, ticker }, "syncPortfolio: DB insert failed — position tracked in memory only"));
+
       } catch (err) {
+        logger.warn({ err, ticker }, "syncPortfolioFromKalshi: failed to import position");
         await botLog("warn", `🔄 Portfolio sync: failed to import ${ticker} — ${String(err)}`);
       }
     }
 
+    logger.info({ imported, total: positions.length }, "syncPortfolioFromKalshi: complete");
     await botLog("info", `🔄 Portfolio sync complete — ${imported} position(s) imported, ${positions.length - imported} already tracked`);
   } catch (err) {
+    logger.warn({ err }, "syncPortfolioFromKalshi: failed");
     await botLog("warn", `🔄 Portfolio sync failed — ${String(err)}`);
   }
 }

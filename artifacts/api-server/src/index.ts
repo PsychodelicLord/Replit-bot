@@ -22,8 +22,9 @@ runMigrations().then(() => {
     logger.info({ port }, "Server listening");
     logger.info({ COINFLIP_AUTO_START: process.env["COINFLIP_AUTO_START"] ?? "(not set)" }, "env check");
 
-    // Hydrate openPositions from DB at startup so the sell monitor can act on
-    // any trades that were open before this restart — without waiting for startBot.
+    // Step 1: Try to hydrate from DB (fast path if Neon is awake)
+    // Step 2: ALWAYS run Kalshi sync after — catches anything DB missed or
+    //         when Neon is suspended. syncPortfolioFromKalshi is fully DB-independent.
     db.select().from(tradesTable).where(eq(tradesTable.status, "open"))
       .then(openTrades => {
         for (const t of openTrades) {
@@ -37,14 +38,15 @@ runMigrations().then(() => {
             buyOrderId:      t.kalshiBuyOrderId ?? null,
           });
         }
-        if (openTrades.length > 0) {
-          logger.info({ count: openTrades.length }, "startup: hydrated open positions for sell monitor");
-        }
+        logger.info({ count: openTrades.length }, "startup: DB hydration complete");
       })
-      .catch(err => logger.warn({ err }, "startup: could not hydrate open positions — sell monitor will pick up new trades only"));
-
-    // Sync any Kalshi positions not in DB (handles DB resets / missing trades)
-    syncPortfolioFromKalshi().catch(() => {});
+      .catch(err => logger.warn({ err }, "startup: DB hydration failed — Kalshi sync will recover positions"))
+      .finally(() => {
+        // Always run Kalshi sync regardless of DB state — this is the safety net
+        syncPortfolioFromKalshi().catch(err =>
+          logger.warn({ err }, "startup: Kalshi sync failed"),
+        );
+      });
 
     setInterval(retryOpenPositions, 2_000);
 
