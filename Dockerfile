@@ -14,4 +14,4 @@ RUN pnpm --filter @workspace/kalshi-bot run build
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "pnpm --filter @workspace/db run push-force; node artifacts/api-server/dist/index.mjs"]
+CMD ["node", "artifacts/api-server/dist/index.mjs"]
