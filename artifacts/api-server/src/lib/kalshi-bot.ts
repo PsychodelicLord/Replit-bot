@@ -629,8 +629,8 @@ async function placeLimitSell(
   }
 }
 
-// Aggressive limit sell — places at currentBid to fill immediately against existing buy orders
-// Keeps trade "open" until fill is confirmed (safe — monitor loop checks every 5s)
+// Aggressive market sell — fills immediately at whatever the market will pay
+// Trade stays "open" until fill is confirmed on the next monitor tick
 async function placeAggressiveSell(
   tradeId: number,
   ticker: string,
@@ -639,9 +639,35 @@ async function placeAggressiveSell(
   currentBidCents: number,
   contracts: number,
 ): Promise<void> {
-  // Sell AT the bid — this matches against the best existing buy order immediately
-  // Use bid directly (not bid-N) to maximise P&L while still guaranteeing a match
-  await placeLimitSell(tradeId, ticker, side, buyPriceCents, currentBidCents, contracts);
+  try {
+    const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
+      ticker,
+      client_order_id: `scalp-mkt-${tradeId}-${Date.now()}`,
+      type: "market",
+      action: "sell",
+      side: side.toLowerCase(),
+      count: contracts,
+    }) as { order?: { order_id?: string } };
+
+    const sellOrderId = sellResp?.order?.order_id;
+    if (!sellOrderId) {
+      // Market order might have filled immediately without returning an ID — fall back to limit at bid-1
+      await botLog("warn", `Trade ${tradeId}: market sell accepted but no order ID — falling back to limit at bid-1`);
+      await placeLimitSell(tradeId, ticker, side, buyPriceCents, Math.max(1, currentBidCents - 1), contracts);
+      return;
+    }
+
+    await db.update(tradesTable).set({ kalshiSellOrderId: sellOrderId }).where(eq(tradesTable.id, tradeId));
+    sellOrderPlacedAt.set(tradeId, Date.now());
+    await botLog("info",
+      `📋 Trade ${tradeId}: market sell placed (order ${sellOrderId}) — waiting for fill`,
+      { tradeId, sellOrderId },
+    );
+  } catch (err) {
+    // Market order failed (e.g. no liquidity) — fall back to limit sell at bid
+    await botLog("warn", `Trade ${tradeId}: market sell failed (${String(err)}) — falling back to limit at bid`);
+    await placeLimitSell(tradeId, ticker, side, buyPriceCents, currentBidCents, contracts);
+  }
 }
 
 // Track when each sell order was placed (tradeId → timestamp) for stale-order repricing
