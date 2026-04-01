@@ -1309,34 +1309,56 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     }
 
     const now = Date.now();
-    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
-    const resp = await kalshiFetch("GET", `/markets?status=open&limit=200&max_close_ts=${maxCloseTs}`) as { markets?: KalshiMarket[] };
-    const markets = resp.markets ?? [];
 
-    // Coin flip only enters 15-min crypto markets with >10 min remaining — same rules as main bot
-    let timeOk = 0, catFail = 0;
-    const eligible = markets.filter((m) => {
+    // Query each enabled coin's series directly — avoids pagination/ordering issues with the
+    // general /markets endpoint that can return 200 non-crypto results before reaching BTC/ETH
+    const enabledCoins = botConfig.cryptoCoins.length > 0
+      ? botConfig.cryptoCoins
+      : ["BTC", "ETH", "SOL", "DOGE"];
+
+    const allMarkets: KalshiMarket[] = [];
+    for (const coin of enabledCoins) {
+      const seriesPrefixes = CRYPTO_COIN_SERIES[coin.toUpperCase()] ?? [];
+      for (const series of seriesPrefixes) {
+        try {
+          const resp = await kalshiFetch("GET", `/markets?status=open&series_ticker=${series}&limit=50`) as { markets?: KalshiMarket[] };
+          allMarkets.push(...(resp.markets ?? []));
+        } catch (_) { /* skip if series not found */ }
+      }
+    }
+
+    // Coin flip only enters markets with >minMinutesRemaining left — no upper cap since we queried
+    // the series directly so we know they're 15-min markets
+    let timeOk = 0;
+    const eligible = allMarkets.filter((m) => {
       if (!m.close_time) return false;
       const mins = (new Date(m.close_time).getTime() - now) / 60_000;
-      if (mins <= botConfig.minMinutesRemaining || mins > 16) return false;
+      if (mins <= botConfig.minMinutesRemaining) return false;
       timeOk++;
-      const pass = marketPassesCategoryFilter(m.ticker ?? "", m.title ?? "");
-      if (!pass) catFail++;
-      return pass;
+      return true;
     });
 
-    // Always log so we can diagnose misses on Railway
-    const sample = markets.slice(0, 3).map(m => `${m.ticker}(${((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1)}min)`).join(", ");
+    // Deduplicate by ticker (same market may appear from multiple series queries)
+    const seen = new Set<string>();
+    const uniqueEligible = eligible.filter(m => {
+      if (seen.has(m.ticker)) return false;
+      seen.add(m.ticker);
+      return true;
+    });
+
+    const sample = allMarkets.slice(0, 3).map(m =>
+      `${m.ticker}(${((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1)}min)`
+    ).join(", ");
     await botLog("info",
-      `🔍 Coin flip scan: ${markets.length} total, ${timeOk} in time window, ${catFail} failed category, ${eligible.length} eligible | sample: ${sample || "none"}`,
+      `🔍 Coin flip scan: ${allMarkets.length} series markets fetched, ${timeOk} in time window, ${uniqueEligible.length} eligible | sample: ${sample || "none"}`,
     );
 
-    if (eligible.length === 0) {
-      return { success: false, message: `No markets found — ${markets.length} total, ${timeOk} in time window, ${catFail} category misses` };
+    if (uniqueEligible.length === 0) {
+      return { success: false, message: `No markets found — fetched ${allMarkets.length} from ${enabledCoins.join("/")} series, ${timeOk} in time window` };
     }
 
     // Pick a random market
-    const market = eligible[Math.floor(Math.random() * eligible.length)];
+    const market = uniqueEligible[Math.floor(Math.random() * uniqueEligible.length)];
     const { ticker, title } = market;
 
     // Get live prices
