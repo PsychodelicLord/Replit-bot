@@ -697,11 +697,6 @@ async function executeSell(
   currentBidCents: number,
   reason: string,
 ): Promise<boolean> {
-  console.log("STEP 2: executeSell ENTERED", JSON.stringify({
-    tradeId: pos.tradeId, marketId: pos.marketId, side: pos.side,
-    entryPriceCents: pos.entryPriceCents, currentBidCents, reason,
-  }));
-
   await botLog("info",
     `🔔 SELL TRIGGERED — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | reason: ${reason} | current bid: ${currentBidCents}¢`,
     { tradeId: pos.tradeId },
@@ -711,16 +706,13 @@ async function executeSell(
   const payload = buildOrderPayload(
     pos.marketId, `sell-${pos.tradeId}-${Date.now()}`, "market", "sell", pos.side, pos.contractCount,
   );
-  console.log("STEP 3: Sending sell request to Kalshi", JSON.stringify(payload));
 
   let sellResp: { order?: { order_id?: string; yes_price?: number; no_price?: number } };
   try {
     sellResp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
       order?: { order_id?: string; yes_price?: number; no_price?: number }
     };
-    console.log("STEP 4: Kalshi response", JSON.stringify(sellResp));
   } catch (err) {
-    console.error("STEP 5: SELL FAILED", err);
     await botLog("warn",
       `❌ SELL FAILED (Kalshi rejected) — Trade ${pos.tradeId}: ${String(err)}`,
       { tradeId: pos.tradeId, error: String(err) },
@@ -742,7 +734,6 @@ async function executeSell(
   openMarkets.delete(pos.marketId);
   state.openPositionCount = openPositions.length;
 
-  console.log("STEP 5: SELL SUCCESS CONFIRMED", JSON.stringify({ tradeId: pos.tradeId, fillPrice, netPnl }));
   await botLog("info",
     `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`,
     { tradeId: pos.tradeId, fillPrice, netPnl },
@@ -994,17 +985,6 @@ export async function retryOpenPositions(): Promise<void> {
         const currentBid  = pos.side === "YES" ? priceCents(m, "yes_bid") : priceCents(m, "no_bid");
         const minsLeft    = (new Date(m.close_time).getTime() - now) / 60_000;
         const grossProfit = currentBid - pos.entryPriceCents;
-
-        // ── DEBUG: force-sell every position unconditionally ─────────────────
-        console.log("STEP 1: About to call executeSell", JSON.stringify({
-          tradeId: pos.tradeId, marketId: pos.marketId, side: pos.side,
-          entryPriceCents: pos.entryPriceCents, currentBid, grossProfit, minsLeft,
-        }));
-        // eslint-disable-next-line no-constant-condition
-        if (true) {
-          await executeSell(pos, currentBid > 0 ? currentBid : 1, "DEBUG FORCED SELL");
-          continue;
-        }
 
         await botLog("info",
           `🔍 Checking sell conditions — Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | profit: ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢ | ${minsLeft.toFixed(1)}min left`,
@@ -1359,9 +1339,15 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       return { success: false, message: `No markets found — fetched ${allMarkets.length} from ${enabledCoins.join("/")} series, ${timeOk} in time window` };
     }
 
-    // Shuffle eligible markets and try each in turn until one has live prices
+    // Flip the coin ONCE — this is the side we will trade.
+    // We then search for a market where this side has a live quote within the price cap.
+    // The coin is never re-flipped; we just find the right market for the chosen side.
+    const coinYes = Math.random() < 0.5;
+    const chosenSide: "YES" | "NO" = coinYes ? "YES" : "NO";
+    const maxAsk = Math.min(botConfig.maxEntryPriceCents, 99);
+
+    // Shuffle eligible markets and try each in turn until one fits
     const shuffled = [...uniqueEligible].sort(() => Math.random() - 0.5);
-    const maxAsk = Math.min(botConfig.maxEntryPriceCents, 90);
 
     let market!: KalshiMarket;
     let side!: "YES" | "NO";
@@ -1382,20 +1368,20 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
 
       const yesAsk = priceCents(m, "yes_ask");
       const noAsk  = priceCents(m, "no_ask");
-
-      // Flip the coin — strictly follow the result, no fallback to other side
-      // Only skip if there is genuinely no quote (ask = 0). Time window already checked above.
-      const coinYes = Math.random() < 0.5;
-      const trySide: "YES" | "NO" = coinYes ? "YES" : "NO";
-      const tryAsk = coinYes ? yesAsk : noAsk;
+      const tryAsk = chosenSide === "YES" ? yesAsk : noAsk;
 
       if (tryAsk <= 0) {
-        await botLog("info", `Coin flip: landed ${trySide} on ${candidate.ticker} but no quote available — trying next market`);
+        await botLog("info", `Coin flip: landed ${chosenSide} on ${candidate.ticker} but no quote — trying next market`);
+        continue;
+      }
+
+      if (tryAsk > maxAsk) {
+        await botLog("info", `Coin flip: ${candidate.ticker} ${chosenSide} ask ${tryAsk}¢ exceeds max ${maxAsk}¢ — skipping`);
         continue;
       }
 
       market = m;
-      side = trySide;
+      side = chosenSide;
       ask = tryAsk;
       minutesLeft = freshMins;
       break;
