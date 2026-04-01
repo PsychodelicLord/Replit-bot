@@ -1482,7 +1482,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       title,
       side,
       priceCents: ask,
-      tradeId: trade.id,
+      tradeId: provisId,
     };
   } catch (err) {
     const msg = String(err);
