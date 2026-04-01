@@ -619,6 +619,7 @@ async function placeLimitSell(
       .set({ kalshiSellOrderId: sellOrderId })
       .where(eq(tradesTable.id, tradeId));
 
+    sellOrderPlacedAt.set(tradeId, Date.now());
     await botLog("info",
       `📋 Trade ${tradeId}: limit sell @ ${sellPriceCents}¢ placed (order ${sellOrderId}) — waiting for fill`,
       { tradeId, sellPriceCents, sellOrderId },
@@ -628,8 +629,9 @@ async function placeLimitSell(
   }
 }
 
-// Market sell — guarantees immediate execution at current best bid
-async function placeMarketSell(
+// Aggressive limit sell — places at currentBid to fill immediately against existing buy orders
+// Keeps trade "open" until fill is confirmed (safe — monitor loop checks every 5s)
+async function placeAggressiveSell(
   tradeId: number,
   ticker: string,
   side: string,
@@ -637,47 +639,13 @@ async function placeMarketSell(
   currentBidCents: number,
   contracts: number,
 ): Promise<void> {
-  try {
-    const sellResp = await kalshiFetch("POST", "/portfolio/orders", {
-      ticker,
-      client_order_id: `scalp-market-${tradeId}-${Date.now()}`,
-      type: "market",
-      action: "sell",
-      side: side.toLowerCase(),
-      count: contracts,
-    }) as { order?: { order_id?: string; yes_price?: number; no_price?: number; filled_count?: number } };
-
-    const order = sellResp?.order;
-    const sellOrderId = order?.order_id;
-
-    // Market orders fill immediately — record P&L now using current bid as estimate
-    const fillPriceCents = currentBidCents;
-    const gross = fillPriceCents - buyPriceCents;
-    const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
-    const netPnl = gross - fee;
-
-    await db.update(tradesTable).set({
-      status: "closed",
-      sellPriceCents: fillPriceCents,
-      pnlCents: netPnl,
-      feeCents: fee,
-      closedAt: new Date(),
-      ...(sellOrderId ? { kalshiSellOrderId: sellOrderId } : {}),
-    }).where(eq(tradesTable.id, tradeId));
-
-    openMarkets.delete(ticker);
-    state.openPositionCount = openMarkets.size;
-
-    await botLog("info",
-      `✅ Market sell executed — trade ${tradeId} closed at ~${fillPriceCents}¢, net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`,
-      { tradeId, fillPriceCents, netPnl },
-    );
-  } catch (err) {
-    await botLog("warn", `Failed to place market sell for trade ${tradeId} — falling back to limit`, String(err));
-    // Fallback to limit sell at current bid
-    await placeLimitSell(tradeId, ticker, side, buyPriceCents, currentBidCents, contracts);
-  }
+  // Sell AT the bid — this matches against the best existing buy order immediately
+  // Use bid directly (not bid-N) to maximise P&L while still guaranteeing a match
+  await placeLimitSell(tradeId, ticker, side, buyPriceCents, currentBidCents, contracts);
 }
+
+// Track when each sell order was placed (tradeId → timestamp) for stale-order repricing
+const sellOrderPlacedAt = new Map<number, number>();
 
 // ─── Retry open positions ─────────────────────────────────────────────────────
 let sellMonitorRunning = false;
@@ -846,10 +814,25 @@ export async function retryOpenPositions(): Promise<void> {
                   status: "closed", sellPriceCents: fillPrice, pnlCents: netPnl, feeCents: fee, closedAt: new Date(),
                 }).where(eq(tradesTable.id, trade.id));
                 openMarkets.delete(trade.marketId);
+                sellOrderPlacedAt.delete(trade.id);
                 state.openPositionCount = openMarkets.size;
                 await botLog("info", `✅ Sell order filled — trade ${trade.id} closed at ${fillPrice}¢, net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`, { tradeId: trade.id });
               } else {
-                await botLog("info", `📋 Trade ${trade.id}: resting sell @ ${targetSellPrice}¢ pending | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left`);
+                // Not filled yet — check if stale (> 20s old) and reprice if bid is still profitable
+                const placedAt = sellOrderPlacedAt.get(trade.id) ?? 0;
+                const sellOrderAgeMs = Date.now() - placedAt;
+                const grossProfit = currentBid - trade.buyPriceCents;
+                const currentNet = grossToNet(grossProfit);
+                if (sellOrderAgeMs > 20_000 && currentNet >= botConfig.minNetProfitCents && currentBid > 0) {
+                  // Cancel stale sell and re-place at current bid
+                  try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiSellOrderId}`); } catch (_) {}
+                  await db.update(tradesTable).set({ kalshiSellOrderId: null }).where(eq(tradesTable.id, trade.id));
+                  sellOrderPlacedAt.delete(trade.id);
+                  await botLog("warn", `🔄 Trade ${trade.id}: stale sell repriced — cancelling @ ${targetSellPrice}¢, re-placing at bid ${currentBid}¢`);
+                  await placeAggressiveSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+                } else {
+                  await botLog("info", `📋 Trade ${trade.id}: resting sell @ ${targetSellPrice}¢ pending | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left`);
+                }
               }
             } catch (_) {
               await botLog("info", `📋 Trade ${trade.id}: sell order pending | ${minsLeft.toFixed(1)}min left`);
@@ -896,12 +879,12 @@ export async function retryOpenPositions(): Promise<void> {
           const grossProfit = currentBid - trade.buyPriceCents;
           const netProfit = grossToNet(grossProfit);
           if (netProfit >= botConfig.minNetProfitCents && currentBid > 0) {
-            // Price already at target — use market order for guaranteed immediate fill
+            // Price already at target — place aggressive limit sell at bid (fills against existing buy orders)
             await botLog("info",
-              `🎯 Trade ${trade.id}: price hit target early (bid ${currentBid}¢, net +${netProfit}¢) — market selling now`,
+              `🎯 Trade ${trade.id}: price hit target early (bid ${currentBid}¢, net +${netProfit}¢) — selling now`,
               { tradeId: trade.id, currentBid, netProfit },
             );
-            await placeMarketSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
+            await placeAggressiveSell(trade.id, trade.marketId, trade.side, trade.buyPriceCents, currentBid, trade.contractCount);
           } else {
             await botLog("info",
               `⏸ Trade ${trade.id} (${trade.side} @${trade.buyPriceCents}¢) holding | bid ${currentBid}¢ | net ${netProfit >= 0 ? "+" : ""}${netProfit}¢ | ${minsLeft.toFixed(1)}min left | sell window opens at ${botConfig.exitWindowMins}min`,
@@ -1269,8 +1252,12 @@ export async function clearStuckPositions(): Promise<{ cleared: number }> {
       .set({ status: "closed", pnlCents: 0, closedAt: new Date() })
       .where(eq(tradesTable.id, trade.id));
     openMarkets.delete(trade.marketId);
+    sellOrderPlacedAt.delete(trade.id);
     await botLog("warn", `🧹 Trade ${trade.id} force-cleared via dashboard reset`, { tradeId: trade.id });
   }
   state.openPositionCount = 0;
+  // Reset last result and retry immediately so the button disappears and next flip fires in 5s
+  coinFlipAuto.lastResult = null;
+  if (coinFlipAuto.enabled) scheduleCoinFlip(5);
   return { cleared: openTrades.length };
 }
