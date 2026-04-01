@@ -199,10 +199,26 @@ async function kalshiFetch(method: string, path: string, body?: unknown): Promis
 }
 
 // ─── Market category detection ───────────────────────────────────────────────
+// Full names for each coin — matched against ticker AND title for resilience
+const COIN_ALIASES: Record<string, string[]> = {
+  BTC:   ["BTC", "BITCOIN", "KXBTC"],
+  ETH:   ["ETH", "ETHEREUM", "KXETH"],
+  SOL:   ["SOL", "SOLANA", "KXSOL"],
+  DOGE:  ["DOGE", "DOGECOIN", "KXDOGE"],
+  XRP:   ["XRP", "RIPPLE", "KXXRP"],
+  ADA:   ["ADA", "CARDANO", "KXADA"],
+  MATIC: ["MATIC", "POLYGON", "KXMATIC"],
+};
+
 function isCryptoMarket(ticker: string, title: string): boolean {
   const upper = ticker.toUpperCase() + " " + title.toUpperCase();
+  // Match by known series prefix first (most precise)
   for (const [, prefixes] of Object.entries(CRYPTO_COIN_SERIES)) {
     if (prefixes.some(p => upper.includes(p.toUpperCase()))) return true;
+  }
+  // Fallback: match by coin name/alias (handles Kalshi ticker format changes)
+  for (const aliases of Object.values(COIN_ALIASES)) {
+    if (aliases.some(a => upper.includes(a))) return true;
   }
   return false;
 }
@@ -211,8 +227,11 @@ function matchesCryptoCoin(ticker: string, title: string, coins: string[]): bool
   if (coins.length === 0) return true;
   const upper = ticker.toUpperCase() + " " + title.toUpperCase();
   return coins.some(coin => {
-    const prefixes = CRYPTO_COIN_SERIES[coin.toUpperCase()] ?? [coin];
-    return prefixes.some(p => upper.includes(p.toUpperCase()));
+    const prefixes = CRYPTO_COIN_SERIES[coin.toUpperCase()] ?? [];
+    if (prefixes.some(p => upper.includes(p.toUpperCase()))) return true;
+    // Fallback alias match
+    const aliases = COIN_ALIASES[coin.toUpperCase()] ?? [coin];
+    return aliases.some(a => upper.includes(a));
   });
 }
 
@@ -1210,15 +1229,25 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     const markets = resp.markets ?? [];
 
     // Coin flip only enters 15-min crypto markets with >10 min remaining — same rules as main bot
+    let timeOk = 0, catFail = 0;
     const eligible = markets.filter((m) => {
       if (!m.close_time) return false;
       const mins = (new Date(m.close_time).getTime() - now) / 60_000;
       if (mins <= botConfig.minMinutesRemaining || mins > 16) return false;
-      return marketPassesCategoryFilter(m.ticker, m.title);
+      timeOk++;
+      const pass = marketPassesCategoryFilter(m.ticker ?? "", m.title ?? "");
+      if (!pass) catFail++;
+      return pass;
     });
 
+    // Always log so we can diagnose misses on Railway
+    const sample = markets.slice(0, 3).map(m => `${m.ticker}(${((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1)}min)`).join(", ");
+    await botLog("info",
+      `🔍 Coin flip scan: ${markets.length} total, ${timeOk} in time window, ${catFail} failed category, ${eligible.length} eligible | sample: ${sample || "none"}`,
+    );
+
     if (eligible.length === 0) {
-      return { success: false, message: "No markets with >10 min remaining right now — try again shortly." };
+      return { success: false, message: `No markets found — ${markets.length} total, ${timeOk} in time window, ${catFail} category misses` };
     }
 
     // Pick a random market
