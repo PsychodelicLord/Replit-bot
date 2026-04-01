@@ -1222,7 +1222,7 @@ function scheduleCoinFlip(retryDelaySecs?: number) {
         const CYCLE_MS = 15 * 60_000;
         const minsLeft = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
         if (minsLeft > botConfig.minMinutesRemaining + 2) {
-          scheduleCoinFlip(120); // retry in 2 min — still enough time
+          scheduleCoinFlip(30); // retry in 30s — still enough time
         } else {
           scheduleCoinFlip(); // too late in cycle — wait for next cycle start
         }
