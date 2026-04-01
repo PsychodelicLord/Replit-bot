@@ -210,13 +210,21 @@ const COIN_ALIASES: Record<string, string[]> = {
   MATIC: ["MATIC", "POLYGON", "KXMATIC"],
 };
 
+// Does the ticker or title explicitly say it's a 15-minute market?
+function is15MinMarket(ticker: string, title: string): boolean {
+  const upper = ticker.toUpperCase() + " " + title.toUpperCase();
+  return upper.includes("15M") || upper.includes("15 MIN") || upper.includes("15MIN");
+}
+
 function isCryptoMarket(ticker: string, title: string): boolean {
   const upper = ticker.toUpperCase() + " " + title.toUpperCase();
-  // Match by known series prefix first (most precise)
+  // Match by known 15-min series prefix (most precise — these already imply 15M)
   for (const [, prefixes] of Object.entries(CRYPTO_COIN_SERIES)) {
     if (prefixes.some(p => upper.includes(p.toUpperCase()))) return true;
   }
-  // Fallback: match by coin name/alias (handles Kalshi ticker format changes)
+  // Fallback: match by coin name/alias — but ONLY if the market is explicitly a 15-min market
+  // This prevents hourly/daily BTC markets from being matched
+  if (!is15MinMarket(ticker, title)) return false;
   for (const aliases of Object.values(COIN_ALIASES)) {
     if (aliases.some(a => upper.includes(a))) return true;
   }
@@ -229,7 +237,8 @@ function matchesCryptoCoin(ticker: string, title: string, coins: string[]): bool
   return coins.some(coin => {
     const prefixes = CRYPTO_COIN_SERIES[coin.toUpperCase()] ?? [];
     if (prefixes.some(p => upper.includes(p.toUpperCase()))) return true;
-    // Fallback alias match
+    // Fallback alias match — only for confirmed 15-min markets
+    if (!is15MinMarket(ticker, title)) return false;
     const aliases = COIN_ALIASES[coin.toUpperCase()] ?? [coin];
     return aliases.some(a => upper.includes(a));
   });
