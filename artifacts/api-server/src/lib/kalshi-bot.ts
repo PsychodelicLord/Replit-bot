@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { db, tradesTable, botLogsTable } from "@workspace/db";
+import { db, tradesTable, botLogsTable, botSettingsTable } from "@workspace/db";
 import { logger } from "./logger";
 import { eq, gte, sql } from "drizzle-orm";
 
@@ -110,6 +110,78 @@ export function updateBotConfig(updates: Partial<BotConfig>): BotConfig {
 
 export function getBotConfig(): BotConfig {
   return { ...botConfig };
+}
+
+/** Load saved settings from DB into botConfig. Fire-and-forget safe. */
+export async function loadBotConfigFromDb(): Promise<void> {
+  try {
+    const rows = await db.select().from(botSettingsTable).where(eq(botSettingsTable.id, 1)).limit(1);
+    if (rows.length > 0) {
+      const r = rows[0];
+      Object.assign(botConfig, {
+        maxEntryPriceCents:      r.maxEntryPriceCents,
+        minNetProfitCents:       r.minNetProfitCents,
+        maxNetProfitCents:       r.maxNetProfitCents,
+        minMinutesRemaining:     r.minMinutesRemaining,
+        exitWindowMins:          r.exitWindowMins,
+        maxOpenPositions:        r.maxOpenPositions,
+        balanceFloorCents:       r.balanceFloorCents,
+        dailyProfitTargetCents:  r.dailyProfitTargetCents,
+        dailyLossLimitCents:     r.dailyLossLimitCents,
+        feeRate:                 r.feeRate,
+        pollIntervalSecs:        r.pollIntervalSecs,
+        marketCategories:        (r.marketCategories as string[]) ?? ["crypto"],
+        cryptoCoins:             (r.cryptoCoins as string[]) ?? ["BTC", "ETH", "SOL", "DOGE"],
+      });
+      logger.info({ maxEntryPriceCents: botConfig.maxEntryPriceCents }, "startup: bot config loaded from DB");
+    } else {
+      logger.info("startup: no saved bot config in DB — using defaults");
+    }
+  } catch (err) {
+    logger.warn({ err }, "startup: failed to load bot config from DB — using defaults");
+  }
+}
+
+/** Persist current botConfig to DB (upsert row id=1). Fire-and-forget safe. */
+export async function saveBotConfigToDb(config: BotConfig): Promise<void> {
+  try {
+    await db.insert(botSettingsTable).values({
+      id: 1,
+      maxEntryPriceCents:      config.maxEntryPriceCents,
+      minNetProfitCents:       config.minNetProfitCents,
+      maxNetProfitCents:       config.maxNetProfitCents,
+      minMinutesRemaining:     config.minMinutesRemaining,
+      exitWindowMins:          config.exitWindowMins,
+      maxOpenPositions:        config.maxOpenPositions,
+      balanceFloorCents:       config.balanceFloorCents,
+      dailyProfitTargetCents:  config.dailyProfitTargetCents,
+      dailyLossLimitCents:     config.dailyLossLimitCents,
+      feeRate:                 config.feeRate,
+      pollIntervalSecs:        config.pollIntervalSecs,
+      marketCategories:        config.marketCategories,
+      cryptoCoins:             config.cryptoCoins,
+    }).onConflictDoUpdate({
+      target: botSettingsTable.id,
+      set: {
+        maxEntryPriceCents:      config.maxEntryPriceCents,
+        minNetProfitCents:       config.minNetProfitCents,
+        maxNetProfitCents:       config.maxNetProfitCents,
+        minMinutesRemaining:     config.minMinutesRemaining,
+        exitWindowMins:          config.exitWindowMins,
+        maxOpenPositions:        config.maxOpenPositions,
+        balanceFloorCents:       config.balanceFloorCents,
+        dailyProfitTargetCents:  config.dailyProfitTargetCents,
+        dailyLossLimitCents:     config.dailyLossLimitCents,
+        feeRate:                 config.feeRate,
+        pollIntervalSecs:        config.pollIntervalSecs,
+        marketCategories:        config.marketCategories,
+        cryptoCoins:             config.cryptoCoins,
+      },
+    });
+    logger.info({ maxEntryPriceCents: config.maxEntryPriceCents }, "bot config saved to DB");
+  } catch (err) {
+    logger.warn({ err }, "failed to save bot config to DB");
+  }
 }
 
 // ─── In-memory bot state ─────────────────────────────────────────────────────

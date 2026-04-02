@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
+import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count } from "drizzle-orm";
 import {
@@ -49,6 +49,7 @@ router.patch("/bot/config", async (req, res): Promise<void> => {
     return;
   }
   const updated = updateBotConfig(parsed.data);
+  saveBotConfigToDb(updated).catch(() => {});
   res.json(UpdateBotConfigResponse.parse(updated));
 });
 
