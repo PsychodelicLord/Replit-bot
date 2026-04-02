@@ -90,7 +90,6 @@ KALSHI_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY----- MIIEpAIBAAKCAQEAx3ZdrnI0QH
 KALSHI_API_KEY = "07e09496-9d11-4790-8a4c-16f6ed0dd00d"
 
 [userenv.production]
-MOMENTUM_AUTO_START = "true"
 
 [nix]
 channel = "stable-25_05"
