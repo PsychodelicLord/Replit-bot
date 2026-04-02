@@ -21,15 +21,30 @@ runMigrations().then(() => {
     }
 
     logger.info({ port }, "Server listening");
-    logger.info({ COINFLIP_AUTO_START: process.env["COINFLIP_AUTO_START"] ?? "(not set)" }, "env check");
+    logger.info({ COINFLIP_AUTO_START: process.env["COINFLIP_AUTO_START"] ?? "(not set)", MOMENTUM_AUTO_START: process.env["MOMENTUM_AUTO_START"] ?? "(not set)" }, "env check");
 
-    // Step 0: Load saved settings from DB so auto-start uses correct config
+    // ── Auto-start bots IMMEDIATELY — never wait for DB ──────────────────────
+    // loadBotConfigFromDb can hang if Neon is sleeping; starting bots first
+    // means they use safe defaults and trade without delay.
+    const autoStart = process.env["COINFLIP_AUTO_START"];
+    if (autoStart === "true") {
+      startCoinFlipAuto(900);
+      logger.info("🪙 Coin flip auto-mode started via COINFLIP_AUTO_START");
+    } else {
+      logger.warn({ autoStartValue: autoStart ?? "(not set)" }, "COINFLIP_AUTO_START is not 'true' — coin flip will not auto-trade");
+    }
+
+    const momentumAutoStart = process.env["MOMENTUM_AUTO_START"];
+    if (momentumAutoStart === "true") {
+      startMomentumBot();
+      logger.info("📈 Momentum bot auto-mode started via MOMENTUM_AUTO_START");
+    }
+
+    // ── Load saved config + hydrate positions from DB asynchronously ─────────
+    // These are best-effort — bots work fine with defaults if DB is unavailable.
     loadBotConfigFromDb()
-      .catch(err => logger.warn({ err }, "startup: loadBotConfigFromDb failed"))
+      .catch(err => logger.warn({ err }, "startup: loadBotConfigFromDb failed — using defaults"))
       .finally(() => {
-        // Step 1: Try to hydrate open positions from DB
-        // Step 2: ALWAYS run Kalshi sync after — catches anything DB missed or
-        //         when Neon is suspended. syncPortfolioFromKalshi is fully DB-independent.
         db.select().from(tradesTable).where(eq(tradesTable.status, "open"))
           .then(openTrades => {
             for (const t of openTrades) {
@@ -45,26 +60,12 @@ runMigrations().then(() => {
             }
             logger.info({ count: openTrades.length }, "startup: DB hydration complete");
           })
-          .catch(err => logger.warn({ err }, "startup: DB hydration failed — Kalshi sync will recover positions"))
+          .catch(err => logger.warn({ err }, "startup: DB hydration failed — Kalshi sync will recover"))
           .finally(() => {
             syncPortfolioFromKalshi().catch(err =>
               logger.warn({ err }, "startup: Kalshi sync failed"),
             );
           });
-
-        const autoStart = process.env["COINFLIP_AUTO_START"];
-        if (autoStart === "true") {
-          startCoinFlipAuto(900);
-          logger.info("🪙 Coin flip auto-mode started automatically via COINFLIP_AUTO_START");
-        } else {
-          logger.warn({ autoStartValue: autoStart ?? "(not set)" }, "COINFLIP_AUTO_START is not 'true' — bot will not trade automatically");
-        }
-
-        const momentumAutoStart = process.env["MOMENTUM_AUTO_START"];
-        if (momentumAutoStart === "true") {
-          startMomentumBot();
-          logger.info("📈 Momentum bot auto-mode started automatically via MOMENTUM_AUTO_START");
-        }
       });
 
     setInterval(retryOpenPositions, 2_000);
