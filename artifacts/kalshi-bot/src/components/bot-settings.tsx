@@ -41,7 +41,7 @@ const defaults: FormState = {
   minNetProfitCents: "5",
   maxNetProfitCents: "99",
   minMinutesRemaining: "10",
-  exitWindowMins: "7",
+  exitWindowMins: "2",
   feeRateDisplay: "7",
   pollIntervalSecs: "5",
   maxOpenPositions: "1",

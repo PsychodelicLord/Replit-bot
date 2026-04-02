@@ -92,7 +92,7 @@ export const botConfig: BotConfig = {
   minNetProfitCents: 5,
   maxNetProfitCents: 99,
   minMinutesRemaining: 10,
-  exitWindowMins: 7,
+  exitWindowMins: 2,
   feeRate: 0.07,
   pollIntervalSecs: 5,
   marketCategories: ["crypto", "sports"],
