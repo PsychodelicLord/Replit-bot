@@ -23,6 +23,12 @@ import {
 
 const router: IRouter = Router();
 
+/** Returns true only when running on Railway (the live deployment).
+ *  Prevents the local dev server from accidentally placing real trades. */
+function isProductionDeployment(): boolean {
+  return !!(process.env.RAILWAY_ENVIRONMENT || process.env.COINFLIP_AUTO_START === "true");
+}
+
 function serializeState(s: ReturnType<typeof getBotState>) {
   return {
     running: s.running,
@@ -58,6 +64,10 @@ router.get("/bot/status", async (_req, res): Promise<void> => {
 });
 
 router.post("/bot/start", async (_req, res): Promise<void> => {
+  if (!isProductionDeployment()) {
+    res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
+    return;
+  }
   const s = await startBot();
   res.json(StartBotResponse.parse(serializeState(s)));
 });
@@ -154,6 +164,10 @@ router.post("/bot/manual-trade", async (req, res): Promise<void> => {
 });
 
 router.post("/bot/coin-flip", async (_req, res): Promise<void> => {
+  if (!isProductionDeployment()) {
+    res.status(403).json({ success: false, message: "Trading is disabled on the dev server — use the Railway deployment." });
+    return;
+  }
   const result = await coinFlipTrade();
   res.json(CoinFlipResponse.parse(result));
 });
@@ -166,6 +180,10 @@ router.post("/bot/coin-flip/auto", (req, res): void => {
   const parsed = CoinFlipAutoBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
   const { enabled, intervalSecs } = parsed.data;
+  if (enabled && !isProductionDeployment()) {
+    res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
+    return;
+  }
   const state = enabled
     ? startCoinFlipAuto(intervalSecs ?? 60)
     : stopCoinFlipAuto();
