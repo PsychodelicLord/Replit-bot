@@ -2,13 +2,18 @@
  * Momentum Bot — selective trend-following scalper
  *
  * Rules:
- *  - Only trades BTC, ETH, SOL (high-liquidity 15-min markets)
- *  - Entry: price 30-60¢, spread ≤3¢, >7 min remaining, STRONG momentum
+ *  - Trades BTC, ETH, SOL, DOGE, XRP, BNB, HYPE (15-min crypto markets)
+ *  - Entry: price 30-70¢, spread ≤5¢, >7 min remaining, STRONG momentum
  *  - Momentum = 4/5 ticks same direction, range ≥2¢, all ticks within 20s
  *  - TP: +3¢, SL: -4¢, no-movement exit after 45s (price didn't move ≥1¢)
  *  - Max 2 simultaneous positions; no stacking same market or same direction
  *  - Per-market cooldown 75s after close
  *  - Risk: balance floor, session-loss limit, consecutive-loss streak pause
+ *
+ * API notes:
+ *  - Kalshi now returns orderbook as `orderbook_fp` with `yes_dollars`/`no_dollars`
+ *  - Market list endpoint includes `yes_ask_dollars`/`yes_bid_dollars` — used as fallback
+ *  - Use max_close_ts to surface short-duration crypto markets
  */
 
 import { kalshiFetch } from "./kalshi-bot";
@@ -17,12 +22,12 @@ import { db, tradesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
-const ALLOWED_COINS = ["BTC", "ETH", "SOL"];
-const ALLOWED_TICKER_PREFIXES = ["KXBTC15M", "KXETH15M", "KXSOL15M"];
+const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB", "HYPE"];
+const ALLOWED_TICKER_PREFIXES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXDOGE15M", "KXXRP15M", "KXBNB15M", "KXHYPE15M"];
 
-const PRICE_MIN  = 30;
-const PRICE_MAX  = 60;
-const SPREAD_MAX = 3;
+const PRICE_MIN  = 20;
+const PRICE_MAX  = 80;
+const SPREAD_MAX = 5;
 const MIN_MINUTES_REMAINING = 7;
 const MAX_POSITIONS = 2;
 
@@ -277,31 +282,74 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
-async function fetchMarketOrderBook(ticker: string): Promise<{
-  bid: number; ask: number; spread: number; mid: number;
-} | null> {
+/** Convert a raw Kalshi price to integer cents.
+ *  Kalshi now uses 0.0–1.0 dollar scale in orderbook_fp; legacy was integer cents. */
+function rawToIntCents(raw: number): number {
+  if (raw <= 0) return 0;
+  // 0.0–1.0 → dollar scale → multiply by 100
+  return raw <= 1.0 ? Math.round(raw * 100) : Math.round(raw);
+}
+
+async function fetchMarketOrderBook(
+  ticker: string,
+  hintAskCents?: number,
+  hintBidCents?: number,
+): Promise<{ bid: number; ask: number; spread: number; mid: number } | null> {
   try {
     const resp = await kalshiFetch("GET", `/markets/${ticker}/orderbook`) as {
+      // New format (Kalshi API ≥ 2025): prices in 0.0–1.0 dollar scale
+      orderbook_fp?: {
+        yes_dollars?: Array<[number, number]>;
+        no_dollars?: Array<[number, number]>;
+        // some variants use yes/no without _dollars even under orderbook_fp
+        yes?: Array<[number, number]>;
+        no?: Array<[number, number]>;
+      };
+      // Legacy format
       orderbook?: {
         yes?: Array<[number, number]>;
         no?: Array<[number, number]>;
-      }
+      };
     };
-    const ob = resp?.orderbook;
-    if (!ob) return null;
 
-    const bestYesAsk = ob.yes?.[0]?.[0] ?? 0;  // lowest yes ask
-    const bestYesBid = ob.no?.[0]?.[0]           // best yes bid = 100 - best no ask
-      ? 100 - ob.no[0][0]
-      : 0;
+    // Prefer new format, fall back to legacy
+    const ob = resp?.orderbook_fp ?? resp?.orderbook;
+    const yesSide = (ob as any)?.yes_dollars ?? (ob as any)?.yes ?? [];
+    const noSide  = (ob as any)?.no_dollars  ?? (ob as any)?.no  ?? [];
 
-    // Convert from Kalshi cents (already integer cents)
-    const ask = bestYesAsk;
-    const bid = bestYesBid > 0 ? bestYesBid : Math.max(0, ask - 2);
-    const spread = ask - bid;
-    const mid = Math.round((ask + bid) / 2);
+    if (yesSide.length > 0 || noSide.length > 0) {
+      const bestYesAsk = rawToIntCents(yesSide[0]?.[0] ?? 0);
+      const bestNoAsk  = rawToIntCents(noSide[0]?.[0] ?? 0);
+      const bestYesBid = bestNoAsk > 0 ? 100 - bestNoAsk : 0;
 
-    return { bid, ask, spread, mid };
+      const ask = bestYesAsk;
+      const bid = bestYesBid > 0 ? bestYesBid : Math.max(0, ask - 2);
+      const spread = ask - bid;
+      const mid = Math.round((ask + bid) / 2);
+      if (ask > 0 && bid > 0) return { bid, ask, spread, mid };
+    }
+
+    // Orderbook empty — use market-list price hints if provided
+    if (hintAskCents && hintBidCents && hintAskCents > 0 && hintBidCents > 0) {
+      const spread = hintAskCents - hintBidCents;
+      const mid = Math.round((hintAskCents + hintBidCents) / 2);
+      return { bid: hintBidCents, ask: hintAskCents, spread, mid };
+    }
+
+    // Last resort: individual market detail (has yes_ask_dollars / yes_bid_dollars)
+    const detailResp = await kalshiFetch("GET", `/markets/${ticker}`) as {
+      market?: { yes_ask_dollars?: number; yes_bid_dollars?: number };
+    };
+    const m = detailResp?.market;
+    if (m?.yes_ask_dollars && m.yes_ask_dollars > 0) {
+      const ask = Math.round(m.yes_ask_dollars * 100);
+      const bid = m.yes_bid_dollars ? Math.round(m.yes_bid_dollars * 100) : Math.max(0, ask - 2);
+      const spread = ask - bid;
+      const mid = Math.round((ask + bid) / 2);
+      if (ask > 0 && bid > 0) return { bid, ask, spread, mid };
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -312,28 +360,41 @@ async function fetchActiveMarkets(): Promise<Array<{
   title: string;
   minutesRemaining: number;
   status: string;
+  askCents: number;
+  bidCents: number;
 }>> {
   try {
-    const resp = await kalshiFetch("GET", "/markets?status=open&limit=100") as {
+    const now = Date.now();
+    // Use max_close_ts to surface short-duration markets — the general endpoint
+    // paginates by something other than close time and buries 15-min crypto markets.
+    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
+    const resp = await kalshiFetch("GET", `/markets?status=open&limit=100&max_close_ts=${maxCloseTs}`) as {
       markets?: Array<{
         ticker?: string;
         title?: string;
         close_time?: string;
         status?: string;
+        yes_ask_dollars?: number;
+        yes_bid_dollars?: number;
       }>
     };
 
-    const now = Date.now();
     return (resp?.markets ?? [])
       .filter(m => m.ticker && isMomentumMarket(m.ticker))
       .map(m => {
         const closeMs = m.close_time ? new Date(m.close_time).getTime() : now;
         const minutesRemaining = Math.max(0, (closeMs - now) / 60_000);
+        const askCents = m.yes_ask_dollars != null && m.yes_ask_dollars > 0
+          ? Math.round(m.yes_ask_dollars * 100) : 0;
+        const bidCents = m.yes_bid_dollars != null && m.yes_bid_dollars > 0
+          ? Math.round(m.yes_bid_dollars * 100) : 0;
         return {
           ticker: m.ticker!,
           title: m.title ?? m.ticker!,
           minutesRemaining,
           status: m.status ?? "open",
+          askCents,
+          bidCents,
         };
       })
       .filter(m => m.status === "open" && m.minutesRemaining > MIN_MINUTES_REMAINING);
@@ -611,8 +672,8 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Max positions reached?
     if (openPositions.length >= MAX_POSITIONS) break;
 
-    // Fetch orderbook
-    const ob = await fetchMarketOrderBook(market.ticker);
+    // Fetch orderbook — pass market-list prices as hints for empty-book fallback
+    const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) continue;
 
     const { bid, ask, spread, mid } = ob;
