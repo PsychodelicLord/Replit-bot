@@ -16,6 +16,7 @@ interface FormState {
   maxConcurrent: string;
   minProfitCents: string;
   minMinutesRemaining: string;
+  exitWindowMins: string;
   cryptoCoins: string[];
 }
 
@@ -31,6 +32,7 @@ export function CoinFlipSettings() {
     maxConcurrent: "1",
     minProfitCents: "5",
     minMinutesRemaining: "4",
+    exitWindowMins: "2",
     cryptoCoins: ["BTC", "ETH", "SOL", "DOGE"],
   });
 
@@ -42,6 +44,7 @@ export function CoinFlipSettings() {
       maxConcurrent: String(config.maxOpenPositions ?? 1),
       minProfitCents: String(config.minNetProfitCents ?? 5),
       minMinutesRemaining: String(config.minMinutesRemaining ?? 4),
+      exitWindowMins: String((config as any).exitWindowMins ?? 2),
       cryptoCoins: config.cryptoCoins?.length ? config.cryptoCoins : ["BTC", "ETH", "SOL", "DOGE"],
     });
   }, [config]);
@@ -63,6 +66,7 @@ export function CoinFlipSettings() {
           maxOpenPositions: parseInt(form.maxConcurrent) || 1,
           minNetProfitCents: parseInt(form.minProfitCents) || 5,
           minMinutesRemaining: parseInt(form.minMinutesRemaining) || 4,
+          exitWindowMins: parseInt(form.exitWindowMins) || 2,
           marketCategories: ["crypto"],
           cryptoCoins: form.cryptoCoins.length ? form.cryptoCoins : ["BTC", "ETH", "SOL", "DOGE"],
         },
@@ -178,6 +182,16 @@ export function CoinFlipSettings() {
             className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
           />
           <p className="text-[10px] text-slate-600">Max open positions at once (default: 1)</p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label className="text-xs text-slate-400">Exit Window (min)</Label>
+          <Input
+            type="number" min="1" max="10"
+            value={form.exitWindowMins} onChange={set("exitWindowMins")}
+            className="font-mono text-sm bg-white/[0.03] border-white/10 text-white h-9"
+          />
+          <p className="text-[10px] text-slate-600">Force-sell when this many minutes remain (default: 2)</p>
         </div>
       </CardContent>
     </Card>
