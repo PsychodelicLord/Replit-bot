@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
-import { desc, count } from "drizzle-orm";
+import { desc, count, sum, sql } from "drizzle-orm";
 import {
   GetBotStatusResponse,
   StartBotResponse,
@@ -200,7 +200,23 @@ router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
 
 // ─── Momentum Bot routes ────────────────────────────────────────────────────
 router.get("/bot/momentum/status", (_req, res): void => {
-  res.json(MomentumBotStatus.parse(getMomentumBotState()));
+  const state = getMomentumBotState();
+  db.select({
+    allTimeWins:    sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} > 0) as int)`,
+    allTimeLosses:  sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} <= 0 and ${tradesTable.pnlCents} is not null) as int)`,
+    allTimePnlCents: sql<number>`cast(coalesce(sum(${tradesTable.pnlCents}), 0) as int)`,
+  }).from(tradesTable).where(sql`${tradesTable.status} = 'closed'`)
+    .then(([row]) => {
+      res.json(MomentumBotStatus.parse({
+        ...state,
+        allTimeWins:     row?.allTimeWins     ?? 0,
+        allTimeLosses:   row?.allTimeLosses   ?? 0,
+        allTimePnlCents: row?.allTimePnlCents ?? 0,
+      }));
+    })
+    .catch(() => {
+      res.json(MomentumBotStatus.parse(state));
+    });
 });
 
 router.post("/bot/momentum/auto", (req, res): void => {

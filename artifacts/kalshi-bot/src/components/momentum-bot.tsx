@@ -118,7 +118,7 @@ export function MomentumBot() {
         TP: +3¢ · SL: -4¢ · Stale exit: 45s.
       </p>
 
-      {/* Stats row */}
+      {/* Stats row — session */}
       <div className="grid grid-cols-4 gap-2">
         <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
           <p className="text-[10px] text-slate-500 uppercase tracking-widest">Open</p>
@@ -149,6 +149,23 @@ export function MomentumBot() {
           <p className="text-[9px] text-slate-600">losses/row</p>
         </div>
       </div>
+
+      {/* All-time stats from DB */}
+      {((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
+        <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">All-Time</p>
+          <div className="flex items-center gap-3 text-xs">
+            <span>
+              <span className="text-emerald-400 font-bold">{data?.allTimeWins ?? 0}W</span>
+              <span className="text-slate-600 mx-1">/</span>
+              <span className="text-red-400 font-bold">{data?.allTimeLosses ?? 0}L</span>
+            </span>
+            <span className={`font-bold ${(data?.allTimePnlCents ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {(data?.allTimePnlCents ?? 0) >= 0 ? "+" : ""}{((data?.allTimePnlCents ?? 0) / 100).toFixed(2)}¢
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Pause notice */}
       {isPaused && (
@@ -246,7 +263,7 @@ export function MomentumBot() {
                   placeholder="0"
                   className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
                 />
-                <p className="text-[9px] text-slate-600 mt-0.5">Pause 15 min if session loss exceeds this</p>
+                <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session if loss exceeds this</p>
               </label>
 
               <label className="block">
@@ -261,7 +278,7 @@ export function MomentumBot() {
                   placeholder="3"
                   className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
                 />
-                <p className="text-[9px] text-slate-600 mt-0.5">Pause 15 min after N losses in a row</p>
+                <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session after N losses in a row</p>
               </label>
             </div>
 
