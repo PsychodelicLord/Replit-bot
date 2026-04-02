@@ -1517,8 +1517,8 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
 
     const { ticker, title } = market;
 
-    // Add 1¢ buffer above ask to cross the spread and ensure fill even if price ticks up
-    const orderPriceCents = ask + 1;
+    // Add 1¢ buffer above ask to cross the spread, but never exceed the user's price cap
+    const orderPriceCents = Math.min(ask + 1, maxAsk);
 
     const buyResp = await kalshiFetch("POST", "/portfolio/orders",
       buildOrderPayload(ticker, `coinflip-${Date.now()}`, "limit", "buy", side, 1, orderPriceCents),
