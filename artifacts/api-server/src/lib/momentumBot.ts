@@ -202,16 +202,19 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
     { entryPriceCents, exitPriceCents, pnlCents, totalWins: state.totalWins, totalLosses: state.totalLosses, sessionPnlCents: state.sessionPnlCents },
   );
 
-  // Check consecutive loss limit
+  // Check consecutive loss limit — hard stop, requires redeploy/manual restart to resume
   if (state.consecutiveLossLimit > 0 && state.consecutiveLosses >= state.consecutiveLossLimit) {
-    triggerPause(15 * 60_000, `${state.consecutiveLosses} CONSECUTIVE LOSSES — PAUSING`);
-    state.consecutiveLosses = 0;
+    log(`🛑 ${state.consecutiveLosses} CONSECUTIVE LOSSES — STOPPING BOT FOR SESSION`);
+    dbLog("warn", `[MOMENTUM] 🛑 ${state.consecutiveLosses} consecutive losses — bot stopped for session. Redeploy or restart to resume.`);
+    stopMomentumBot();
     return;
   }
 
-  // Check session loss limit
+  // Check session loss limit — hard stop, requires redeploy/manual restart to resume
   if (state.maxSessionLossCents > 0 && state.sessionPnlCents <= -state.maxSessionLossCents) {
-    triggerPause(15 * 60_000, `SESSION LOSS LIMIT HIT — PAUSING`);
+    log(`🛑 SESSION LOSS LIMIT HIT (${state.sessionPnlCents}¢) — STOPPING BOT FOR SESSION`);
+    dbLog("warn", `[MOMENTUM] 🛑 Session loss limit hit (${state.sessionPnlCents}¢) — bot stopped for session. Redeploy or restart to resume.`);
+    stopMomentumBot();
   }
 }
 
