@@ -172,6 +172,8 @@ export interface MomentumBotStatus {
   openTradeCount: number;
   lastDecision: string | null;
   lastDecisionAt: string | null;
+  totalWins: number;
+  totalLosses: number;
   sessionPnlCents: number;
   consecutiveLosses: number;
   pausedUntilMs: number | null;

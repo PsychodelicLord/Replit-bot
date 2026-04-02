@@ -119,25 +119,34 @@ export function MomentumBot() {
       </p>
 
       {/* Stats row */}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-4 gap-2">
         <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
           <p className="text-[10px] text-slate-500 uppercase tracking-widest">Open</p>
           <p className="text-lg font-bold text-white mt-0.5">{data?.openTradeCount ?? 0}</p>
           <p className="text-[9px] text-slate-600">max 2</p>
         </div>
         <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Session P&L</p>
-          <p className={`text-lg font-bold mt-0.5 ${sessionPnl > 0 ? "text-emerald-400" : sessionPnl < 0 ? "text-red-400" : "text-slate-400"}`}>
-            {sessionPnl >= 0 ? "+" : ""}{(sessionPnl / 100).toFixed(2)}¢
-          </p>
-          <p className="text-[9px] text-slate-600">since start</p>
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">W / L</p>
+          <div className="flex items-baseline justify-center gap-1 mt-0.5">
+            <span className="text-base font-bold text-emerald-400">{data?.totalWins ?? 0}</span>
+            <span className="text-slate-600 text-xs">/</span>
+            <span className="text-base font-bold text-red-400">{data?.totalLosses ?? 0}</span>
+          </div>
+          <p className="text-[9px] text-slate-600">this session</p>
         </div>
         <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Losses</p>
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">P&L</p>
+          <p className={`text-base font-bold mt-0.5 ${sessionPnl > 0 ? "text-emerald-400" : sessionPnl < 0 ? "text-red-400" : "text-slate-400"}`}>
+            {sessionPnl >= 0 ? "+" : ""}{(sessionPnl / 100).toFixed(2)}¢
+          </p>
+          <p className="text-[9px] text-slate-600">session</p>
+        </div>
+        <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Streak</p>
           <p className={`text-lg font-bold mt-0.5 ${(data?.consecutiveLosses ?? 0) >= 2 ? "text-red-400" : "text-slate-300"}`}>
             {data?.consecutiveLosses ?? 0}
           </p>
-          <p className="text-[9px] text-slate-600">in a row</p>
+          <p className="text-[9px] text-slate-600">losses/row</p>
         </div>
       </div>
 

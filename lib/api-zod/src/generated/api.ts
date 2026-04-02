@@ -290,6 +290,8 @@ export const MomentumBotStatus = zod.object({
   openTradeCount:      zod.number(),
   lastDecision:        zod.string().nullable(),
   lastDecisionAt:      zod.string().nullable(),
+  totalWins:           zod.number(),
+  totalLosses:         zod.number(),
   sessionPnlCents:     zod.number(),
   consecutiveLosses:   zod.number(),
   pausedUntilMs:       zod.number().nullable(),

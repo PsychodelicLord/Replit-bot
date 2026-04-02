@@ -78,9 +78,13 @@ export interface MomentumBotState {
   lastDecision: string | null;
   lastDecisionAt: string | null;
 
-  // Risk management
+  // Trade tracking
+  totalWins: number;
+  totalLosses: number;
   sessionPnlCents: number;
   consecutiveLosses: number;
+
+  // Risk management
   pausedUntilMs: number | null;
   pauseReason: string | null;
   balanceFloorCents: number;
@@ -95,6 +99,8 @@ const state: MomentumBotState = {
   openTradeCount: 0,
   lastDecision: null,
   lastDecisionAt: null,
+  totalWins: 0,
+  totalLosses: 0,
   sessionPnlCents: 0,
   consecutiveLosses: 0,
   pausedUntilMs: null,
@@ -163,14 +169,22 @@ function triggerPause(durationMs: number, reason: string) {
   log(`🚨 ${reason} — pausing for ${Math.round(durationMs / 60_000)} min`);
 }
 
-function recordTradeResult(pnlCents: number) {
+function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlCents: number) {
+  // ── In-memory tracking — always happens first, DB-independent ──
   state.sessionPnlCents += pnlCents;
 
-  if (pnlCents < 0) {
-    state.consecutiveLosses++;
-  } else {
+  if (pnlCents > 0) {
+    state.totalWins++;
     state.consecutiveLosses = 0;
+  } else if (pnlCents < 0) {
+    state.totalLosses++;
+    state.consecutiveLosses++;
   }
+
+  log(
+    `📊 TRADE CLOSED | entry: ${entryPriceCents}¢ → exit: ${exitPriceCents}¢ | P&L: ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢ | W:${state.totalWins} L:${state.totalLosses} | session: ${state.sessionPnlCents >= 0 ? "+" : ""}${state.sessionPnlCents}¢`,
+    { entryPriceCents, exitPriceCents, pnlCents, totalWins: state.totalWins, totalLosses: state.totalLosses, sessionPnlCents: state.sessionPnlCents },
+  );
 
   // Check consecutive loss limit
   if (state.consecutiveLossLimit > 0 && state.consecutiveLosses >= state.consecutiveLossLimit) {
@@ -366,7 +380,7 @@ async function placeSellOrder(
   currentBidCents: number,
 ): Promise<boolean> {
   const limitCents = Math.max(1, currentBidCents - 2);
-  const clientOrderId = `momentum-sell-${pos.tradeId}-${Date.now()}`;
+  const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
     ticker: pos.marketId,
     client_order_id: clientOrderId,
@@ -385,12 +399,12 @@ async function placeSellOrder(
     const rawPrice = pos.side === "YES"
       ? (resp?.order?.yes_price ?? 0)
       : (resp?.order?.no_price  ?? 0);
-    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
-    const gross  = fillPrice - pos.entryPriceCents;
-    const fee    = Math.floor(FEE_RATE * Math.max(0, gross));
-    const netPnl = gross - fee;
+    const exitPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
+    const gross     = exitPrice - pos.entryPriceCents;
+    const fee       = Math.floor(FEE_RATE * Math.max(0, gross));
+    const netPnl    = gross - fee;
 
-    // Remove from in-memory FIRST
+    // ── Remove from in-memory FIRST — always, regardless of DB status ──
     const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
     if (idx >= 0) openPositions.splice(idx, 1);
     state.openTradeCount = openPositions.length;
@@ -398,37 +412,52 @@ async function placeSellOrder(
     // Per-market cooldown
     marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
 
-    log(
-      `✅ SELL — Trade ${pos.tradeId} ${pos.side} @${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`,
-      { tradeId: pos.tradeId, fillPrice, netPnl },
-    );
+    // ── Record win/loss in-memory immediately — DB-independent ──
+    recordTradeResult(pos.entryPriceCents, exitPrice, netPnl);
 
-    // Record result for risk management
-    recordTradeResult(netPnl);
-
-    // Async DB update — fire-and-forget
+    // ── Async DB update — fire-and-forget, never blocks ──
     const sellFields = {
       status: "closed" as const,
-      sellPriceCents: fillPrice,
+      sellPriceCents: exitPrice,
       pnlCents: netPnl,
       feeCents: fee,
       closedAt: new Date(),
     };
-    if (pos.tradeId > 0) {
+
+    const persistSell = (id: number) => {
       db.update(tradesTable).set(sellFields)
-        .where(eq(tradesTable.id, pos.tradeId))
-        .catch(err => warn(`DB sell update failed: ${String(err)}`));
-    } else {
+        .where(eq(tradesTable.id, id))
+        .catch(err => warn(`DB sell update failed for id=${id}: ${String(err)}`));
+    };
+
+    if (pos.tradeId > 0) {
+      // Real DB id already resolved — update immediately
+      persistSell(pos.tradeId);
+    } else if (pos.buyOrderId) {
+      // DB insert may still be in-flight — wait 6s for it to resolve,
+      // then find the row by buyOrderId since we can't use the provisional negative id
       setTimeout(() => {
         db.update(tradesTable).set(sellFields)
-          .where(eq(tradesTable.id, Math.abs(pos.tradeId)))
-          .catch(err => warn(`DB sell update (delayed) failed: ${String(err)}`));
-      }, 5_000);
+          .where(eq(tradesTable.kalshiBuyOrderId, pos.buyOrderId!))
+          .catch(err => warn(`DB sell update (by buyOrderId) failed: ${String(err)}`));
+      }, 6_000);
+    } else {
+      warn(`DB sell skipped — no real tradeId or buyOrderId`, { provisId: pos.tradeId });
     }
 
     return true;
   } catch (err) {
-    warn(`placeSellOrder failed: ${String(err)}`, { tradeId: pos.tradeId });
+    warn(`placeSellOrder failed: ${String(err)}`, { tradeId: pos.tradeId, market: pos.marketId });
+
+    // Even if Kalshi rejected the sell, still remove from in-memory so we don't loop forever
+    const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+    if (idx >= 0) {
+      warn(`Removing position ${pos.tradeId} from memory after failed sell attempt`);
+      openPositions.splice(idx, 1);
+      state.openTradeCount = openPositions.length;
+      marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+    }
+
     return false;
   }
 }
