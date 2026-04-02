@@ -1401,18 +1401,19 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
       return { success: false, message: `Coin flip blocked — ${safety.reason}` };
     }
 
-    // Respect max open positions — query DB directly so this is always accurate after restarts
-    const openRows = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-    const effectiveOpen = Math.max(openMarkets.size, openRows.length);
+    // Respect max open positions — try DB for accuracy, fall back to in-memory if DB is down
+    let effectiveOpen = openMarkets.size;
+    let occupiedTickers = new Set<string>([...openMarkets]);
+    try {
+      const openRows = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+      effectiveOpen = Math.max(openMarkets.size, openRows.length);
+      occupiedTickers = new Set<string>([...openMarkets, ...openRows.map(t => t.marketId)]);
+    } catch (dbErr) {
+      logger.warn({ err: dbErr }, "coinFlipTrade: DB open-positions check failed — using in-memory state only");
+    }
     if (effectiveOpen >= botConfig.maxOpenPositions) {
       return { success: false, message: `Max open positions (${botConfig.maxOpenPositions}) already reached — coin flip blocked.` };
     }
-
-    // Build set of market tickers already occupied — skip these when selecting a new market
-    const occupiedTickers = new Set<string>([
-      ...openMarkets,
-      ...openRows.map(t => t.marketId),
-    ]);
 
     const now = Date.now();
 

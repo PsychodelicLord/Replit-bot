@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { retryOpenPositions, refreshBalance, startCoinFlipAuto, syncPortfolioFromKalshi, registerOpenPosition, loadBotConfigFromDb } from "./lib/kalshi-bot";
+import { startMomentumBot } from "./lib/momentumBot";
 import { runMigrations } from "./migrate";
 import { db, tradesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -57,6 +58,12 @@ runMigrations().then(() => {
           logger.info("🪙 Coin flip auto-mode started automatically via COINFLIP_AUTO_START");
         } else {
           logger.warn({ autoStartValue: autoStart ?? "(not set)" }, "COINFLIP_AUTO_START is not 'true' — bot will not trade automatically");
+        }
+
+        const momentumAutoStart = process.env["MOMENTUM_AUTO_START"];
+        if (momentumAutoStart === "true") {
+          startMomentumBot();
+          logger.info("📈 Momentum bot auto-mode started automatically via MOMENTUM_AUTO_START");
         }
       });
 
