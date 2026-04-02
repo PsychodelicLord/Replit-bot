@@ -256,7 +256,7 @@ function signRequest(method: string, path: string, timestampMs: number): string 
   return sig.toString("base64");
 }
 
-async function kalshiFetch(method: string, path: string, body?: unknown): Promise<unknown> {
+export async function kalshiFetch(method: string, path: string, body?: unknown): Promise<unknown> {
   const ts = Date.now();
   const sig = signRequest(method, path, ts);
   const res = await fetch(`${KALSHI_BASE}${path}`, {

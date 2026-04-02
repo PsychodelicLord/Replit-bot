@@ -1,6 +1,7 @@
 import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
 import { CoinFlip } from "@/components/coin-flip";
 import { CoinFlipSettings } from "@/components/coin-flip-settings";
+import { MomentumBot } from "@/components/momentum-bot";
 import { TradeTable } from "@/components/trade-table";
 import { Coins, Wallet, TrendingUp, TrendingDown, Trophy, Skull, BarChart2 } from "lucide-react";
 
@@ -123,6 +124,9 @@ export function Dashboard() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
           <CoinFlip />
           <CoinFlipSettings />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+          <MomentumBot />
         </div>
         <TradeTable />
       </main>

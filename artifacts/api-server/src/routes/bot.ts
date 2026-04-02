@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
+import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count } from "drizzle-orm";
 import {
@@ -19,6 +20,8 @@ import {
   CoinFlipResponse,
   CoinFlipAutoBody,
   CoinFlipAutoStatus,
+  MomentumBotAutoBody,
+  MomentumBotStatus,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -193,6 +196,33 @@ router.post("/bot/coin-flip/auto", (req, res): void => {
 router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
   const result = await clearStuckPositions();
   res.json(result);
+});
+
+// ─── Momentum Bot routes ────────────────────────────────────────────────────
+router.get("/bot/momentum/status", (_req, res): void => {
+  res.json(MomentumBotStatus.parse(getMomentumBotState()));
+});
+
+router.post("/bot/momentum/auto", (req, res): void => {
+  const parsed = MomentumBotAutoBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+
+  const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit } = parsed.data;
+
+  if (enabled && !isProductionDeployment()) {
+    res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
+    return;
+  }
+
+  // Update risk config if provided
+  updateMomentumConfig({
+    balanceFloorCents:    balanceFloorCents    ?? 0,
+    maxSessionLossCents:  maxSessionLossCents  ?? 0,
+    consecutiveLossLimit: consecutiveLossLimit ?? 3,
+  });
+
+  const state = enabled ? startMomentumBot() : stopMomentumBot();
+  res.json(MomentumBotStatus.parse(state));
 });
 
 export default router;

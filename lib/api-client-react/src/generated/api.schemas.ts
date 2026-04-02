@@ -157,3 +157,26 @@ export interface CoinFlipAutoStatus {
   intervalSecs: number;
   nextFlipAt: number | null;
 }
+
+export interface MomentumBotAutoBody {
+  enabled: boolean;
+  balanceFloorCents?: number;
+  maxSessionLossCents?: number;
+  consecutiveLossLimit?: number;
+}
+
+export interface MomentumBotStatus {
+  enabled: boolean;
+  autoMode: boolean;
+  status: "DISABLED" | "WAITING_FOR_SETUP" | "IN_TRADE" | "PAUSED";
+  openTradeCount: number;
+  lastDecision: string | null;
+  lastDecisionAt: string | null;
+  sessionPnlCents: number;
+  consecutiveLosses: number;
+  pausedUntilMs: number | null;
+  pauseReason: string | null;
+  balanceFloorCents: number;
+  maxSessionLossCents: number;
+  consecutiveLossLimit: number;
+}

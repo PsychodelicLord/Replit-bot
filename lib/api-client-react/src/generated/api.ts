@@ -29,6 +29,8 @@ import type {
   LogList,
   ManualTradeBody,
   ManualTradeResult,
+  MomentumBotAutoBody,
+  MomentumBotStatus,
   TradeList,
   TradeStats,
 } from "./api.schemas";
@@ -912,4 +914,50 @@ export function useGetBotLogs<
   };
 
   return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Momentum Bot status
+ */
+export const getMomentumBotStatusUrl = () => `/api/bot/momentum/status`;
+
+export const getMomentumBotStatus = async (options?: RequestInit): Promise<MomentumBotStatus> =>
+  customFetch<MomentumBotStatus>(getMomentumBotStatusUrl(), { ...options, method: "GET" });
+
+export const getGetMomentumBotStatusQueryKey = () => [`/api/bot/momentum/status`] as const;
+
+export function useGetMomentumBotStatus<
+  TData = Awaited<ReturnType<typeof getMomentumBotStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<Awaited<ReturnType<typeof getMomentumBotStatus>>, TError, TData>;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getGetMomentumBotStatusQueryKey();
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getMomentumBotStatus>>> = ({ signal }) =>
+    getMomentumBotStatus({ signal, ...requestOptions });
+  const query = useQuery({ queryKey, queryFn, ...queryOptions }) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return { ...query, queryKey };
+}
+
+/**
+ * @summary Set Momentum Bot auto mode / risk config
+ */
+export const postSetMomentumBotAuto = async (body: MomentumBotAutoBody, options?: RequestInit): Promise<MomentumBotStatus> =>
+  customFetch<MomentumBotStatus>(`/api/bot/momentum/auto`, {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(body),
+  });
+
+export function useSetMomentumBotAuto<TError = ErrorType<unknown>, TContext = unknown>(options?: {
+  mutation?: UseMutationOptions<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, TError, { data: MomentumBotAutoBody }, TContext>;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, TError, { data: MomentumBotAutoBody }, TContext> {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, { data: MomentumBotAutoBody }> =
+    ({ data }) => postSetMomentumBotAuto(data, requestOptions);
+  return useMutation<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, TError, { data: MomentumBotAutoBody }, TContext>({ mutationFn, ...mutationOptions });
 }

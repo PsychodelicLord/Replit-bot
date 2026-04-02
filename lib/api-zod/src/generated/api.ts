@@ -274,6 +274,32 @@ export const CoinFlipResponse = zod.object({
 });
 
 /**
+ * @summary Momentum Bot — toggle auto mode / update risk config
+ */
+export const MomentumBotAutoBody = zod.object({
+  enabled: zod.boolean(),
+  balanceFloorCents:    zod.number().int().min(0).optional(),
+  maxSessionLossCents:  zod.number().int().min(0).optional(),
+  consecutiveLossLimit: zod.number().int().min(0).optional(),
+});
+
+export const MomentumBotStatus = zod.object({
+  enabled:             zod.boolean(),
+  autoMode:            zod.boolean(),
+  status:              zod.enum(["DISABLED", "WAITING_FOR_SETUP", "IN_TRADE", "PAUSED"]),
+  openTradeCount:      zod.number(),
+  lastDecision:        zod.string().nullable(),
+  lastDecisionAt:      zod.string().nullable(),
+  sessionPnlCents:     zod.number(),
+  consecutiveLosses:   zod.number(),
+  pausedUntilMs:       zod.number().nullable(),
+  pauseReason:         zod.string().nullable(),
+  balanceFloorCents:   zod.number(),
+  maxSessionLossCents: zod.number(),
+  consecutiveLossLimit:zod.number(),
+});
+
+/**
  * @summary Get recent bot logs
  */
 export const getBotLogsQueryLimitDefault = 50;
