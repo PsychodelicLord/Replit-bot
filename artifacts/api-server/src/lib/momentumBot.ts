@@ -18,7 +18,7 @@
 
 import { kalshiFetch } from "./kalshi-bot";
 import { logger } from "./logger";
-import { db, tradesTable } from "@workspace/db";
+import { db, tradesTable, botLogsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -141,6 +141,17 @@ function log(msg: string, data?: Record<string, unknown>) {
 
 function warn(msg: string, data?: Record<string, unknown>) {
   logger.warn(data ?? {}, `[MOMENTUM BOT] ${msg}`);
+}
+
+// Throttle: only write to DB once per minute for high-frequency log types
+const _dbLogThrottle = new Map<string, number>();
+function dbLog(level: "info" | "warn" | "error", message: string, throttleKey?: string): void {
+  if (throttleKey) {
+    const last = _dbLogThrottle.get(throttleKey) ?? 0;
+    if (Date.now() - last < 60_000) return;
+    _dbLogThrottle.set(throttleKey, Date.now());
+  }
+  db.insert(botLogsTable).values({ level, message }).catch(() => {/* non-fatal */});
 }
 
 function isMomentumMarket(ticker: string): boolean {
@@ -581,6 +592,8 @@ export async function executeMomentumTrade(
     `🟢 BUY ${side} — ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId: ${tradeId}`,
     { ticker, side, fillPrice: result.fillPrice, tradeId },
   );
+
+  dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
 }
 
 // ─── Sell Monitor ───────────────────────────────────────────────────────────
@@ -658,7 +671,15 @@ export async function scanMomentumMarkets(): Promise<void> {
   state.status = openPositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
 
   const markets = await fetchActiveMarkets();
-  if (markets.length === 0) return;
+  if (markets.length === 0) {
+    dbLog("warn", `[MOMENTUM] fetchActiveMarkets returned 0 markets`, "no-markets");
+    return;
+  }
+
+  dbLog("info",
+    `[MOMENTUM] Scanning ${markets.length} markets: ${markets.map(m => `${coinLabel(m.ticker)} ${m.minutesRemaining.toFixed(1)}min ask:${m.askCents}¢`).join(", ")}`,
+    "scan-markets",
+  );
 
   for (const market of markets) {
     // Already have position in this market?
@@ -674,7 +695,10 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     // Fetch orderbook — pass market-list prices as hints for empty-book fallback
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
-    if (!ob) continue;
+    if (!ob) {
+      dbLog("warn", `[MOMENTUM] No orderbook for ${coinLabel(market.ticker)} — skipping`, `no-ob-${market.ticker}`);
+      continue;
+    }
 
     const { bid, ask, spread, mid } = ob;
 
@@ -701,6 +725,13 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     state.lastDecision = `${coinLabel(market.ticker)}: ${decision.action} — ${decision.reason}`;
     state.lastDecisionAt = new Date().toISOString();
+
+    // Log momentum decisions to DB (throttled per market)
+    if (decision.action !== "SKIP") {
+      dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ up:${decision.upMoves} dn:${decision.downMoves} range:${decision.range}¢`);
+    } else {
+      dbLog("info", `[MOMENTUM] ${coinLabel(market.ticker)} SKIP | price:${mid}¢ spread:${spread}¢ | ${decision.reason}`, `skip-${market.ticker}`);
+    }
 
     if (decision.action === "SKIP") continue;
 
@@ -775,6 +806,7 @@ export function startMomentumBot(): MomentumBotState {
   }
 
   log("▶️  Momentum Bot STARTED");
+  dbLog("info", `[MOMENTUM] ▶️ Momentum Bot STARTED — scanning every ${SCAN_INTERVAL_MS / 1000}s for ${ALLOWED_COINS.join(",")} 15-min markets`);
   return getMomentumBotState();
 }
 
@@ -786,6 +818,7 @@ export function stopMomentumBot(): MomentumBotState {
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
 
+  dbLog("info", "[MOMENTUM] ⏹️ Momentum Bot STOPPED");
   log("⏹️  Momentum Bot STOPPED");
   return getMomentumBotState();
 }
