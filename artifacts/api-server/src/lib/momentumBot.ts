@@ -4,7 +4,7 @@
  * Rules:
  *  - Trades BTC, ETH, SOL, DOGE, XRP, BNB, HYPE (15-min crypto markets)
  *  - Entry: price 20-80¢, spread ≤5¢, >7 min remaining, momentum signal
- *  - Momentum = 3/4 moves same direction over 5 ticks (15s each), range ≥1¢
+ *  - Momentum = price moved ≥1¢ since previous scan (15s ago) in same direction
  *  - TP: +3¢, SL: -4¢, no-movement exit after 45s (price didn't move ≥1¢)
  *  - Max 2 simultaneous positions; no stacking same market or same direction
  *  - Per-market cooldown 75s after close
@@ -36,10 +36,10 @@ const SL_CENTS    = 4;   // stop-loss: exit when loss ≥ -4¢
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
-const TICK_WINDOW      = 5;   // number of ticks to evaluate
-const TICKS_REQUIRED   = 3;   // min ticks in same direction (out of TICK_WINDOW - 1)
-const RANGE_MIN_CENTS  = 1;   // min price range over last N ticks
-const TICK_MAX_AGE_MS  = 90_000; // all N ticks must fit in this window (5 × 15s = 75s)
+const TICK_WINDOW      = 2;   // compare current vs previous scan — only 2 points needed
+const TICKS_REQUIRED   = 1;   // 1 move in same direction (1/1 — any price change)
+const RANGE_MIN_CENTS  = 1;   // min price change required (≥1¢ to trade)
+const TICK_MAX_AGE_MS  = 60_000; // both ticks must be within 60s (2 × 15s = 30s — always passes)
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -675,13 +675,13 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   const markets = await fetchActiveMarkets();
   if (markets.length === 0) {
+    log(`[SCAN] fetchActiveMarkets returned 0 markets — check ticker prefixes or API`);
     dbLog("warn", `[MOMENTUM] fetchActiveMarkets returned 0 markets`, "no-markets");
     return;
   }
 
-  dbLog("info",
-    `[MOMENTUM] Scanning ${markets.length} markets: ${markets.map(m => `${coinLabel(m.ticker)} ${m.minutesRemaining.toFixed(1)}min ask:${m.askCents}¢`).join(", ")}`,
-    "scan-markets",
+  log(
+    `[SCAN] ${markets.length} markets: ${markets.map(m => `${coinLabel(m.ticker)} ${m.minutesRemaining.toFixed(1)}min ask:${m.askCents}¢`).join(", ")}`,
   );
 
   for (const market of markets) {
@@ -699,6 +699,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Fetch orderbook — pass market-list prices as hints for empty-book fallback
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) {
+      log(`[SCAN] ${coinLabel(market.ticker)} — no orderbook data, skipping`);
       dbLog("warn", `[MOMENTUM] No orderbook for ${coinLabel(market.ticker)} — skipping`, `no-ob-${market.ticker}`);
       continue;
     }
@@ -729,10 +730,12 @@ export async function scanMomentumMarkets(): Promise<void> {
     state.lastDecision = `${coinLabel(market.ticker)}: ${decision.action} — ${decision.reason}`;
     state.lastDecisionAt = new Date().toISOString();
 
-    // Log momentum decisions to DB (throttled per market)
+    // Log momentum decisions — visible in Railway console
     if (decision.action !== "SKIP") {
+      log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ up:${decision.upMoves} dn:${decision.downMoves} range:${decision.range}¢`);
       dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ up:${decision.upMoves} dn:${decision.downMoves} range:${decision.range}¢`);
     } else {
+      log(`[SKIP] ${coinLabel(market.ticker)} | price:${mid}¢ spread:${spread}¢ | ${decision.reason}`);
       dbLog("info", `[MOMENTUM] ${coinLabel(market.ticker)} SKIP | price:${mid}¢ spread:${spread}¢ | ${decision.reason}`, `skip-${market.ticker}`);
     }
 
@@ -775,6 +778,47 @@ export async function scanMomentumMarkets(): Promise<void> {
 // ─── Public API ─────────────────────────────────────────────────────────────
 export function getMomentumBotState(): MomentumBotState {
   return { ...state };
+}
+
+/** Debug: returns live market fetch + current tick history — for the /bot/momentum/debug endpoint */
+export async function debugMomentumMarkets() {
+  // Unfiltered fetch — same window but no ticker prefix filter, to see ALL markets
+  const now = Date.now();
+  const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
+  let rawCount = 0;
+  let rawSample: string[] = [];
+  try {
+    const resp = await kalshiFetch("GET", `/markets?status=open&limit=100&max_close_ts=${maxCloseTs}`) as {
+      markets?: Array<{ ticker?: string; close_time?: string; yes_ask_dollars?: number; yes_bid_dollars?: number }>;
+    };
+    rawCount = resp?.markets?.length ?? 0;
+    rawSample = (resp?.markets ?? []).slice(0, 20).map(m => {
+      const closeMs = m.close_time ? new Date(m.close_time).getTime() : now;
+      const minsLeft = ((closeMs - now) / 60000).toFixed(1);
+      return `${m.ticker} (${minsLeft}min, ask:${m.yes_ask_dollars} bid:${m.yes_bid_dollars})`;
+    });
+  } catch (e) {
+    rawSample = [`Error: ${String(e)}`];
+  }
+
+  const filtered = await fetchActiveMarkets();
+  const tickSnap: Record<string, { ticks: number; prices: number[]; ageMs: number }> = {};
+  for (const [marketId, ticks] of tickHistory.entries()) {
+    tickSnap[marketId] = {
+      ticks: ticks.length,
+      prices: ticks.slice(-5).map(t => t.priceCents),
+      ageMs: ticks.length > 0 ? now - ticks[ticks.length - 1].timestampMs : -1,
+    };
+  }
+
+  return {
+    rawMarketsInWindow: rawCount,
+    rawSample,
+    filteredMarkets: filtered.map(m => ({ ticker: m.ticker, minutesRemaining: m.minutesRemaining, askCents: m.askCents, bidCents: m.bidCents })),
+    tickHistory: tickSnap,
+    config: { TICK_WINDOW, TICKS_REQUIRED, RANGE_MIN_CENTS, TICK_MAX_AGE_MS, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, SPREAD_MAX, MIN_MINUTES_REMAINING },
+    botState: getMomentumBotState(),
+  };
 }
 
 export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
