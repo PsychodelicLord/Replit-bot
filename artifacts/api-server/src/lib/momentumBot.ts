@@ -452,10 +452,16 @@ async function fetchActiveMarkets(): Promise<Array<{
     .map(m => rawToMarket(m, now))
     .filter(m => m.minutesRemaining > MIN_MINUTES_REMAINING);
 
-  console.log(`[FETCH] Refresh complete — ${markets.length} eligible markets cached`);
+  console.log(`[FETCH] Refresh complete — ${markets.length} eligible markets found`);
 
-  // Update cache (even if empty — avoids hammering on empty cycles)
-  _marketCache = { markets, cachedAt: now };
+  if (markets.length > 0) {
+    // Only cache when we actually found markets — empty results are never cached
+    // so the next scan re-fetches immediately (handles gaps between 15-min cycles)
+    _marketCache = { markets, cachedAt: now };
+  } else {
+    _marketCache = null;
+    console.log(`[FETCH] No eligible markets — cache cleared, will retry next scan`);
+  }
   return markets;
 }
 
