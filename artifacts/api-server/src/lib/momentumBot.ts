@@ -788,31 +788,31 @@ export async function scanMomentumMarkets(): Promise<void> {
     `[SCAN] ${markets.length} markets: ${markets.map(m => `${coinLabel(m.ticker)} ${m.minutesRemaining.toFixed(1)}min ask:${m.askCents}¢`).join(", ")}`,
   );
 
-  let inRangeCount = 0; // tracks markets that pass price/spread/orderbook filters
+  // ── Phase 1: Evaluate ALL markets, collect ranked signals ─────────────────
+  // We evaluate every market before executing anything so we always trade
+  // the BEST available setup, not just the first one encountered.
+  type Candidate = {
+    market: typeof markets[0];
+    ob: { bid: number; ask: number; spread: number; mid: number };
+    decision: MomentumDecision;
+    side: "YES" | "NO";
+    score: number;
+  };
+  const candidates: Candidate[] = [];
+  let inRangeCount = 0;
 
   for (const market of markets) {
-    // Already have position in this market?
-    const alreadyInMarket = openPositions.some(p => p.marketId === market.ticker);
-    if (alreadyInMarket) continue;
-
-    // Per-market cooldown active?
+    if (openPositions.some(p => p.marketId === market.ticker)) continue;
     const cooldown = marketCooldowns.get(market.ticker);
     if (cooldown && Date.now() < cooldown) continue;
 
-    // Max positions reached?
-    if (openPositions.length >= MAX_POSITIONS) break;
-
-    // Fetch orderbook — pass market-list prices as hints for empty-book fallback
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) {
       log(`[SCAN] ${coinLabel(market.ticker)} — no orderbook data, skipping`);
-      dbLog("warn", `[MOMENTUM] No orderbook for ${coinLabel(market.ticker)} — skipping`, `no-ob-${market.ticker}`);
       continue;
     }
 
     const { bid, ask, spread, mid } = ob;
-
-    // Entry conditions — log reasons so Railway shows exactly what's happening
     if (ask <= 0 || bid <= 0) {
       console.log(`[SCAN] ${coinLabel(market.ticker)} — zero prices (ask:${ask} bid:${bid}), skipping`);
       continue;
@@ -827,71 +827,79 @@ export async function scanMomentumMarkets(): Promise<void> {
     }
     inRangeCount++;
 
-    // Evaluate momentum (feeds in current mid price as tick)
     const decision = evaluateMomentum(market.ticker, mid);
-
-    const logData = {
-      ticks: decision.ticks,
-      upMoves: decision.upMoves,
-      downMoves: decision.downMoves,
-      range: decision.range,
-      decision: decision.action,
-    };
 
     log(
       `[MOMENTUM CHECK] ${coinLabel(market.ticker)} | price:${mid}¢ spread:${spread}¢ | ${decision.action} — ${decision.reason}`,
-      logData,
+      { upMoves: decision.upMoves, downMoves: decision.downMoves, range: decision.range, decision: decision.action },
     );
 
-    state.lastDecision = `${coinLabel(market.ticker)}: ${decision.action} — ${decision.reason}`;
-    state.lastDecisionAt = new Date().toISOString();
-
-    // Log momentum decisions — visible in Railway console
-    if (decision.action !== "SKIP") {
-      log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ up:${decision.upMoves} dn:${decision.downMoves} range:${decision.range}¢`);
-      dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ up:${decision.upMoves} dn:${decision.downMoves} range:${decision.range}¢`);
-    } else {
+    if (decision.action === "SKIP") {
       log(`[SKIP] ${coinLabel(market.ticker)} | price:${mid}¢ spread:${spread}¢ | ${decision.reason}`);
-      dbLog("info", `[MOMENTUM] ${coinLabel(market.ticker)} SKIP | price:${mid}¢ spread:${spread}¢ | ${decision.reason}`, `skip-${market.ticker}`);
+      continue;
     }
 
-    if (decision.action === "SKIP") continue;
-
-    // Check for same-direction stacking
     const side = decision.action === "BUY_YES" ? "YES" : "NO";
-    const sameDirExists = openPositions.some(p => p.side === side && p.marketId === market.ticker);
-    if (sameDirExists) continue;
+    if (openPositions.some(p => p.side === side && p.marketId === market.ticker)) continue;
 
-    // Balance floor check — fetch balance lazily if floor enabled
+    // ── Signal scoring: higher = better setup ─────────────────────────────
+    // Momentum strength (primary driver)
+    const momentumScore  = (decision.upMoves + decision.downMoves) * 15;
+    // Bonus for fast/flat-hold signals (strong conviction)
+    const signalBonus    = decision.reason.includes("Fast momentum") ? 10
+                         : decision.reason.includes("Flat tick") ? 5 : 0;
+    // Price near 50¢ = more room to move either way
+    const priceScore     = (50 - Math.abs(mid - 50)) * 0.5;
+    // Tighter spread = cheaper round-trip
+    const spreadScore    = (SPREAD_MAX - spread) * 3;
+    // More time left = more room to TP before expiry
+    const timeScore      = Math.min(market.minutesRemaining, 10);
+    const score = momentumScore + signalBonus + priceScore + spreadScore + timeScore;
+
+    log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)} | ${decision.reason}`);
+    dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)}`);
+    candidates.push({ market, ob, decision, side, score });
+  }
+
+  // ── Phase 2: Rank signals and log leaderboard ─────────────────────────────
+  candidates.sort((a, b) => b.score - a.score);
+  if (candidates.length > 0) {
+    const board = candidates.slice(0, 5)
+      .map(c => `${coinLabel(c.market.ticker)}(${c.score.toFixed(0)} ${c.side})`)
+      .join(" > ");
+    console.log(`[RANKING] ${candidates.length} signals → best: ${board}`);
+    state.lastDecision = `${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`;
+    state.lastDecisionAt = new Date().toISOString();
+  }
+
+  // ── Phase 3: Execute top-ranked signals up to MAX_POSITIONS ──────────────
+  for (const candidate of candidates) {
+    if (openPositions.length >= MAX_POSITIONS) break;
+
+    // Balance floor check
     if (state.balanceFloorCents > 0) {
       try {
         const balResp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { available_balance?: number } };
         const balance = Math.round((balResp?.balance?.available_balance ?? 0) * 100);
         if (balance <= state.balanceFloorCents) {
-          const msg = `BALANCE FLOOR HIT (${balance}¢ ≤ ${state.balanceFloorCents}¢) — STOPPING BOT`;
-          log(`🚨 ${msg}`);
+          log(`🚨 BALANCE FLOOR HIT (${balance}¢ ≤ ${state.balanceFloorCents}¢) — STOPPING BOT`);
           stopMomentumBot();
           return;
         }
       } catch { /* non-blocking */ }
     }
 
+    const { market, ob, side } = candidate;
     log(
-      `[MOMENTUM BOT] Market: ${coinLabel(market.ticker)} | Price: ${mid} | Spread: ${spread} | Momentum: ${decision.action === "BUY_YES" ? "UP" : "DOWN"} | Decision: ${decision.action}`,
-      { market: market.ticker, price: mid, spread, momentum: decision.action },
+      `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
+      { market: market.ticker, price: ob.mid, spread: ob.spread },
     );
-
-    await executeMomentumTrade(market.ticker, market.title, side, bid, ask);
-
-    // Respect max positions — check again after trade
-    if (openPositions.length >= MAX_POSITIONS) break;
+    await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask);
   }
 
-  // If every market was out of price/spread range, the cached list is stale
-  // (end-of-cycle markets with settled prices). Expire cache now so the next
-  // scan (15s later) re-fetches and finds fresh cycle markets.
+  // If no markets were in tradeable range, cache is likely stale (end-of-cycle)
   if (inRangeCount === 0) {
-    console.log(`[SCAN] All ${markets.length} markets out of tradeable range — expiring market cache for fresh fetch next scan`);
+    console.log(`[SCAN] All ${markets.length} markets out of tradeable range — expiring cache for fresh fetch`);
     _marketCache = null;
   }
 
