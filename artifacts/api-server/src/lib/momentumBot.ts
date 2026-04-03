@@ -448,7 +448,9 @@ async function fetchActiveMarkets(): Promise<Array<{
   }
 
   const markets = allRaw
-    .filter(m => m.ticker && m.status === "open")
+    // Kalshi returns "active" or omits status on some markets even when queried
+    // with ?status=open — treat null/undefined/"open"/"active" all as live
+    .filter(m => m.ticker && (!m.status || m.status === "open" || m.status === "active"))
     .map(m => rawToMarket(m, now))
     .filter(m => m.minutesRemaining > MIN_MINUTES_REMAINING);
 
