@@ -28,7 +28,7 @@ const ALLOWED_TICKER_PREFIXES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXDOGE15M"
 const PRICE_MIN  = 20;
 const PRICE_MAX  = 80;
 const SPREAD_MAX = 5;
-const MIN_MINUTES_REMAINING = 7;
+const MIN_MINUTES_REMAINING = 3;
 const MAX_POSITIONS = 2;
 
 const TP_CENTS    = 3;   // take-profit: exit when gain ≥ +3¢
@@ -391,7 +391,8 @@ type RawMarket = {
 };
 
 function rawToMarket(m: RawMarket, now: number) {
-  const closeMs = m.close_time ? new Date(m.close_time).getTime() : now;
+  // If close_time is missing, assume plenty of time remaining so the market isn't silently filtered
+  const closeMs = m.close_time ? new Date(m.close_time).getTime() : now + 30 * 60_000;
   const minutesRemaining = Math.max(0, (closeMs - now) / 60_000);
   const askCents = m.yes_ask_dollars != null && m.yes_ask_dollars > 0
     ? Math.round(m.yes_ask_dollars * 100) : 0;
@@ -412,7 +413,8 @@ async function fetchActiveMarkets(): Promise<Array<{
         const resp = await kalshiFetch("GET", `/markets?series_ticker=${prefix}&status=open&limit=10`) as { markets?: RawMarket[] };
         const raw = resp?.markets ?? [];
         if (raw.length > 0) {
-          console.log(`[FETCH] series_ticker=${prefix} → ${raw.length} markets: ${raw.map(m => m.ticker).join(", ")}`);
+          const detail = raw.map(m => `${m.ticker} close:${m.close_time ?? "none"} ask:${m.yes_ask_dollars} bid:${m.yes_bid_dollars}`).join(" | ");
+          console.log(`[FETCH] series_ticker=${prefix} → ${raw.length} markets: ${detail}`);
         }
         return raw;
       } catch {
@@ -739,10 +741,19 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     const { bid, ask, spread, mid } = ob;
 
-    // Entry conditions
-    if (mid < PRICE_MIN || mid > PRICE_MAX) continue;
-    if (spread > SPREAD_MAX) continue;
-    if (ask <= 0 || bid <= 0) continue;
+    // Entry conditions — log reasons so Railway shows exactly what's happening
+    if (ask <= 0 || bid <= 0) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — zero prices (ask:${ask} bid:${bid}), skipping`);
+      continue;
+    }
+    if (mid < PRICE_MIN || mid > PRICE_MAX) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${PRICE_MIN}-${PRICE_MAX}¢ range, skipping`);
+      continue;
+    }
+    if (spread > SPREAD_MAX) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — spread ${spread}¢ > ${SPREAD_MAX}¢ max, skipping`);
+      continue;
+    }
 
     // Evaluate momentum (feeds in current mid price as tick)
     const decision = evaluateMomentum(market.ticker, mid);
