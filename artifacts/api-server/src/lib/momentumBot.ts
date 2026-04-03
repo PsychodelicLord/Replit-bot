@@ -865,6 +865,12 @@ export async function scanMomentumMarkets(): Promise<void> {
   for (const candidate of candidates) {
     if (openPositions.length >= MAX_POSITIONS) break;
 
+    // Safety guard — if bot was stopped between Phase 1 and Phase 3, abort
+    if (!state.enabled) {
+      console.log(`[EXECUTE ABORTED] Bot disabled before trade could fire — enabled:${state.enabled} stopReason:${state.stopReason}`);
+      return;
+    }
+
     // Balance floor check
     if (state.balanceFloorCents > 0) {
       try {
@@ -878,11 +884,13 @@ export async function scanMomentumMarkets(): Promise<void> {
     }
 
     const { market, ob, side } = candidate;
+    console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | enabled:${state.enabled} positions:${openPositions.length}`);
     log(
       `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
       { market: market.ticker, price: ob.mid, spread: ob.spread },
     );
     await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask);
+    console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} enabled:${state.enabled}`);
   }
 
   // If no markets were in tradeable range, cache is likely stale (end-of-cycle)
@@ -1026,7 +1034,10 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
 
+  // Capture call stack so Railway logs show exactly which line triggered the stop
+  const stack = new Error().stack?.split("\n").slice(1, 5).join(" | ") ?? "no stack";
   console.log(`🛑 BOT STOPPED — reason: ${reason}`);
+  console.log(`🛑 STOP CALLER: ${stack}`);
   dbLog("info", `[MOMENTUM] ⏹️ Momentum Bot STOPPED — ${reason}`);
   log(`⏹️  Momentum Bot STOPPED — ${reason}`);
   saveMomentumConfig(); // persist enabled=false to DB
