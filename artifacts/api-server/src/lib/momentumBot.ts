@@ -401,56 +401,62 @@ function rawToMarket(m: RawMarket, now: number) {
   return { ticker: m.ticker!, title: m.title ?? m.ticker!, minutesRemaining, status: m.status ?? "open", askCents, bidCents };
 }
 
+// ── Market list cache — refreshed every 2 min to avoid rate-limiting Kalshi ──
+let _marketCache: {
+  markets: Array<{ ticker: string; title: string; minutesRemaining: number; status: string; askCents: number; bidCents: number }>;
+  cachedAt: number;
+} | null = null;
+const MARKET_CACHE_TTL_MS = 2 * 60_000; // re-fetch market list every 2 minutes
+
 async function fetchActiveMarkets(): Promise<Array<{
   ticker: string; title: string; minutesRemaining: number; status: string; askCents: number; bidCents: number;
 }>> {
   const now = Date.now();
 
-  // ── Strategy 1: query by series_ticker for each coin (most reliable) ──────
-  const results = await Promise.all(
-    ALLOWED_TICKER_PREFIXES.map(async prefix => {
-      try {
-        const resp = await kalshiFetch("GET", `/markets?series_ticker=${prefix}&status=open&limit=10`) as { markets?: RawMarket[] };
-        const raw = resp?.markets ?? [];
-        if (raw.length > 0) {
-          const detail = raw.map(m => `${m.ticker} close:${m.close_time ?? "none"} ask:${m.yes_ask_dollars} bid:${m.yes_bid_dollars}`).join(" | ");
-          console.log(`[FETCH] series_ticker=${prefix} → ${raw.length} markets: ${detail}`);
-        }
-        return raw;
-      } catch {
-        return [] as RawMarket[];
-      }
-    })
-  );
+  // Return cached list if it's still fresh
+  if (_marketCache && now - _marketCache.cachedAt < MARKET_CACHE_TTL_MS) {
+    return _marketCache.markets;
+  }
 
-  const seriesMarkets = results
-    .flat()
+  console.log(`[FETCH] Market cache stale — refreshing from Kalshi API`);
+
+  // Query each series_ticker sequentially (not parallel) to stay under rate limits
+  const allRaw: RawMarket[] = [];
+  for (const prefix of ALLOWED_TICKER_PREFIXES) {
+    try {
+      const resp = await kalshiFetch("GET", `/markets?series_ticker=${prefix}&status=open&limit=5`) as { markets?: RawMarket[] };
+      const raw = resp?.markets ?? [];
+      if (raw.length > 0) {
+        const detail = raw.map(m => `${m.ticker} close:${m.close_time ?? "none"} ask:${m.yes_ask_dollars} bid:${m.yes_bid_dollars}`).join(" | ");
+        console.log(`[FETCH] ${prefix} → ${detail}`);
+        allRaw.push(...raw);
+      } else {
+        console.log(`[FETCH] ${prefix} → 0 markets (between cycles)`);
+      }
+    } catch (err) {
+      const msg = String(err);
+      if (msg.includes("429")) {
+        warn(`[FETCH] Rate-limited on ${prefix} — using stale cache`);
+        // On 429, immediately return stale cache rather than keep hammering
+        if (_marketCache) return _marketCache.markets;
+        return [];
+      }
+      warn(`[FETCH] Error fetching ${prefix}: ${msg}`);
+    }
+    // Small delay between each series request to avoid bursting the rate limit
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  const markets = allRaw
     .filter(m => m.ticker && m.status === "open")
     .map(m => rawToMarket(m, now))
     .filter(m => m.minutesRemaining > MIN_MINUTES_REMAINING);
 
-  if (seriesMarkets.length > 0) return seriesMarkets;
+  console.log(`[FETCH] Refresh complete — ${markets.length} eligible markets cached`);
 
-  // ── Strategy 2: max_close_ts window fallback — log raw tickers for diagnosis ──
-  console.log(`[FETCH] series_ticker queries returned 0 — trying max_close_ts fallback`);
-  try {
-    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
-    const resp = await kalshiFetch("GET", `/markets?status=open&limit=100&max_close_ts=${maxCloseTs}`) as { markets?: RawMarket[] };
-    const all = resp?.markets ?? [];
-    // Always log raw tickers so we can see what Kalshi actually returned
-    console.log(`[FETCH] max_close_ts window: ${all.length} raw markets → ${all.slice(0, 15).map(m => m.ticker).join(", ")}`);
-
-    const filtered = all
-      .filter(m => m.ticker && isMomentumMarket(m.ticker))
-      .map(m => rawToMarket(m, now))
-      .filter(m => m.status === "open" && m.minutesRemaining > MIN_MINUTES_REMAINING);
-
-    console.log(`[FETCH] After momentum filter: ${filtered.length} eligible markets`);
-    return filtered;
-  } catch (err) {
-    warn(`fetchActiveMarkets fallback failed: ${String(err)}`);
-    return [];
-  }
+  // Update cache (even if empty — avoids hammering on empty cycles)
+  _marketCache = { markets, cachedAt: now };
+  return markets;
 }
 
 // ─── Order placement ────────────────────────────────────────────────────────
