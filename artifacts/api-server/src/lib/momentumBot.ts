@@ -36,10 +36,9 @@ const SL_CENTS    = 4;   // stop-loss: exit when loss ≥ -4¢
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
-const TICK_WINDOW      = 2;   // compare current vs previous scan — only 2 points needed
-const TICKS_REQUIRED   = 1;   // 1 move in same direction (1/1 — any price change)
-const RANGE_MIN_CENTS  = 1;   // min price change required (≥1¢ to trade)
-const TICK_MAX_AGE_MS  = 60_000; // both ticks must be within 60s (2 × 15s = 30s — always passes)
+const CONSECUTIVE_REQUIRED = 3;   // trigger trade when consecutive count >= 3
+const SIGNAL_LOG_AT        = 2;   // log "TEST TRADE SIGNAL" when count >= 2
+const MIN_TICK_DELTA       = 1;   // min ¢ change to count as a directional move
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -47,9 +46,11 @@ const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 const FEE_RATE = 0.07;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
-interface PriceTick {
-  priceCents: number;
-  timestampMs: number;
+// Per-market counter state for direction tracking
+interface MarketMomentumState {
+  lastPrice: number | null;           // price from previous scan
+  direction: "up" | "down" | "flat"; // last meaningful direction
+  consecutiveCount: number;           // how many consecutive same-direction moves
 }
 
 interface MomentumPosition {
@@ -121,8 +122,8 @@ export interface MomentumBotConfig {
   consecutiveLossLimit: number;  // 0 = disabled
 }
 
-// Per-market tick history
-const tickHistory = new Map<string, PriceTick[]>();
+// Per-market momentum counter state
+const marketMomentum = new Map<string, MarketMomentumState>();
 
 // Open positions tracked in-memory (no DB read needed for sell decisions)
 const openPositions: MomentumPosition[] = [];
@@ -218,80 +219,91 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
   }
 }
 
-// ─── Tick history ──────────────────────────────────────────────────────────
-function addTick(marketId: string, priceCents: number) {
-  if (!tickHistory.has(marketId)) tickHistory.set(marketId, []);
-  const ticks = tickHistory.get(marketId)!;
-  ticks.push({ priceCents, timestampMs: Date.now() });
-  // Keep only the last 20 ticks
-  if (ticks.length > 20) ticks.splice(0, ticks.length - 20);
-}
-
-// ─── Momentum Evaluation ───────────────────────────────────────────────────
+// ─── Counter-based Momentum Evaluation ─────────────────────────────────────
+/**
+ * Tracks consecutive directional moves per market.
+ * - Flat ticks (price unchanged) do NOT reset the counter.
+ * - Counter resets only when direction reverses.
+ * - Fires BUY_YES / BUY_NO when counter >= CONSECUTIVE_REQUIRED (3).
+ * - Logs "TEST TRADE SIGNAL" when counter >= SIGNAL_LOG_AT (2).
+ */
 export function evaluateMomentum(marketId: string, currentPriceCents: number): MomentumDecision {
-  addTick(marketId, currentPriceCents);
+  // Initialise state for new markets
+  if (!marketMomentum.has(marketId)) {
+    marketMomentum.set(marketId, { lastPrice: null, direction: "flat", consecutiveCount: 0 });
+  }
+  const ms = marketMomentum.get(marketId)!;
 
-  const allTicks = tickHistory.get(marketId) ?? [];
-  if (allTicks.length < TICK_WINDOW) {
-    return { action: "SKIP", reason: `Only ${allTicks.length}/${TICK_WINDOW} ticks collected`, upMoves: 0, downMoves: 0, range: 0, ticks: [] };
+  // First ever tick — store baseline price, no signal yet
+  if (ms.lastPrice === null) {
+    ms.lastPrice = currentPriceCents;
+    console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: first-tick Count: 0`);
+    return { action: "SKIP", reason: "First tick — establishing baseline", upMoves: 0, downMoves: 0, range: 0, ticks: [] };
   }
 
-  const recent = allTicks.slice(-TICK_WINDOW);
-  const prices = recent.map(t => t.priceCents);
-  const oldest = recent[0].timestampMs;
-  const newest = recent[recent.length - 1].timestampMs;
-  const windowMs = newest - oldest;
+  // Determine direction vs last price
+  const delta = currentPriceCents - ms.lastPrice;
+  let direction: "up" | "down" | "flat";
+  if (delta >= MIN_TICK_DELTA) direction = "up";
+  else if (delta <= -MIN_TICK_DELTA) direction = "down";
+  else direction = "flat";
 
-  // Speed filter: all TICK_WINDOW ticks must be within TICK_MAX_AGE_MS
-  if (windowMs > TICK_MAX_AGE_MS) {
-    return {
-      action: "SKIP",
-      reason: `Movement too slow (${Math.round(windowMs / 1000)}s > ${TICK_MAX_AGE_MS / 1000}s)`,
-      upMoves: 0, downMoves: 0, range: 0, ticks: prices,
-    };
+  // Update counter:
+  //   same direction → increment
+  //   flat → keep counter unchanged (don't reward, don't punish)
+  //   reversal → reset to 1 with new direction
+  if (direction === "flat") {
+    // no-op — counter unchanged
+  } else if (direction === ms.direction) {
+    ms.consecutiveCount++;
+  } else {
+    // Direction reversed or first non-flat move
+    ms.consecutiveCount = 1;
+    ms.direction = direction;
   }
 
-  // Count direction changes
-  let upMoves = 0;
-  let downMoves = 0;
-  for (let i = 1; i < prices.length; i++) {
-    if (prices[i] > prices[i - 1]) upMoves++;
-    else if (prices[i] < prices[i - 1]) downMoves++;
+  // Always track last price
+  ms.lastPrice = currentPriceCents;
+
+  const count = ms.consecutiveCount;
+  const dir   = ms.direction;
+
+  // Always-visible log for Railway console
+  console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: ${direction} Count: ${count}`);
+
+  // TEST TRADE SIGNAL — confirms detection before real bet
+  if (count >= SIGNAL_LOG_AT) {
+    console.log(`[MOMENTUM] TEST TRADE SIGNAL — ${marketId} | ${dir.toUpperCase()} count:${count} (need ${CONSECUTIVE_REQUIRED} to trade)`);
   }
 
-  const range = Math.max(...prices) - Math.min(...prices);
-
-  // Flat market filter
-  if (range < RANGE_MIN_CENTS) {
-    return {
-      action: "SKIP",
-      reason: `Market flat — range ${range}¢ < ${RANGE_MIN_CENTS}¢`,
-      upMoves, downMoves, range, ticks: prices,
-    };
+  // Real trade signal
+  if (count >= CONSECUTIVE_REQUIRED) {
+    if (dir === "up") {
+      return {
+        action: "BUY_YES",
+        reason: `Bullish: ${count} consecutive UP moves (≥${MIN_TICK_DELTA}¢ each)`,
+        upMoves: count, downMoves: 0, range: count, ticks: [],
+      };
+    }
+    if (dir === "down") {
+      return {
+        action: "BUY_NO",
+        reason: `Bearish: ${count} consecutive DOWN moves (≥${MIN_TICK_DELTA}¢ each)`,
+        upMoves: 0, downMoves: count, range: count, ticks: [],
+      };
+    }
   }
 
-  const maxMoves = TICK_WINDOW - 1; // e.g. 4 possible moves for 5 ticks
-
-  if (upMoves >= TICKS_REQUIRED) {
-    return {
-      action: "BUY_YES",
-      reason: `Bullish momentum: ${upMoves}/${maxMoves} ticks UP, range ${range}¢`,
-      upMoves, downMoves, range, ticks: prices,
-    };
-  }
-
-  if (downMoves >= TICKS_REQUIRED) {
-    return {
-      action: "BUY_NO",
-      reason: `Bearish momentum: ${downMoves}/${maxMoves} ticks DOWN, range ${range}¢`,
-      upMoves, downMoves, range, ticks: prices,
-    };
-  }
-
+  // Not enough consecutive moves yet
   return {
     action: "SKIP",
-    reason: `Choppy — UP:${upMoves} DOWN:${downMoves} (need ${TICKS_REQUIRED}/${maxMoves})`,
-    upMoves, downMoves, range, ticks: prices,
+    reason: direction === "flat"
+      ? `Price flat (${delta}¢ delta) — counter held at ${count}`
+      : `Accumulating ${dir} — count ${count}/${CONSECUTIVE_REQUIRED}`,
+    upMoves: dir === "up" ? count : 0,
+    downMoves: dir === "down" ? count : 0,
+    range: Math.abs(delta),
+    ticks: [],
   };
 }
 
@@ -802,12 +814,12 @@ export async function debugMomentumMarkets() {
   }
 
   const filtered = await fetchActiveMarkets();
-  const tickSnap: Record<string, { ticks: number; prices: number[]; ageMs: number }> = {};
-  for (const [marketId, ticks] of tickHistory.entries()) {
-    tickSnap[marketId] = {
-      ticks: ticks.length,
-      prices: ticks.slice(-5).map(t => t.priceCents),
-      ageMs: ticks.length > 0 ? now - ticks[ticks.length - 1].timestampMs : -1,
+  const momentumSnap: Record<string, { lastPrice: number | null; direction: string; count: number }> = {};
+  for (const [marketId, ms] of marketMomentum.entries()) {
+    momentumSnap[marketId] = {
+      lastPrice: ms.lastPrice,
+      direction: ms.direction,
+      count: ms.consecutiveCount,
     };
   }
 
@@ -815,8 +827,8 @@ export async function debugMomentumMarkets() {
     rawMarketsInWindow: rawCount,
     rawSample,
     filteredMarkets: filtered.map(m => ({ ticker: m.ticker, minutesRemaining: m.minutesRemaining, askCents: m.askCents, bidCents: m.bidCents })),
-    tickHistory: tickSnap,
-    config: { TICK_WINDOW, TICKS_REQUIRED, RANGE_MIN_CENTS, TICK_MAX_AGE_MS, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, SPREAD_MAX, MIN_MINUTES_REMAINING },
+    momentumCounters: momentumSnap,
+    config: { CONSECUTIVE_REQUIRED, SIGNAL_LOG_AT, MIN_TICK_DELTA, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, SPREAD_MAX, MIN_MINUTES_REMAINING },
     botState: getMomentumBotState(),
   };
 }
