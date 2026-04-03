@@ -502,15 +502,19 @@ async function placeBuyOrder(
     no_price:  side === "NO"  ? limitCents : undefined,
   };
 
+  console.log(`[ORDER PAYLOAD] ${JSON.stringify(payload)}`);
   try {
     const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
       order?: { order_id?: string; yes_price?: number; no_price?: number }
     };
+    console.log(`[ORDER RESPONSE] ${JSON.stringify(resp)}`);
     const orderId = resp?.order?.order_id ?? clientOrderId;
     const rawPrice = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
     const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : limitCents;
+    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢`);
     return { orderId, fillPrice };
   } catch (err) {
+    console.error(`[ORDER FAILED] ${String(err)}`);
     warn(`placeBuyOrder failed: ${String(err)}`, { ticker, side, limitCents });
     return null;
   }
