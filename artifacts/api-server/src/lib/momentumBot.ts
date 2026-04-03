@@ -16,7 +16,7 @@
  *  - Use max_close_ts to surface short-duration crypto markets
  */
 
-import { kalshiFetch } from "./kalshi-bot";
+import { kalshiFetch, getBotState, refreshBalance } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -871,11 +871,11 @@ export async function scanMomentumMarkets(): Promise<void> {
       return;
     }
 
-    // Balance floor check
+    // Balance floor check — use the already-refreshed balance from main bot state
     if (state.balanceFloorCents > 0) {
       try {
-        const balResp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { balance?: number } };
-        const balance = Math.round((balResp?.balance?.balance ?? 0) * 100);
+        await refreshBalance(); // bring it up to date before checking
+        const balance = getBotState().balanceCents;
         console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${state.balanceFloorCents}¢`);
         if (balance > 0 && balance < state.balanceFloorCents) {
           stopMomentumBot(`Balance floor hit: ${balance}¢ < ${state.balanceFloorCents}¢ floor`);
