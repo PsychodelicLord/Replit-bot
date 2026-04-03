@@ -1,7 +1,54 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useGetMomentumBotStatus, useSetMomentumBotAuto, getGetMomentumBotStatusQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Clock, RefreshCw } from "lucide-react";
+
+// ── Lightning animation styles ────────────────────────────────────────────────
+const LIGHTNING_STYLES = `
+@keyframes bolt-strike {
+  0%   { opacity: 0; transform: translateY(-120%) rotate(var(--rot)) scale(0.6); }
+  15%  { opacity: 1; transform: translateY(-30%)  rotate(var(--rot)) scale(1.3); }
+  35%  { opacity: 1; transform: translateY(10%)   rotate(var(--rot)) scale(1); }
+  70%  { opacity: 0.6; transform: translateY(60%) rotate(var(--rot)) scale(0.9); }
+  100% { opacity: 0; transform: translateY(130%)  rotate(var(--rot)) scale(0.7); }
+}
+@keyframes aura-pulse {
+  0%   { box-shadow: 0 0 0px 0px rgba(139,92,246,0), 0 0 0px 0px rgba(59,130,246,0); }
+  20%  { box-shadow: 0 0 30px 8px rgba(139,92,246,0.55), 0 0 60px 16px rgba(59,130,246,0.35); }
+  50%  { box-shadow: 0 0 50px 14px rgba(139,92,246,0.45), 0 0 90px 28px rgba(59,130,246,0.25); }
+  80%  { box-shadow: 0 0 30px 8px rgba(139,92,246,0.3),  0 0 60px 16px rgba(59,130,246,0.15); }
+  100% { box-shadow: 0 0 0px 0px rgba(139,92,246,0), 0 0 0px 0px rgba(59,130,246,0); }
+}
+@keyframes border-flash {
+  0%,100% { border-color: rgba(255,255,255,0.1); }
+  25%,75%  { border-color: rgba(139,92,246,0.8); }
+  50%      { border-color: rgba(59,130,246,0.9); }
+}
+@keyframes bolt-fade {
+  0%   { opacity: 0; }
+  10%  { opacity: 1; }
+  80%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes crackle {
+  0%,100% { opacity: 0; transform: scaleX(1); }
+  20%     { opacity: 1; transform: scaleX(1.05); }
+  40%     { opacity: 0.7; transform: scaleX(0.98); }
+  60%     { opacity: 1; transform: scaleX(1.02); }
+  80%     { opacity: 0.5; transform: scaleX(1); }
+}
+`;
+
+// Bolt positions: [left%, top%, rotation, size, delay]
+const BOLT_CONFIGS = [
+  { left: "12%",  top: "5%",  rot: "-15deg", size: 28, delay: 0 },
+  { left: "35%",  top: "2%",  rot: "8deg",   size: 22, delay: 80 },
+  { left: "60%",  top: "4%",  rot: "-5deg",  size: 32, delay: 40 },
+  { left: "82%",  top: "3%",  rot: "12deg",  size: 24, delay: 120 },
+  { left: "22%",  top: "85%", rot: "170deg", size: 20, delay: 60 },
+  { left: "50%",  top: "88%", rot: "185deg", size: 26, delay: 100 },
+  { left: "75%",  top: "86%", rot: "172deg", size: 22, delay: 20 },
+];
 
 type StatusBadgeProps = {
   status: "DISABLED" | "WAITING_FOR_SETUP" | "IN_TRADE" | "PAUSED" | undefined;
@@ -73,6 +120,21 @@ export function MomentumBot() {
     },
   });
 
+  // ── Signal flash state ───────────────────────────────────────────────────
+  const [signalFlash, setSignalFlash] = useState(false);
+  const prevDecision = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!data?.lastDecision) return;
+    const isBuy = data.lastDecision.includes("BUY_YES") || data.lastDecision.includes("BUY_NO");
+    if (isBuy && data.lastDecision !== prevDecision.current) {
+      setSignalFlash(true);
+      const t = setTimeout(() => setSignalFlash(false), 2600);
+      return () => clearTimeout(t);
+    }
+    prevDecision.current = data.lastDecision;
+  }, [data?.lastDecision]);
+
   // Settings state
   const [balanceFloor, setBalanceFloor]       = useState("0");
   const [maxSessionLoss, setMaxSessionLoss]   = useState("0");
@@ -100,208 +162,311 @@ export function MomentumBot() {
     : null;
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Zap className="w-4 h-4 text-sky-400" />
-          <h2 className="text-sm font-semibold tracking-widest uppercase text-sky-400">
-            Momentum Bot
-          </h2>
-        </div>
-        <StatusBadge status={status} />
-      </div>
+    <>
+      {/* Inject keyframe animations once */}
+      <style>{LIGHTNING_STYLES}</style>
 
-      <p className="text-xs text-slate-500 leading-relaxed">
-        Scans BTC, ETH & SOL 15-min markets every 3s. Enters only when 4 of 5 recent price ticks
-        move the same direction, spread ≤3¢, price 30–60¢, and &gt;7 min left.
-        TP: +3¢ · SL: -4¢ · Stale exit: 45s.
-      </p>
+      <div
+        className="rounded-2xl border p-5 space-y-4 relative overflow-hidden transition-colors"
+        style={{
+          background: signalFlash
+            ? "linear-gradient(135deg, rgba(139,92,246,0.08) 0%, rgba(59,130,246,0.06) 50%, rgba(255,255,255,0.03) 100%)"
+            : "rgba(255,255,255,0.03)",
+          animation: signalFlash ? "aura-pulse 2.6s ease-out forwards, border-flash 2.6s ease-out forwards" : "none",
+          borderColor: signalFlash ? undefined : "rgba(255,255,255,0.1)",
+        }}
+      >
+        {/* ── Lightning bolts overlay ─────────────────────────────────────── */}
+        {signalFlash && (
+          <div className="absolute inset-0 pointer-events-none overflow-hidden" style={{ zIndex: 10 }}>
+            {BOLT_CONFIGS.map((b, i) => (
+              <div
+                key={i}
+                style={{
+                  position: "absolute",
+                  left: b.left,
+                  top: b.top,
+                  ["--rot" as string]: b.rot,
+                  animation: `bolt-strike 2.6s ease-in-out ${b.delay}ms forwards`,
+                  zIndex: 20,
+                }}
+              >
+                <Zap
+                  style={{
+                    width: b.size,
+                    height: b.size,
+                    color: i % 2 === 0 ? "#60a5fa" : "#a78bfa",
+                    filter: `drop-shadow(0 0 6px ${i % 2 === 0 ? "#3b82f6" : "#8b5cf6"}) drop-shadow(0 0 12px ${i % 2 === 0 ? "#2563eb" : "#7c3aed"})`,
+                  }}
+                  fill="currentColor"
+                />
+              </div>
+            ))}
 
-      {/* Stats row — session */}
-      <div className="grid grid-cols-4 gap-2">
-        <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Open</p>
-          <p className="text-lg font-bold text-white mt-0.5">{data?.openTradeCount ?? 0}</p>
-          <p className="text-[9px] text-slate-600">max 2</p>
-        </div>
-        <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">W / L</p>
-          <div className="flex items-baseline justify-center gap-1 mt-0.5">
-            <span className="text-base font-bold text-emerald-400">{data?.totalWins ?? 0}</span>
-            <span className="text-slate-600 text-xs">/</span>
-            <span className="text-base font-bold text-red-400">{data?.totalLosses ?? 0}</span>
+            {/* Top crackle bar */}
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                height: "2px",
+                background: "linear-gradient(90deg, transparent, #818cf8, #60a5fa, #a78bfa, transparent)",
+                animation: "crackle 2.6s ease-out forwards",
+              }}
+            />
+            {/* Bottom crackle bar */}
+            <div
+              style={{
+                position: "absolute",
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: "2px",
+                background: "linear-gradient(90deg, transparent, #a78bfa, #60a5fa, #818cf8, transparent)",
+                animation: "crackle 2.6s ease-out 150ms forwards",
+              }}
+            />
+
+            {/* Center glow burst */}
+            <div
+              style={{
+                position: "absolute",
+                top: "50%",
+                left: "50%",
+                transform: "translate(-50%, -50%)",
+                width: 120,
+                height: 120,
+                borderRadius: "50%",
+                background: "radial-gradient(circle, rgba(139,92,246,0.3) 0%, rgba(59,130,246,0.15) 50%, transparent 70%)",
+                animation: "bolt-fade 2.6s ease-out forwards",
+                pointerEvents: "none",
+              }}
+            />
           </div>
-          <p className="text-[9px] text-slate-600">this session</p>
-        </div>
-        <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">P&L</p>
-          <p className={`text-base font-bold mt-0.5 ${sessionPnl > 0 ? "text-emerald-400" : sessionPnl < 0 ? "text-red-400" : "text-slate-400"}`}>
-            {sessionPnl >= 0 ? "+" : ""}{(sessionPnl / 100).toFixed(2)}¢
-          </p>
-          <p className="text-[9px] text-slate-600">session</p>
-        </div>
-        <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Streak</p>
-          <p className={`text-lg font-bold mt-0.5 ${(data?.consecutiveLosses ?? 0) >= 2 ? "text-red-400" : "text-slate-300"}`}>
-            {data?.consecutiveLosses ?? 0}
-          </p>
-          <p className="text-[9px] text-slate-600">losses/row</p>
-        </div>
-      </div>
+        )}
 
-      {/* All-time stats from DB */}
-      {((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
-        <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between">
-          <p className="text-[10px] text-slate-500 uppercase tracking-widest">All-Time</p>
-          <div className="flex items-center gap-3 text-xs">
-            <span>
-              <span className="text-emerald-400 font-bold">{data?.allTimeWins ?? 0}W</span>
-              <span className="text-slate-600 mx-1">/</span>
-              <span className="text-red-400 font-bold">{data?.allTimeLosses ?? 0}L</span>
-            </span>
-            <span className={`font-bold ${(data?.allTimePnlCents ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {(data?.allTimePnlCents ?? 0) >= 0 ? "+" : ""}{((data?.allTimePnlCents ?? 0) / 100).toFixed(2)}¢
-            </span>
+        {/* ── Card content (z-index above overlay) ──────────────────────── */}
+        <div className="relative" style={{ zIndex: 1 }}>
+
+          {/* Header */}
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Zap
+                className="w-4 h-4"
+                style={{
+                  color: signalFlash ? "#a78bfa" : "#38bdf8",
+                  filter: signalFlash ? "drop-shadow(0 0 6px #8b5cf6)" : "none",
+                  transition: "color 0.3s, filter 0.3s",
+                }}
+              />
+              <h2
+                className="text-sm font-semibold tracking-widest uppercase"
+                style={{
+                  color: signalFlash ? "#c4b5fd" : "#38bdf8",
+                  textShadow: signalFlash ? "0 0 12px rgba(167,139,250,0.7)" : "none",
+                  transition: "color 0.3s, text-shadow 0.3s",
+                }}
+              >
+                Momentum Bot
+              </h2>
+            </div>
+            <StatusBadge status={status} />
           </div>
-        </div>
-      )}
 
-      {/* Pause notice */}
-      {isPaused && (
-        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-xs text-yellow-300">
-          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-yellow-400" />
-          <div>
-            <p className="font-semibold">{data?.pauseReason ?? "Risk pause active"}</p>
-            {pausedMins !== null && pausedMins > 0 && (
-              <p className="text-[10px] text-yellow-400/70 mt-0.5 flex items-center gap-1">
-                <Clock className="w-3 h-3" />
-                Resumes in ~{pausedMins} min
+          <p className="text-xs text-slate-500 leading-relaxed">
+            Scans BTC, ETH & SOL 15-min markets every 3s. Enters only when 4 of 5 recent price ticks
+            move the same direction, spread ≤3¢, price 30–60¢, and &gt;7 min left.
+            TP: +3¢ · SL: -4¢ · Stale exit: 45s.
+          </p>
+
+          {/* Stats row — session */}
+          <div className="grid grid-cols-4 gap-2 mt-4">
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Open</p>
+              <p className="text-lg font-bold text-white mt-0.5">{data?.openTradeCount ?? 0}</p>
+              <p className="text-[9px] text-slate-600">max 2</p>
+            </div>
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">W / L</p>
+              <div className="flex items-baseline justify-center gap-1 mt-0.5">
+                <span className="text-base font-bold text-emerald-400">{data?.totalWins ?? 0}</span>
+                <span className="text-slate-600 text-xs">/</span>
+                <span className="text-base font-bold text-red-400">{data?.totalLosses ?? 0}</span>
+              </div>
+              <p className="text-[9px] text-slate-600">this session</p>
+            </div>
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">P&L</p>
+              <p className={`text-base font-bold mt-0.5 ${sessionPnl > 0 ? "text-emerald-400" : sessionPnl < 0 ? "text-red-400" : "text-slate-400"}`}>
+                {sessionPnl >= 0 ? "+" : ""}{(sessionPnl / 100).toFixed(2)}¢
               </p>
+              <p className="text-[9px] text-slate-600">session</p>
+            </div>
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Streak</p>
+              <p className={`text-lg font-bold mt-0.5 ${(data?.consecutiveLosses ?? 0) >= 2 ? "text-red-400" : "text-slate-300"}`}>
+                {data?.consecutiveLosses ?? 0}
+              </p>
+              <p className="text-[9px] text-slate-600">losses/row</p>
+            </div>
+          </div>
+
+          {/* All-time stats from DB */}
+          {((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between mt-4">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">All-Time</p>
+              <div className="flex items-center gap-3 text-xs">
+                <span>
+                  <span className="text-emerald-400 font-bold">{data?.allTimeWins ?? 0}W</span>
+                  <span className="text-slate-600 mx-1">/</span>
+                  <span className="text-red-400 font-bold">{data?.allTimeLosses ?? 0}L</span>
+                </span>
+                <span className={`font-bold ${(data?.allTimePnlCents ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {(data?.allTimePnlCents ?? 0) >= 0 ? "+" : ""}{((data?.allTimePnlCents ?? 0) / 100).toFixed(2)}¢
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Pause notice */}
+          {isPaused && (
+            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-xs text-yellow-300 mt-4">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-yellow-400" />
+              <div>
+                <p className="font-semibold">{data?.pauseReason ?? "Risk pause active"}</p>
+                {pausedMins !== null && pausedMins > 0 && (
+                  <p className="text-[10px] text-yellow-400/70 mt-0.5 flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    Resumes in ~{pausedMins} min
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Stop reason — shown when bot is disabled and stopped for a known reason */}
+          {!enabled && data?.stopReason && !data.stopReason.startsWith("Server started") && data.stopReason !== "Manually stopped via dashboard" && (
+            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300 mt-4">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-400" />
+              <div>
+                <p className="font-semibold text-red-200">Bot stopped automatically</p>
+                <p className="text-[10px] text-red-400/80 mt-0.5">{data.stopReason}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Last decision */}
+          {data?.lastDecision && (
+            <div className="space-y-1 mt-4">
+              <p className="text-[10px] text-slate-600 uppercase tracking-widest">Last Decision</p>
+              <DecisionChip decision={data.lastDecision} />
+            </div>
+          )}
+
+          {/* Auto toggle */}
+          <div className="border-t border-white/5 pt-4 mt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold text-slate-300">Auto Mode</p>
+                <p className="text-[10px] text-slate-600 mt-0.5">
+                  {enabled ? "Scanning every 3s for clean setups" : "Tap to start momentum trading"}
+                </p>
+              </div>
+              <button
+                onClick={toggleAuto}
+                disabled={setAuto.isPending}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                  enabled ? "bg-sky-500/70" : "bg-white/10"
+                }`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                  enabled ? "translate-x-6" : "translate-x-1"
+                }`} />
+              </button>
+            </div>
+
+            {enabled && !isPaused && (
+              <div className="flex items-center gap-1.5 mt-2 text-[10px] text-sky-400/70">
+                <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
+                <span>Scanning BTC · ETH · SOL — waiting for strong signal</span>
+              </div>
             )}
           </div>
-        </div>
-      )}
 
-      {/* Stop reason — shown when bot is disabled and stopped for a known reason */}
-      {!enabled && data?.stopReason && !data.stopReason.startsWith("Server started") && data.stopReason !== "Manually stopped via dashboard" && (
-        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300">
-          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-400" />
-          <div>
-            <p className="font-semibold text-red-200">Bot stopped automatically</p>
-            <p className="text-[10px] text-red-400/80 mt-0.5">{data.stopReason}</p>
+          {/* Risk Settings */}
+          <div className="border-t border-white/5 pt-3 mt-0">
+            <button
+              onClick={() => setShowSettings(s => !s)}
+              className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              <Shield className="w-3 h-3" />
+              Risk Controls {showSettings ? "▲" : "▼"}
+            </button>
+
+            {showSettings && (
+              <div className="mt-3 space-y-3">
+                <p className="text-[10px] text-slate-600">
+                  Settings apply on next toggle. Set to 0 to disable that guard.
+                </p>
+
+                <div className="space-y-2">
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Balance Floor ($)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={balanceFloor}
+                      onChange={e => setBalanceFloor(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">Stop completely if balance falls below this</p>
+                  </label>
+
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Max Session Loss ($)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={maxSessionLoss}
+                      onChange={e => setMaxSessionLoss(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session if loss exceeds this</p>
+                  </label>
+
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Max Consecutive Losses</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="10"
+                      step="1"
+                      value={consecutiveLossLimit}
+                      onChange={e => setConsecutiveLossLimit(e.target.value)}
+                      placeholder="3"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session after N losses in a row</p>
+                  </label>
+                </div>
+
+                <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
+                  <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Active guards on this session:</span></p>
+                  <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
+                  <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
+                  <p>· Consec. losses: {data?.consecutiveLossLimit ?? 3} in a row</p>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      )}
 
-      {/* Last decision */}
-      {data?.lastDecision && (
-        <div className="space-y-1">
-          <p className="text-[10px] text-slate-600 uppercase tracking-widest">Last Decision</p>
-          <DecisionChip decision={data.lastDecision} />
-        </div>
-      )}
-
-      {/* Auto toggle */}
-      <div className="border-t border-white/5 pt-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-xs font-semibold text-slate-300">Auto Mode</p>
-            <p className="text-[10px] text-slate-600 mt-0.5">
-              {enabled ? "Scanning every 3s for clean setups" : "Tap to start momentum trading"}
-            </p>
-          </div>
-          <button
-            onClick={toggleAuto}
-            disabled={setAuto.isPending}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-              enabled ? "bg-sky-500/70" : "bg-white/10"
-            }`}
-          >
-            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-              enabled ? "translate-x-6" : "translate-x-1"
-            }`} />
-          </button>
-        </div>
-
-        {enabled && !isPaused && (
-          <div className="flex items-center gap-1.5 mt-2 text-[10px] text-sky-400/70">
-            <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
-            <span>Scanning BTC · ETH · SOL — waiting for strong signal</span>
-          </div>
-        )}
+        </div>{/* end relative content wrapper */}
       </div>
-
-      {/* Risk Settings */}
-      <div className="border-t border-white/5 pt-3">
-        <button
-          onClick={() => setShowSettings(s => !s)}
-          className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
-        >
-          <Shield className="w-3 h-3" />
-          Risk Controls {showSettings ? "▲" : "▼"}
-        </button>
-
-        {showSettings && (
-          <div className="mt-3 space-y-3">
-            <p className="text-[10px] text-slate-600">
-              Settings apply on next toggle. Set to 0 to disable that guard.
-            </p>
-
-            <div className="space-y-2">
-              <label className="block">
-                <span className="text-[10px] text-slate-400 block mb-1">Balance Floor ($)</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={balanceFloor}
-                  onChange={e => setBalanceFloor(e.target.value)}
-                  placeholder="0"
-                  className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                />
-                <p className="text-[9px] text-slate-600 mt-0.5">Stop completely if balance falls below this</p>
-              </label>
-
-              <label className="block">
-                <span className="text-[10px] text-slate-400 block mb-1">Max Session Loss ($)</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.5"
-                  value={maxSessionLoss}
-                  onChange={e => setMaxSessionLoss(e.target.value)}
-                  placeholder="0"
-                  className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                />
-                <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session if loss exceeds this</p>
-              </label>
-
-              <label className="block">
-                <span className="text-[10px] text-slate-400 block mb-1">Max Consecutive Losses</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="10"
-                  step="1"
-                  value={consecutiveLossLimit}
-                  onChange={e => setConsecutiveLossLimit(e.target.value)}
-                  placeholder="3"
-                  className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                />
-                <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session after N losses in a row</p>
-              </label>
-            </div>
-
-            <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
-              <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Active guards on this session:</span></p>
-              <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
-              <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
-              <p>· Consec. losses: {data?.consecutiveLossLimit ?? 3} in a row</p>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+    </>
   );
 }
