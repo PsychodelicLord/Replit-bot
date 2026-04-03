@@ -254,10 +254,38 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
 
   // Update counter + timestamps:
   //   same direction → increment + record timestamp
-  //   flat → keep counter unchanged (don't reward, don't punish)
+  //   flat → fire if momentum already established (count >= 2), otherwise hold
   //   reversal → reset to 1 with new direction and fresh timestamp array
   if (direction === "flat") {
-    // no-op — counter and timestamps unchanged
+    const heldCount = ms.consecutiveCount;
+    const heldDir   = ms.direction;
+    console.log(`[FLAT TICK - HOLDING MOMENTUM] ${marketId} counter:${heldCount}`);
+
+    // Flat tick after momentum is established → allow entry rather than blocking.
+    // Only a reversal cancels the signal.
+    if (heldCount >= SIGNAL_LOG_AT && (heldDir === "up" || heldDir === "down")) {
+      if (heldDir === "up") {
+        return {
+          action:    "BUY_YES",
+          reason:    `Flat tick — UP momentum held at count:${heldCount}`,
+          upMoves:   heldCount, downMoves: 0, range: 0, ticks: [],
+        };
+      }
+      return {
+        action:    "BUY_NO",
+        reason:    `Flat tick — DOWN momentum held at count:${heldCount}`,
+        upMoves:   0, downMoves: heldCount, range: 0, ticks: [],
+      };
+    }
+    // Momentum not yet established — hold quietly
+    ms.lastPrice = currentPriceCents;
+    return {
+      action: "SKIP",
+      reason: `Price flat (${delta}¢ delta) — counter held at ${heldCount}`,
+      upMoves: heldDir === "up" ? heldCount : 0,
+      downMoves: heldDir === "down" ? heldCount : 0,
+      range: 0, ticks: [],
+    };
   } else if (direction === ms.direction) {
     ms.consecutiveCount++;
     ms.tickTimestamps.push(now);
