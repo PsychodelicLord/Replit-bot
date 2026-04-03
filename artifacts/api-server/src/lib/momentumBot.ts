@@ -223,139 +223,89 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
 
 // ─── Counter-based Momentum Evaluation ─────────────────────────────────────
 /**
- * Tracks consecutive directional moves per market.
- * - Flat ticks (price unchanged) do NOT reset the counter.
- * - Counter resets only when direction reverses.
- * - Fires BUY_YES / BUY_NO when counter >= CONSECUTIVE_REQUIRED (3).
- * - Logs "TEST TRADE SIGNAL" when counter >= SIGNAL_LOG_AT (2).
+ * Flat ticks are COMPLETELY INVISIBLE to momentum logic.
+ *   - lastPrice only anchors to real directional moves.
+ *   - Sequence: up → flat → up correctly reaches count=2.
+ *   - Counter resets ONLY on direction reversal (up→down or down→up).
+ *   - Three triggers: fast-move (count=2, ≤25s), flat-hold (count≥2, flat), normal (count≥3).
  */
 export function evaluateMomentum(marketId: string, currentPriceCents: number): MomentumDecision {
   const now = Date.now();
 
-  // Initialise state for new markets
   if (!marketMomentum.has(marketId)) {
     marketMomentum.set(marketId, { lastPrice: null, direction: "flat", consecutiveCount: 0, tickTimestamps: [] });
   }
   const ms = marketMomentum.get(marketId)!;
 
-  // First ever tick — store baseline price, no signal yet
+  // First ever tick — establish baseline, no signal
   if (ms.lastPrice === null) {
     ms.lastPrice = currentPriceCents;
     console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: first-tick Count: 0`);
     return { action: "SKIP", reason: "First tick — establishing baseline", upMoves: 0, downMoves: 0, range: 0, ticks: [] };
   }
 
-  // Determine direction vs last price
+  // Delta compares against last REAL (non-flat) price — flat ticks don't move the anchor
   const delta = currentPriceCents - ms.lastPrice;
   let direction: "up" | "down" | "flat";
-  if (delta >= MIN_TICK_DELTA) direction = "up";
+  if (delta >= MIN_TICK_DELTA)       direction = "up";
   else if (delta <= -MIN_TICK_DELTA) direction = "down";
-  else direction = "flat";
+  else                               direction = "flat";
 
-  // Update counter + timestamps:
-  //   same direction → increment + record timestamp
-  //   flat → fire if momentum already established (count >= 2), otherwise hold
-  //   reversal → reset to 1 with new direction and fresh timestamp array
-  if (direction === "flat") {
-    const heldCount = ms.consecutiveCount;
-    const heldDir   = ms.direction;
-    console.log(`[FLAT TICK - HOLDING MOMENTUM] ${marketId} counter:${heldCount}`);
-
-    // Flat tick after momentum is established → allow entry rather than blocking.
-    // Only a reversal cancels the signal.
-    if (heldCount >= SIGNAL_LOG_AT && (heldDir === "up" || heldDir === "down")) {
-      if (heldDir === "up") {
-        return {
-          action:    "BUY_YES",
-          reason:    `Flat tick — UP momentum held at count:${heldCount}`,
-          upMoves:   heldCount, downMoves: 0, range: 0, ticks: [],
-        };
-      }
-      return {
-        action:    "BUY_NO",
-        reason:    `Flat tick — DOWN momentum held at count:${heldCount}`,
-        upMoves:   0, downMoves: heldCount, range: 0, ticks: [],
-      };
+  // ── State update: only real moves change anything ─────────────────────────
+  if (direction !== "flat") {
+    if (direction === ms.direction) {
+      ms.consecutiveCount++;
+      ms.tickTimestamps.push(now);
+    } else {
+      // Reversal — reset counter with new direction
+      ms.consecutiveCount = 1;
+      ms.direction = direction;
+      ms.tickTimestamps = [now];
     }
-    // Momentum not yet established — hold quietly
-    ms.lastPrice = currentPriceCents;
-    return {
-      action: "SKIP",
-      reason: `Price flat (${delta}¢ delta) — counter held at ${heldCount}`,
-      upMoves: heldDir === "up" ? heldCount : 0,
-      downMoves: heldDir === "down" ? heldCount : 0,
-      range: 0, ticks: [],
-    };
-  } else if (direction === ms.direction) {
-    ms.consecutiveCount++;
-    ms.tickTimestamps.push(now);
-  } else {
-    // Direction reversed or first non-flat move
-    ms.consecutiveCount = 1;
-    ms.direction = direction;
-    ms.tickTimestamps = [now];
+    ms.lastPrice = currentPriceCents; // anchor only moves on real ticks
   }
-
-  // Always track last price
-  ms.lastPrice = currentPriceCents;
+  // flat → no state changes at all; counter, direction, lastPrice, timestamps unchanged
 
   const count = ms.consecutiveCount;
   const dir   = ms.direction;
 
-  // Always-visible log for Railway console
+  // Debug log
+  console.log(`DIR: ${direction} LAST DIR: ${dir} COUNT: ${count}`);
   console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: ${direction} Count: ${count}`);
+  if (direction === "flat") {
+    console.log(`[FLAT TICK - HOLDING MOMENTUM] ${marketId} counter:${count}`);
+  }
 
-  // ── Fast-move trigger: count == 2 AND both ticks within FAST_MOVE_WINDOW_MS ──
-  // Two consecutive directional ticks back-to-back (~15s apart) = rapid momentum.
-  // Fires one tick earlier than the normal 3-count trigger.
+  // ── Trigger 1: Fast-move — count==2 AND both ticks within 25s ────────────
   if (count === SIGNAL_LOG_AT && ms.tickTimestamps.length >= 2) {
     const timeDiff = ms.tickTimestamps[ms.tickTimestamps.length - 1] - ms.tickTimestamps[0];
     if (timeDiff <= FAST_MOVE_WINDOW_MS) {
-      console.log(`[FAST MOVE TRIGGER] ${marketId} | ${dir.toUpperCase()} count:${count} timeDiff:${timeDiff}ms ≤ ${FAST_MOVE_WINDOW_MS}ms window`);
-      if (dir === "up") {
-        return {
-          action: "BUY_YES",
-          reason: `Fast momentum: 2 UP ticks in ${timeDiff}ms`,
-          upMoves: count, downMoves: 0, range: count, ticks: [],
-        };
-      }
-      if (dir === "down") {
-        return {
-          action: "BUY_NO",
-          reason: `Fast momentum: 2 DOWN ticks in ${timeDiff}ms`,
-          upMoves: 0, downMoves: count, range: count, ticks: [],
-        };
-      }
-    } else {
-      console.log(`[MOMENTUM] ${marketId} | count:${count} timeDiff:${timeDiff}ms — too slow for fast-move trigger (>${FAST_MOVE_WINDOW_MS}ms)`);
+      console.log(`[FAST MOVE TRIGGER] ${marketId} | ${dir.toUpperCase()} count:${count} timeDiff:${timeDiff}ms`);
+      if (dir === "up")   return { action: "BUY_YES", reason: `Fast momentum: 2 UP ticks in ${timeDiff}ms`,   upMoves: count, downMoves: 0,     range: count, ticks: [] };
+      if (dir === "down") return { action: "BUY_NO",  reason: `Fast momentum: 2 DOWN ticks in ${timeDiff}ms`, upMoves: 0,     downMoves: count, range: count, ticks: [] };
     }
   }
 
-  // ── Normal trade signal: count >= 3 ──────────────────────────────────────
+  // ── Trigger 2: Flat-hold — flat tick after momentum established ───────────
+  // A flat pause doesn't cancel the signal; entry is still valid.
+  if (direction === "flat" && count >= SIGNAL_LOG_AT && (dir === "up" || dir === "down")) {
+    if (dir === "up")   return { action: "BUY_YES", reason: `Flat pause — UP momentum at count:${count}`,   upMoves: count, downMoves: 0,     range: 0, ticks: [] };
+    if (dir === "down") return { action: "BUY_NO",  reason: `Flat pause — DOWN momentum at count:${count}`, upMoves: 0,     downMoves: count, range: 0, ticks: [] };
+  }
+
+  // ── Trigger 3: Normal — count >= 3, any timing ───────────────────────────
   if (count >= CONSECUTIVE_REQUIRED) {
-    if (dir === "up") {
-      return {
-        action: "BUY_YES",
-        reason: `Bullish: ${count} consecutive UP moves (≥${MIN_TICK_DELTA}¢ each)`,
-        upMoves: count, downMoves: 0, range: count, ticks: [],
-      };
-    }
-    if (dir === "down") {
-      return {
-        action: "BUY_NO",
-        reason: `Bearish: ${count} consecutive DOWN moves (≥${MIN_TICK_DELTA}¢ each)`,
-        upMoves: 0, downMoves: count, range: count, ticks: [],
-      };
-    }
+    if (dir === "up")   return { action: "BUY_YES", reason: `Bullish: ${count} consecutive UP moves`,   upMoves: count, downMoves: 0,     range: count, ticks: [] };
+    if (dir === "down") return { action: "BUY_NO",  reason: `Bearish: ${count} consecutive DOWN moves`, upMoves: 0,     downMoves: count, range: count, ticks: [] };
   }
 
-  // Not enough momentum yet
+  // Not enough momentum yet — SKIP
   return {
     action: "SKIP",
     reason: direction === "flat"
-      ? `Price flat (${delta}¢ delta) — counter held at ${count}`
+      ? `Flat tick — momentum held at count:${count}`
       : `Accumulating ${dir} — count ${count}/${CONSECUTIVE_REQUIRED}`,
-    upMoves: dir === "up" ? count : 0,
+    upMoves:   dir === "up"   ? count : 0,
     downMoves: dir === "down" ? count : 0,
     range: Math.abs(delta),
     ticks: [],
