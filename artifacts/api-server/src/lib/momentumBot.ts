@@ -36,9 +36,10 @@ const SL_CENTS    = 4;   // stop-loss: exit when loss ≥ -4¢
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
-const CONSECUTIVE_REQUIRED = 3;   // trigger trade when consecutive count >= 3
-const SIGNAL_LOG_AT        = 2;   // log "TEST TRADE SIGNAL" when count >= 2
-const MIN_TICK_DELTA       = 1;   // min ¢ change to count as a directional move
+const CONSECUTIVE_REQUIRED  = 3;      // trigger trade when consecutive count >= 3
+const SIGNAL_LOG_AT         = 2;      // log warning when count >= 2
+const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
+const FAST_MOVE_WINDOW_MS   = 25_000; // 25s — two back-to-back scans = fast momentum
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -51,6 +52,7 @@ interface MarketMomentumState {
   lastPrice: number | null;           // price from previous scan
   direction: "up" | "down" | "flat"; // last meaningful direction
   consecutiveCount: number;           // how many consecutive same-direction moves
+  tickTimestamps: number[];           // unix-ms timestamp of each directional tick in current run
 }
 
 interface MomentumPosition {
@@ -228,9 +230,11 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
  * - Logs "TEST TRADE SIGNAL" when counter >= SIGNAL_LOG_AT (2).
  */
 export function evaluateMomentum(marketId: string, currentPriceCents: number): MomentumDecision {
+  const now = Date.now();
+
   // Initialise state for new markets
   if (!marketMomentum.has(marketId)) {
-    marketMomentum.set(marketId, { lastPrice: null, direction: "flat", consecutiveCount: 0 });
+    marketMomentum.set(marketId, { lastPrice: null, direction: "flat", consecutiveCount: 0, tickTimestamps: [] });
   }
   const ms = marketMomentum.get(marketId)!;
 
@@ -248,18 +252,20 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
   else if (delta <= -MIN_TICK_DELTA) direction = "down";
   else direction = "flat";
 
-  // Update counter:
-  //   same direction → increment
+  // Update counter + timestamps:
+  //   same direction → increment + record timestamp
   //   flat → keep counter unchanged (don't reward, don't punish)
-  //   reversal → reset to 1 with new direction
+  //   reversal → reset to 1 with new direction and fresh timestamp array
   if (direction === "flat") {
-    // no-op — counter unchanged
+    // no-op — counter and timestamps unchanged
   } else if (direction === ms.direction) {
     ms.consecutiveCount++;
+    ms.tickTimestamps.push(now);
   } else {
     // Direction reversed or first non-flat move
     ms.consecutiveCount = 1;
     ms.direction = direction;
+    ms.tickTimestamps = [now];
   }
 
   // Always track last price
@@ -271,12 +277,33 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
   // Always-visible log for Railway console
   console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: ${direction} Count: ${count}`);
 
-  // TEST TRADE SIGNAL — confirms detection before real bet
-  if (count >= SIGNAL_LOG_AT) {
-    console.log(`[MOMENTUM] TEST TRADE SIGNAL — ${marketId} | ${dir.toUpperCase()} count:${count} (need ${CONSECUTIVE_REQUIRED} to trade)`);
+  // ── Fast-move trigger: count == 2 AND both ticks within FAST_MOVE_WINDOW_MS ──
+  // Two consecutive directional ticks back-to-back (~15s apart) = rapid momentum.
+  // Fires one tick earlier than the normal 3-count trigger.
+  if (count === SIGNAL_LOG_AT && ms.tickTimestamps.length >= 2) {
+    const timeDiff = ms.tickTimestamps[ms.tickTimestamps.length - 1] - ms.tickTimestamps[0];
+    if (timeDiff <= FAST_MOVE_WINDOW_MS) {
+      console.log(`[FAST MOVE TRIGGER] ${marketId} | ${dir.toUpperCase()} count:${count} timeDiff:${timeDiff}ms ≤ ${FAST_MOVE_WINDOW_MS}ms window`);
+      if (dir === "up") {
+        return {
+          action: "BUY_YES",
+          reason: `Fast momentum: 2 UP ticks in ${timeDiff}ms`,
+          upMoves: count, downMoves: 0, range: count, ticks: [],
+        };
+      }
+      if (dir === "down") {
+        return {
+          action: "BUY_NO",
+          reason: `Fast momentum: 2 DOWN ticks in ${timeDiff}ms`,
+          upMoves: 0, downMoves: count, range: count, ticks: [],
+        };
+      }
+    } else {
+      console.log(`[MOMENTUM] ${marketId} | count:${count} timeDiff:${timeDiff}ms — too slow for fast-move trigger (>${FAST_MOVE_WINDOW_MS}ms)`);
+    }
   }
 
-  // Real trade signal
+  // ── Normal trade signal: count >= 3 ──────────────────────────────────────
   if (count >= CONSECUTIVE_REQUIRED) {
     if (dir === "up") {
       return {
@@ -294,7 +321,7 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     }
   }
 
-  // Not enough consecutive moves yet
+  // Not enough momentum yet
   return {
     action: "SKIP",
     reason: direction === "flat"
