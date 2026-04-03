@@ -725,6 +725,8 @@ export async function scanMomentumMarkets(): Promise<void> {
     `[SCAN] ${markets.length} markets: ${markets.map(m => `${coinLabel(m.ticker)} ${m.minutesRemaining.toFixed(1)}min ask:${m.askCents}¢`).join(", ")}`,
   );
 
+  let inRangeCount = 0; // tracks markets that pass price/spread/orderbook filters
+
   for (const market of markets) {
     // Already have position in this market?
     const alreadyInMarket = openPositions.some(p => p.marketId === market.ticker);
@@ -760,6 +762,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       console.log(`[SCAN] ${coinLabel(market.ticker)} — spread ${spread}¢ > ${SPREAD_MAX}¢ max, skipping`);
       continue;
     }
+    inRangeCount++;
 
     // Evaluate momentum (feeds in current mid price as tick)
     const decision = evaluateMomentum(market.ticker, mid);
@@ -819,6 +822,14 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     // Respect max positions — check again after trade
     if (openPositions.length >= MAX_POSITIONS) break;
+  }
+
+  // If every market was out of price/spread range, the cached list is stale
+  // (end-of-cycle markets with settled prices). Expire cache now so the next
+  // scan (15s later) re-fetches and finds fresh cycle markets.
+  if (inRangeCount === 0) {
+    console.log(`[SCAN] All ${markets.length} markets out of tradeable range — expiring market cache for fresh fetch next scan`);
+    _marketCache = null;
   }
 
   state.openTradeCount = openPositions.length;
