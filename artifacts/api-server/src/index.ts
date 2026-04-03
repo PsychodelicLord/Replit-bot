@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { retryOpenPositions, refreshBalance, startCoinFlipAuto, syncPortfolioFromKalshi, registerOpenPosition, loadBotConfigFromDb } from "./lib/kalshi-bot";
-import { startMomentumBot } from "./lib/momentumBot";
+import { startMomentumBot, loadMomentumConfig } from "./lib/momentumBot";
 import { runMigrations } from "./migrate";
 import { db, tradesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -39,6 +39,10 @@ runMigrations().then(() => {
       startMomentumBot();
       logger.info("📈 Momentum bot auto-mode started via MOMENTUM_AUTO_START");
     }
+
+    // ── Restore momentum bot state from DB (auto-restarts if was enabled) ────
+    // Runs after MOMENTUM_AUTO_START check so explicit env var still wins.
+    loadMomentumConfig().catch(err => logger.warn({ err }, "startup: loadMomentumConfig failed"));
 
     // ── Load saved config + hydrate positions from DB asynchronously ─────────
     // These are best-effort — bots work fine with defaults if DB is unavailable.

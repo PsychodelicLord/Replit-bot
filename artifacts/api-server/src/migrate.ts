@@ -33,6 +33,16 @@ export async function runMigrations(): Promise<void> {
       )
     `);
 
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS momentum_settings (
+        id                     INTEGER PRIMARY KEY DEFAULT 1,
+        enabled                BOOLEAN NOT NULL DEFAULT FALSE,
+        balance_floor_cents    INTEGER NOT NULL DEFAULT 0,
+        max_session_loss_cents INTEGER NOT NULL DEFAULT 0,
+        consecutive_loss_limit INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+
     console.log("[migrate] Tables ready.");
   } catch (err) {
     console.error("[migrate] Migration error (server will still start):", err);

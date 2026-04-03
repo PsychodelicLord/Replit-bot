@@ -18,7 +18,7 @@
 
 import { kalshiFetch } from "./kalshi-bot";
 import { logger } from "./logger";
-import { db, tradesTable, botLogsTable } from "@workspace/db";
+import { db, tradesTable, botLogsTable, momentumSettingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -895,6 +895,45 @@ export async function scanMomentumMarkets(): Promise<void> {
   if (openPositions.length > 0) state.status = "IN_TRADE";
 }
 
+// ─── Config Persistence ─────────────────────────────────────────────────────
+/** Save current enabled+risk settings to DB (fire-and-forget). Called on every start/stop/config change. */
+export function saveMomentumConfig(): void {
+  const row = {
+    id: 1,
+    enabled:              state.enabled,
+    balanceFloorCents:    state.balanceFloorCents,
+    maxSessionLossCents:  state.maxSessionLossCents,
+    consecutiveLossLimit: state.consecutiveLossLimit,
+  };
+  db.insert(momentumSettingsTable).values(row)
+    .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
+    .catch(err => console.error("[momentumBot] saveMomentumConfig failed:", String(err)));
+}
+
+/** Load saved config from DB and restore state (including re-enabling the bot if it was on). */
+export async function loadMomentumConfig(): Promise<void> {
+  try {
+    const rows = await db.select().from(momentumSettingsTable).where(eq(momentumSettingsTable.id, 1)).limit(1);
+    if (rows.length === 0) {
+      console.log("[momentumBot] No saved config — using defaults (bot starts disabled)");
+      return;
+    }
+    const r = rows[0];
+    state.balanceFloorCents    = r.balanceFloorCents;
+    state.maxSessionLossCents  = r.maxSessionLossCents;
+    state.consecutiveLossLimit = r.consecutiveLossLimit;
+
+    if (r.enabled) {
+      console.log("[momentumBot] 🔄 Restoring enabled state from DB — auto-restarting bot");
+      startMomentumBot();
+    } else {
+      console.log("[momentumBot] Saved config loaded — bot was stopped, staying disabled");
+    }
+  } catch (err) {
+    console.error("[momentumBot] loadMomentumConfig failed (using defaults):", String(err));
+  }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 export function getMomentumBotState(): MomentumBotState {
   return { ...state };
@@ -974,6 +1013,7 @@ export function startMomentumBot(): MomentumBotState {
 
   log("▶️  Momentum Bot STARTED");
   dbLog("info", `[MOMENTUM] ▶️ Momentum Bot STARTED — scanning every ${SCAN_INTERVAL_MS / 1000}s for ${ALLOWED_COINS.join(",")} 15-min markets`);
+  saveMomentumConfig(); // persist enabled=true to DB so Railway restarts restore state
   return getMomentumBotState();
 }
 
@@ -989,5 +1029,6 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
   console.log(`🛑 BOT STOPPED — reason: ${reason}`);
   dbLog("info", `[MOMENTUM] ⏹️ Momentum Bot STOPPED — ${reason}`);
   log(`⏹️  Momentum Bot STOPPED — ${reason}`);
+  saveMomentumConfig(); // persist enabled=false to DB
   return getMomentumBotState();
 }
