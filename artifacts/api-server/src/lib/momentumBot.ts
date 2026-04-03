@@ -381,51 +381,72 @@ async function fetchMarketOrderBook(
   }
 }
 
-async function fetchActiveMarkets(): Promise<Array<{
-  ticker: string;
-  title: string;
-  minutesRemaining: number;
-  status: string;
-  askCents: number;
-  bidCents: number;
-}>> {
-  try {
-    const now = Date.now();
-    // Use max_close_ts to surface short-duration markets — the general endpoint
-    // paginates by something other than close time and buries 15-min crypto markets.
-    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
-    const resp = await kalshiFetch("GET", `/markets?status=open&limit=100&max_close_ts=${maxCloseTs}`) as {
-      markets?: Array<{
-        ticker?: string;
-        title?: string;
-        close_time?: string;
-        status?: string;
-        yes_ask_dollars?: number;
-        yes_bid_dollars?: number;
-      }>
-    };
+type RawMarket = {
+  ticker?: string;
+  title?: string;
+  close_time?: string;
+  status?: string;
+  yes_ask_dollars?: number;
+  yes_bid_dollars?: number;
+};
 
-    return (resp?.markets ?? [])
+function rawToMarket(m: RawMarket, now: number) {
+  const closeMs = m.close_time ? new Date(m.close_time).getTime() : now;
+  const minutesRemaining = Math.max(0, (closeMs - now) / 60_000);
+  const askCents = m.yes_ask_dollars != null && m.yes_ask_dollars > 0
+    ? Math.round(m.yes_ask_dollars * 100) : 0;
+  const bidCents = m.yes_bid_dollars != null && m.yes_bid_dollars > 0
+    ? Math.round(m.yes_bid_dollars * 100) : 0;
+  return { ticker: m.ticker!, title: m.title ?? m.ticker!, minutesRemaining, status: m.status ?? "open", askCents, bidCents };
+}
+
+async function fetchActiveMarkets(): Promise<Array<{
+  ticker: string; title: string; minutesRemaining: number; status: string; askCents: number; bidCents: number;
+}>> {
+  const now = Date.now();
+
+  // ── Strategy 1: query by series_ticker for each coin (most reliable) ──────
+  const results = await Promise.all(
+    ALLOWED_TICKER_PREFIXES.map(async prefix => {
+      try {
+        const resp = await kalshiFetch("GET", `/markets?series_ticker=${prefix}&status=open&limit=10`) as { markets?: RawMarket[] };
+        const raw = resp?.markets ?? [];
+        if (raw.length > 0) {
+          console.log(`[FETCH] series_ticker=${prefix} → ${raw.length} markets: ${raw.map(m => m.ticker).join(", ")}`);
+        }
+        return raw;
+      } catch {
+        return [] as RawMarket[];
+      }
+    })
+  );
+
+  const seriesMarkets = results
+    .flat()
+    .filter(m => m.ticker && m.status === "open")
+    .map(m => rawToMarket(m, now))
+    .filter(m => m.minutesRemaining > MIN_MINUTES_REMAINING);
+
+  if (seriesMarkets.length > 0) return seriesMarkets;
+
+  // ── Strategy 2: max_close_ts window fallback — log raw tickers for diagnosis ──
+  console.log(`[FETCH] series_ticker queries returned 0 — trying max_close_ts fallback`);
+  try {
+    const maxCloseTs = Math.floor((now + 20 * 60_000) / 1000);
+    const resp = await kalshiFetch("GET", `/markets?status=open&limit=100&max_close_ts=${maxCloseTs}`) as { markets?: RawMarket[] };
+    const all = resp?.markets ?? [];
+    // Always log raw tickers so we can see what Kalshi actually returned
+    console.log(`[FETCH] max_close_ts window: ${all.length} raw markets → ${all.slice(0, 15).map(m => m.ticker).join(", ")}`);
+
+    const filtered = all
       .filter(m => m.ticker && isMomentumMarket(m.ticker))
-      .map(m => {
-        const closeMs = m.close_time ? new Date(m.close_time).getTime() : now;
-        const minutesRemaining = Math.max(0, (closeMs - now) / 60_000);
-        const askCents = m.yes_ask_dollars != null && m.yes_ask_dollars > 0
-          ? Math.round(m.yes_ask_dollars * 100) : 0;
-        const bidCents = m.yes_bid_dollars != null && m.yes_bid_dollars > 0
-          ? Math.round(m.yes_bid_dollars * 100) : 0;
-        return {
-          ticker: m.ticker!,
-          title: m.title ?? m.ticker!,
-          minutesRemaining,
-          status: m.status ?? "open",
-          askCents,
-          bidCents,
-        };
-      })
+      .map(m => rawToMarket(m, now))
       .filter(m => m.status === "open" && m.minutesRemaining > MIN_MINUTES_REMAINING);
+
+    console.log(`[FETCH] After momentum filter: ${filtered.length} eligible markets`);
+    return filtered;
   } catch (err) {
-    warn(`fetchActiveMarkets failed: ${String(err)}`);
+    warn(`fetchActiveMarkets fallback failed: ${String(err)}`);
     return [];
   }
 }
