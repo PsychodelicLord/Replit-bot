@@ -874,10 +874,11 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Balance floor check
     if (state.balanceFloorCents > 0) {
       try {
-        const balResp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { available_balance?: number } };
-        const balance = Math.round((balResp?.balance?.available_balance ?? 0) * 100);
-        if (balance <= state.balanceFloorCents) {
-          stopMomentumBot(`Balance floor hit: ${balance}¢ ≤ ${state.balanceFloorCents}¢ floor`);
+        const balResp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { balance?: number } };
+        const balance = Math.round((balResp?.balance?.balance ?? 0) * 100);
+        console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${state.balanceFloorCents}¢`);
+        if (balance > 0 && balance < state.balanceFloorCents) {
+          stopMomentumBot(`Balance floor hit: ${balance}¢ < ${state.balanceFloorCents}¢ floor`);
           return;
         }
       } catch { /* non-blocking */ }
