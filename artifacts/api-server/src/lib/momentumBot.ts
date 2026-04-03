@@ -100,6 +100,7 @@ export interface MomentumBotState {
   // Risk management
   pausedUntilMs: number | null;
   pauseReason: string | null;
+  stopReason: string | null;   // why the bot last stopped (deploy reset / loss limit / balance floor)
   balanceFloorCents: number;
   maxSessionLossCents: number;
   consecutiveLossLimit: number;
@@ -118,6 +119,7 @@ const state: MomentumBotState = {
   consecutiveLosses: 0,
   pausedUntilMs: null,
   pauseReason: null,
+  stopReason: "Server started — not yet enabled",
   balanceFloorCents: 0,
   maxSessionLossCents: 0,
   consecutiveLossLimit: 0,
@@ -210,19 +212,15 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
     { entryPriceCents, exitPriceCents, pnlCents, totalWins: state.totalWins, totalLosses: state.totalLosses, sessionPnlCents: state.sessionPnlCents },
   );
 
-  // Check consecutive loss limit — hard stop, requires redeploy/manual restart to resume
+  // Check consecutive loss limit — hard stop, requires re-enable from dashboard
   if (state.consecutiveLossLimit > 0 && state.consecutiveLosses >= state.consecutiveLossLimit) {
-    log(`🛑 ${state.consecutiveLosses} CONSECUTIVE LOSSES — STOPPING BOT FOR SESSION`);
-    dbLog("warn", `[MOMENTUM] 🛑 ${state.consecutiveLosses} consecutive losses — bot stopped for session. Redeploy or restart to resume.`);
-    stopMomentumBot();
+    stopMomentumBot(`${state.consecutiveLosses} consecutive losses hit limit of ${state.consecutiveLossLimit}`);
     return;
   }
 
-  // Check session loss limit — hard stop, requires redeploy/manual restart to resume
+  // Check session loss limit — hard stop, requires re-enable from dashboard
   if (state.maxSessionLossCents > 0 && state.sessionPnlCents <= -state.maxSessionLossCents) {
-    log(`🛑 SESSION LOSS LIMIT HIT (${state.sessionPnlCents}¢) — STOPPING BOT FOR SESSION`);
-    dbLog("warn", `[MOMENTUM] 🛑 Session loss limit hit (${state.sessionPnlCents}¢) — bot stopped for session. Redeploy or restart to resume.`);
-    stopMomentumBot();
+    stopMomentumBot(`Session loss limit hit: ${state.sessionPnlCents}¢ ≤ -${state.maxSessionLossCents}¢`);
   }
 }
 
@@ -873,8 +871,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         const balResp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { available_balance?: number } };
         const balance = Math.round((balResp?.balance?.available_balance ?? 0) * 100);
         if (balance <= state.balanceFloorCents) {
-          log(`🚨 BALANCE FLOOR HIT (${balance}¢ ≤ ${state.balanceFloorCents}¢) — STOPPING BOT`);
-          stopMomentumBot();
+          stopMomentumBot(`Balance floor hit: ${balance}¢ ≤ ${state.balanceFloorCents}¢ floor`);
           return;
         }
       } catch { /* non-blocking */ }
@@ -980,15 +977,17 @@ export function startMomentumBot(): MomentumBotState {
   return getMomentumBotState();
 }
 
-export function stopMomentumBot(): MomentumBotState {
+export function stopMomentumBot(reason = "Manually stopped via dashboard"): MomentumBotState {
   state.enabled = false;
   state.autoMode = false;
   state.status = "DISABLED";
+  state.stopReason = reason;
 
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
 
-  dbLog("info", "[MOMENTUM] ⏹️ Momentum Bot STOPPED");
-  log("⏹️  Momentum Bot STOPPED");
+  console.log(`🛑 BOT STOPPED — reason: ${reason}`);
+  dbLog("info", `[MOMENTUM] ⏹️ Momentum Bot STOPPED — ${reason}`);
+  log(`⏹️  Momentum Bot STOPPED — ${reason}`);
   return getMomentumBotState();
 }

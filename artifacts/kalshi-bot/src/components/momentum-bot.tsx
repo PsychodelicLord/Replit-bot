@@ -183,6 +183,17 @@ export function MomentumBot() {
         </div>
       )}
 
+      {/* Stop reason — shown when bot is disabled and stopped for a known reason */}
+      {!enabled && data?.stopReason && !data.stopReason.startsWith("Server started") && data.stopReason !== "Manually stopped via dashboard" && (
+        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-400" />
+          <div>
+            <p className="font-semibold text-red-200">Bot stopped automatically</p>
+            <p className="text-[10px] text-red-400/80 mt-0.5">{data.stopReason}</p>
+          </div>
+        </div>
+      )}
+
       {/* Last decision */}
       {data?.lastDecision && (
         <div className="space-y-1">
