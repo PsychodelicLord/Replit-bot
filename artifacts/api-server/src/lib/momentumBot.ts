@@ -112,7 +112,7 @@ const state: MomentumBotState = {
   pauseReason: null,
   balanceFloorCents: 0,
   maxSessionLossCents: 0,
-  consecutiveLossLimit: 3,
+  consecutiveLossLimit: 0,
 };
 
 export interface MomentumBotConfig {

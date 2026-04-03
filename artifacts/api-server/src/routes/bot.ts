@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
-import { desc, count, sum, sql } from "drizzle-orm";
+import { desc, count, sql } from "drizzle-orm";
 import {
   GetBotStatusResponse,
   StartBotResponse,
