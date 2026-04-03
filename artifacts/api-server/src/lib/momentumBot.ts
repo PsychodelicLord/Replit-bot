@@ -3,8 +3,8 @@
  *
  * Rules:
  *  - Trades BTC, ETH, SOL, DOGE, XRP, BNB, HYPE (15-min crypto markets)
- *  - Entry: price 30-70¢, spread ≤5¢, >7 min remaining, STRONG momentum
- *  - Momentum = 4/5 ticks same direction, range ≥2¢, all ticks within 20s
+ *  - Entry: price 20-80¢, spread ≤5¢, >7 min remaining, momentum signal
+ *  - Momentum = 3/4 moves same direction over 5 ticks (15s each), range ≥1¢
  *  - TP: +3¢, SL: -4¢, no-movement exit after 45s (price didn't move ≥1¢)
  *  - Max 2 simultaneous positions; no stacking same market or same direction
  *  - Per-market cooldown 75s after close
@@ -37,11 +37,11 @@ const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
 const TICK_WINDOW      = 5;   // number of ticks to evaluate
-const TICKS_REQUIRED   = 4;   // min ticks in same direction (out of TICK_WINDOW)
-const RANGE_MIN_CENTS  = 2;   // min price range over last N ticks
-const TICK_MAX_AGE_MS  = 20_000; // all N ticks must fit in this window
+const TICKS_REQUIRED   = 3;   // min ticks in same direction (out of TICK_WINDOW - 1)
+const RANGE_MIN_CENTS  = 1;   // min price range over last N ticks
+const TICK_MAX_AGE_MS  = 90_000; // all N ticks must fit in this window (5 × 15s = 75s)
 
-const SCAN_INTERVAL_MS = 3_000;  // scan every 3s
+const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 
 const FEE_RATE = 0.07;
