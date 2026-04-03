@@ -420,10 +420,14 @@ async function botLog(level: string, message: string, data?: unknown): Promise<v
 // ─── Fetch and update account balance ────────────────────────────────────────
 export async function refreshBalance(): Promise<void> {
   try {
-    const resp = await kalshiFetch("GET", "/portfolio/balance") as { balance?: { balance?: number } };
-    const balanceDollars = resp?.balance?.balance ?? 0;
+    const resp = await kalshiFetch("GET", "/portfolio/balance");
+    console.log(`[BALANCE RAW] ${JSON.stringify(resp)}`);
+    const r = resp as { balance?: { balance?: number } };
+    const balanceDollars = r?.balance?.balance ?? 0;
     state.balanceCents = Math.round(balanceDollars * 100);
-  } catch (_) {
+    console.log(`[BALANCE PARSED] dollars:${balanceDollars} cents:${state.balanceCents}`);
+  } catch (err) {
+    console.log(`[BALANCE ERROR] ${String(err)}`);
     // non-fatal; keep last known value
   }
 }
