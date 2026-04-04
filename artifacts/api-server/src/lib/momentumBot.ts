@@ -37,13 +37,12 @@ const SL_CENTS    = 4;   // stop-loss: exit when loss ≥ -4¢
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
-const CONSECUTIVE_REQUIRED  = 3;      // trigger trade when consecutive count >= 3
-const SIGNAL_LOG_AT         = 2;      // fast-move trigger threshold (count == 2)
+const TICK_WINDOW_SIZE      = 5;      // track last N ticks (including flat)
+const DOMINANCE_REQUIRED    = 3;      // need 3+ of last 5 ticks in same direction to enter
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
-const FAST_MOVE_WINDOW_MS   = 30_000; // 30s window for fast-move trigger
 const MIN_TOTAL_MOVE_CENTS  = 2;      // require ≥2¢ total price move before trading
 const TRADE_SPREAD_MAX      = 3;      // tighter spread required to actually execute a trade
-const MOMENTUM_EXPIRY_MS    = 30_000; // if no directional tick for 30s, reset counter — avoids stale setups
+const MOMENTUM_EXPIRY_MS    = 30_000; // if no tick for 30s, reset window — avoids stale setups
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -51,13 +50,11 @@ const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 const FEE_RATE = 0.07;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
-// Per-market counter state for direction tracking
+// Per-market sliding-window state for directional dominance
 interface MarketMomentumState {
-  lastPrice: number | null;           // price at last real (non-flat) tick
-  direction: "up" | "down" | "flat"; // last meaningful direction
-  consecutiveCount: number;           // how many consecutive same-direction moves
-  tickTimestamps: number[];           // unix-ms timestamp of each directional tick in current run
-  firstTickPrice: number | null;      // price when the current directional run started
+  lastPrice: number | null;  // price at last real (non-flat) tick — anchor for delta
+  firstTickPrice: number | null; // price at first tick in window — for totalMove calc
+  tickWindow: Array<{ direction: "up" | "down" | "flat"; ts: number }>; // last TICK_WINDOW_SIZE ticks
 }
 
 interface MomentumPosition {
@@ -229,111 +226,90 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
   }
 }
 
-// ─── Counter-based Momentum Evaluation ─────────────────────────────────────
+// ─── Sliding-window Directional Dominance Evaluation ───────────────────────
 /**
- * Flat ticks are COMPLETELY INVISIBLE to momentum logic.
- *   - lastPrice only anchors to real directional moves.
- *   - Sequence: up → flat → up correctly reaches count=2.
- *   - Counter resets ONLY on direction reversal (up→down or down→up).
- *   - Three triggers: fast-move (count=2, ≤25s), flat-hold (count≥2, flat), normal (count≥3).
+ * Tracks the last TICK_WINDOW_SIZE price scans (including flat ticks).
+ * Enters when 3+ of the last 5 ticks moved in the same direction.
+ * Flat ticks are recorded but do NOT block or reset momentum.
+ * Only resets the window if the market has gone completely stale (no scan for 30s).
  */
 export function evaluateMomentum(marketId: string, currentPriceCents: number): MomentumDecision {
   const now = Date.now();
 
   if (!marketMomentum.has(marketId)) {
-    marketMomentum.set(marketId, { lastPrice: null, direction: "flat", consecutiveCount: 0, tickTimestamps: [], firstTickPrice: null });
+    marketMomentum.set(marketId, { lastPrice: null, firstTickPrice: null, tickWindow: [] });
   }
   const ms = marketMomentum.get(marketId)!;
 
-  // First ever tick — establish baseline, no signal
+  // First ever tick — establish baseline, no signal yet
   if (ms.lastPrice === null) {
     ms.lastPrice = currentPriceCents;
-    console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: first-tick Count: 0`);
+    ms.firstTickPrice = currentPriceCents;
+    console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ first-tick`);
     return { action: "SKIP", reason: "First tick — establishing baseline", upMoves: 0, downMoves: 0, range: 0, ticks: [], totalMove: 0, timeDiff: 0 };
   }
 
-  // Delta compares against last REAL (non-flat) price — flat ticks don't move the anchor
+  // Stale check — if last recorded tick was > MOMENTUM_EXPIRY_MS ago, reset window
+  if (ms.tickWindow.length > 0) {
+    const lastTs = ms.tickWindow[ms.tickWindow.length - 1].ts;
+    if (now - lastTs > MOMENTUM_EXPIRY_MS) {
+      console.log(`[MOMENTUM EXPIRED] ${marketId} — stale for ${Math.round((now - lastTs) / 1000)}s, window reset`);
+      ms.tickWindow = [];
+      ms.firstTickPrice = currentPriceCents;
+    }
+  }
+
+  // Classify this tick vs last REAL (non-flat) anchor price
   const delta = currentPriceCents - ms.lastPrice;
   let direction: "up" | "down" | "flat";
   if (delta >= MIN_TICK_DELTA)       direction = "up";
   else if (delta <= -MIN_TICK_DELTA) direction = "down";
   else                               direction = "flat";
 
-  // ── State update ──────────────────────────────────────────────────────────
+  // Advance anchor price on directional ticks only
   if (direction !== "flat") {
-    // Active directional move — advance or reset run
-    if (direction === ms.direction) {
-      ms.consecutiveCount++;
-      ms.tickTimestamps.push(now);
-    } else {
-      // Reversal — start fresh run in new direction
-      ms.consecutiveCount = 1;
-      ms.direction = direction;
-      ms.tickTimestamps = [now];
-      ms.firstTickPrice = currentPriceCents;
-    }
-    if (ms.firstTickPrice === null) ms.firstTickPrice = currentPriceCents;
     ms.lastPrice = currentPriceCents;
-  } else {
-    // Flat tick — check if momentum has gone stale and should be expired
-    const lastTickAge = ms.tickTimestamps.length > 0
-      ? now - ms.tickTimestamps[ms.tickTimestamps.length - 1]
-      : Infinity;
-    if (lastTickAge > MOMENTUM_EXPIRY_MS && ms.consecutiveCount > 0) {
-      ms.consecutiveCount = 0;
-      ms.direction = "flat";
-      ms.tickTimestamps = [];
-      ms.firstTickPrice = null;
-      console.log(`[MOMENTUM EXPIRED] ${marketId} — no move for ${Math.round(lastTickAge / 1000)}s, counter reset`);
-    }
+    if (ms.firstTickPrice === null) ms.firstTickPrice = currentPriceCents;
   }
 
-  const count     = ms.consecutiveCount;
-  const dir       = ms.direction;
+  // Add tick to sliding window (cap at TICK_WINDOW_SIZE)
+  ms.tickWindow.push({ direction, ts: now });
+  if (ms.tickWindow.length > TICK_WINDOW_SIZE) ms.tickWindow.shift();
+
+  // Count directions in window
+  const upMoves   = ms.tickWindow.filter(t => t.direction === "up").length;
+  const downMoves = ms.tickWindow.filter(t => t.direction === "down").length;
+  const dirMoves  = upMoves + downMoves;
+  const flatMoves = ms.tickWindow.length - dirMoves;
+
   const totalMove = ms.firstTickPrice !== null ? Math.abs(currentPriceCents - ms.firstTickPrice) : 0;
-  const timeDiff  = ms.tickTimestamps.length >= 2
-    ? ms.tickTimestamps[ms.tickTimestamps.length - 1] - ms.tickTimestamps[0]
-    : 0;
+  const dirTicks  = ms.tickWindow.filter(t => t.direction !== "flat");
+  const timeDiff  = dirTicks.length >= 2 ? dirTicks[dirTicks.length - 1].ts - dirTicks[0].ts : 0;
 
-  console.log(`DIR: ${direction} LAST DIR: ${dir} COUNT: ${count}`);
-  console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: ${direction} Count: ${count} Move: ${totalMove}¢ TimeDiff: ${timeDiff}ms`);
-  if (direction === "flat") {
-    console.log(`[FLAT TICK] ${marketId} counter:${count} — no entry on flat price`);
+  console.log(`[MOMENTUM] ${marketId} | ${currentPriceCents}¢ dir:${direction} | window up:${upMoves} dn:${downMoves} flat:${flatMoves}/${TICK_WINDOW_SIZE} | totalMove:${totalMove}¢`);
+
+  const decide = (action: "BUY_YES" | "BUY_NO" | "SKIP", reason: string): MomentumDecision => ({
+    action, reason, upMoves, downMoves,
+    range: Math.abs(delta), ticks: [], totalMove, timeDiff,
+  });
+
+  // Fully flat window — market not moving at all
+  if (dirMoves === 0) {
+    return decide("SKIP", `Flat market — no directional ticks in last ${ms.tickWindow.length} scans`);
   }
 
-  // Helper to build a decision with all metadata
-  const decide = (action: "BUY_YES" | "BUY_NO" | "SKIP", reason: string): MomentumDecision => {
-    console.log(`DECISION: ${action} COUNT: ${count} LAST DIR: ${dir}`);
-    return {
-      action, reason,
-      upMoves:   dir === "up"   ? count : 0,
-      downMoves: dir === "down" ? count : 0,
-      range: Math.abs(delta), ticks: [], totalMove, timeDiff,
-    };
-  };
-
-  // ── Only trigger on an ACTIVE directional move — never on flat/stalled price ──
-  if (direction === "flat") {
-    return decide("SKIP", `Flat tick — no entry while price is inactive (count:${count})`);
+  // Directional dominance — 3+ of last 5 ticks in same direction (flat ticks allowed between)
+  if (upMoves >= DOMINANCE_REQUIRED) {
+    console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans`);
+    return decide("BUY_YES", `Bullish dominance: ${upMoves}/${ms.tickWindow.length} UP ticks`);
+  }
+  if (downMoves >= DOMINANCE_REQUIRED) {
+    console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans`);
+    return decide("BUY_NO", `Bearish dominance: ${downMoves}/${ms.tickWindow.length} DOWN ticks`);
   }
 
-  // ── Trigger 1: Fast-move — count==2 AND both ticks within FAST_MOVE_WINDOW_MS ──
-  if (count === SIGNAL_LOG_AT && ms.tickTimestamps.length >= 2 && timeDiff <= FAST_MOVE_WINDOW_MS) {
-    console.log(`[FAST MOVE TRIGGER] ${marketId} | ${dir.toUpperCase()} count:${count} timeDiff:${timeDiff}ms`);
-    if (dir === "up")   return decide("BUY_YES", `Fast momentum: 2 UP ticks in ${timeDiff}ms`);
-    if (dir === "down") return decide("BUY_NO",  `Fast momentum: 2 DOWN ticks in ${timeDiff}ms`);
-  }
-
-  // ── Trigger 2 (flat-hold) REMOVED — never enter on stalled price ──────────
-
-  // ── Trigger 3: Normal — count >= 3, current tick is active ───────────────
-  if (count >= CONSECUTIVE_REQUIRED) {
-    if (dir === "up")   return decide("BUY_YES", `Bullish: ${count} consecutive UP moves`);
-    if (dir === "down") return decide("BUY_NO",  `Bearish: ${count} consecutive DOWN moves`);
-  }
-
-  // Not enough momentum yet
-  return decide("SKIP", `Accumulating ${dir} — count ${count}/${CONSECUTIVE_REQUIRED}`);
+  // Mixed or still accumulating
+  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} flat:${flatMoves} (need ${DOMINANCE_REQUIRED}/${TICK_WINDOW_SIZE})`);
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
@@ -840,15 +816,6 @@ export async function scanMomentumMarkets(): Promise<void> {
       filtered = true;
     }
 
-    // Filter 3: Speed filter — for fast-move signals both ticks must be within FAST_MOVE_WINDOW_MS
-    // (For flat-hold / normal signals this is informational only — speed already validated by trigger logic)
-    if (!filtered && decision.reason.includes("Fast momentum")) {
-      if (decision.timeDiff === 0 || decision.timeDiff > FAST_MOVE_WINDOW_MS) {
-        console.log(`[FILTER:SPEED] ${coinLabel(market.ticker)} REJECTED — timeDiff ${decision.timeDiff}ms > ${FAST_MOVE_WINDOW_MS}ms window`);
-        filtered = true;
-      }
-    }
-
     if (filtered) continue;
     console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.totalMove}¢ timeDiff:${decision.timeDiff}ms — all filters passed`);
 
@@ -997,12 +964,16 @@ export async function debugMomentumMarkets() {
   }
 
   const filtered = await fetchActiveMarkets();
-  const momentumSnap: Record<string, { lastPrice: number | null; direction: string; count: number }> = {};
+  const momentumSnap: Record<string, { lastPrice: number | null; upMoves: number; downMoves: number; flatMoves: number; windowSize: number }> = {};
   for (const [marketId, ms] of marketMomentum.entries()) {
+    const up   = ms.tickWindow.filter(t => t.direction === "up").length;
+    const down = ms.tickWindow.filter(t => t.direction === "down").length;
     momentumSnap[marketId] = {
       lastPrice: ms.lastPrice,
-      direction: ms.direction,
-      count: ms.consecutiveCount,
+      upMoves: up,
+      downMoves: down,
+      flatMoves: ms.tickWindow.length - up - down,
+      windowSize: ms.tickWindow.length,
     };
   }
 
@@ -1011,7 +982,7 @@ export async function debugMomentumMarkets() {
     rawSample,
     filteredMarkets: filtered.map(m => ({ ticker: m.ticker, minutesRemaining: m.minutesRemaining, askCents: m.askCents, bidCents: m.bidCents })),
     momentumCounters: momentumSnap,
-    config: { CONSECUTIVE_REQUIRED, SIGNAL_LOG_AT, MIN_TICK_DELTA, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, SPREAD_MAX, MIN_MINUTES_REMAINING },
+    config: { TICK_WINDOW_SIZE, DOMINANCE_REQUIRED, MIN_TICK_DELTA, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, ENTRY_BUFFER_CENTS, SPREAD_MAX, MIN_MINUTES_REMAINING },
     botState: getMomentumBotState(),
   };
 }
