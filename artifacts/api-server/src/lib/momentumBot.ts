@@ -37,11 +37,12 @@ const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
 const CONSECUTIVE_REQUIRED  = 3;      // trigger trade when consecutive count >= 3
-const SIGNAL_LOG_AT         = 2;      // flat-hold / fast-move trigger threshold
+const SIGNAL_LOG_AT         = 2;      // fast-move trigger threshold (count == 2)
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
-const FAST_MOVE_WINDOW_MS   = 30_000; // 30s — two consecutive scans with one flat gap
+const FAST_MOVE_WINDOW_MS   = 30_000; // 30s window for fast-move trigger
 const MIN_TOTAL_MOVE_CENTS  = 2;      // require ≥2¢ total price move before trading
 const TRADE_SPREAD_MAX      = 3;      // tighter spread required to actually execute a trade
+const MOMENTUM_EXPIRY_MS    = 30_000; // if no directional tick for 30s, reset counter — avoids stale setups
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -254,21 +255,33 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
   else if (delta <= -MIN_TICK_DELTA) direction = "down";
   else                               direction = "flat";
 
-  // ── State update: only real moves change anything ─────────────────────────
-  // Flat ticks are INVISIBLE — counter, direction, lastPrice, timestamps all unchanged.
+  // ── State update ──────────────────────────────────────────────────────────
   if (direction !== "flat") {
+    // Active directional move — advance or reset run
     if (direction === ms.direction) {
       ms.consecutiveCount++;
       ms.tickTimestamps.push(now);
     } else {
-      // Reversal — reset with new direction
+      // Reversal — start fresh run in new direction
       ms.consecutiveCount = 1;
       ms.direction = direction;
       ms.tickTimestamps = [now];
-      ms.firstTickPrice = currentPriceCents; // new run starts here
+      ms.firstTickPrice = currentPriceCents;
     }
     if (ms.firstTickPrice === null) ms.firstTickPrice = currentPriceCents;
-    ms.lastPrice = currentPriceCents; // anchor only moves on real ticks
+    ms.lastPrice = currentPriceCents;
+  } else {
+    // Flat tick — check if momentum has gone stale and should be expired
+    const lastTickAge = ms.tickTimestamps.length > 0
+      ? now - ms.tickTimestamps[ms.tickTimestamps.length - 1]
+      : Infinity;
+    if (lastTickAge > MOMENTUM_EXPIRY_MS && ms.consecutiveCount > 0) {
+      ms.consecutiveCount = 0;
+      ms.direction = "flat";
+      ms.tickTimestamps = [];
+      ms.firstTickPrice = null;
+      console.log(`[MOMENTUM EXPIRED] ${marketId} — no move for ${Math.round(lastTickAge / 1000)}s, counter reset`);
+    }
   }
 
   const count     = ms.consecutiveCount;
@@ -278,11 +291,10 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     ? ms.tickTimestamps[ms.tickTimestamps.length - 1] - ms.tickTimestamps[0]
     : 0;
 
-  // Debug log (requested)
   console.log(`DIR: ${direction} LAST DIR: ${dir} COUNT: ${count}`);
   console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ Direction: ${direction} Count: ${count} Move: ${totalMove}¢ TimeDiff: ${timeDiff}ms`);
   if (direction === "flat") {
-    console.log(`[FLAT TICK - HOLDING MOMENTUM] ${marketId} counter:${count}`);
+    console.log(`[FLAT TICK] ${marketId} counter:${count} — no entry on flat price`);
   }
 
   // Helper to build a decision with all metadata
@@ -296,6 +308,11 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     };
   };
 
+  // ── Only trigger on an ACTIVE directional move — never on flat/stalled price ──
+  if (direction === "flat") {
+    return decide("SKIP", `Flat tick — no entry while price is inactive (count:${count})`);
+  }
+
   // ── Trigger 1: Fast-move — count==2 AND both ticks within FAST_MOVE_WINDOW_MS ──
   if (count === SIGNAL_LOG_AT && ms.tickTimestamps.length >= 2 && timeDiff <= FAST_MOVE_WINDOW_MS) {
     console.log(`[FAST MOVE TRIGGER] ${marketId} | ${dir.toUpperCase()} count:${count} timeDiff:${timeDiff}ms`);
@@ -303,25 +320,16 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     if (dir === "down") return decide("BUY_NO",  `Fast momentum: 2 DOWN ticks in ${timeDiff}ms`);
   }
 
-  // ── Trigger 2: Flat-hold — flat tick with count >= 2 ────────────────────
-  // A flat pause doesn't cancel an established signal — entry is still valid.
-  if (direction === "flat" && count >= SIGNAL_LOG_AT && (dir === "up" || dir === "down")) {
-    console.log(`[FLAT HOLD TRIGGER] ${marketId} | ${dir.toUpperCase()} count:${count}`);
-    if (dir === "up")   return decide("BUY_YES", `Flat pause — UP momentum at count:${count}`);
-    if (dir === "down") return decide("BUY_NO",  `Flat pause — DOWN momentum at count:${count}`);
-  }
+  // ── Trigger 2 (flat-hold) REMOVED — never enter on stalled price ──────────
 
-  // ── Trigger 3: Normal — count >= 3, any timing ───────────────────────────
+  // ── Trigger 3: Normal — count >= 3, current tick is active ───────────────
   if (count >= CONSECUTIVE_REQUIRED) {
     if (dir === "up")   return decide("BUY_YES", `Bullish: ${count} consecutive UP moves`);
     if (dir === "down") return decide("BUY_NO",  `Bearish: ${count} consecutive DOWN moves`);
   }
 
-  // Not enough momentum — SKIP
-  const skipReason = direction === "flat"
-    ? `Flat tick — momentum held at count:${count}`
-    : `Accumulating ${dir} — count ${count}/${CONSECUTIVE_REQUIRED}`;
-  return decide("SKIP", skipReason);
+  // Not enough momentum yet
+  return decide("SKIP", `Accumulating ${dir} — count ${count}/${CONSECUTIVE_REQUIRED}`);
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
