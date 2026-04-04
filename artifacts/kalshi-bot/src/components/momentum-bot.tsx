@@ -139,6 +139,7 @@ export function MomentumBot() {
   const [balanceFloor, setBalanceFloor]       = useState("0");
   const [maxSessionLoss, setMaxSessionLoss]   = useState("0");
   const [consecutiveLossLimit, setConsecutiveLossLimit] = useState("3");
+  const [betCost, setBetCost]                 = useState("0.30");
   const [showSettings, setShowSettings]       = useState(false);
 
   const enabled  = data?.enabled ?? false;
@@ -152,6 +153,7 @@ export function MomentumBot() {
         balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
         maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
         consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
+        betCostCents:         Math.round(parseFloat(betCost || "30") * 100),
       },
     });
   }
@@ -453,10 +455,25 @@ export function MomentumBot() {
                     />
                     <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session after N losses in a row</p>
                   </label>
+
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Bet Size ($)</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.05"
+                      value={betCost}
+                      onChange={e => setBetCost(e.target.value)}
+                      placeholder="0.30"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">Amount spent per trade — win scales proportionally (e.g. $0.30 at 50¢ → win $0.60)</p>
+                  </label>
                 </div>
 
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
                   <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Active guards on this session:</span></p>
+                  <p>· Bet size: ${((data?.betCostCents ?? 30) / 100).toFixed(2)} per trade</p>
                   <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Consec. losses: {data?.consecutiveLossLimit ?? 3} in a row</p>

@@ -6,4 +6,5 @@ export const momentumSettingsTable = pgTable("momentum_settings", {
   balanceFloorCents:    integer("balance_floor_cents").notNull().default(0),
   maxSessionLossCents:  integer("max_session_loss_cents").notNull().default(0),
   consecutiveLossLimit: integer("consecutive_loss_limit").notNull().default(0),
+  betCostCents:         integer("bet_cost_cents").notNull().default(30),
 });

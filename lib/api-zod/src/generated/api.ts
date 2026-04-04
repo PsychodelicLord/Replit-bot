@@ -281,6 +281,7 @@ export const MomentumBotAutoBody = zod.object({
   balanceFloorCents:    zod.number().int().min(0).optional(),
   maxSessionLossCents:  zod.number().int().min(0).optional(),
   consecutiveLossLimit: zod.number().int().min(0).optional(),
+  betCostCents:         zod.number().int().min(1).optional(),
 });
 
 export const MomentumBotStatus = zod.object({
@@ -299,6 +300,7 @@ export const MomentumBotStatus = zod.object({
   balanceFloorCents:   zod.number(),
   maxSessionLossCents: zod.number(),
   consecutiveLossLimit:zod.number(),
+  betCostCents:        zod.number(),
   allTimeWins:         zod.number().optional(),
   allTimeLosses:       zod.number().optional(),
   allTimePnlCents:     zod.number().optional(),

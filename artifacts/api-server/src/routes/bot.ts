@@ -232,7 +232,7 @@ router.post("/bot/momentum/auto", (req, res): void => {
   const parsed = MomentumBotAutoBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
 
-  const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit } = parsed.data;
+  const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents } = parsed.data;
 
   if (enabled && !isProductionDeployment()) {
     res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
@@ -244,6 +244,7 @@ router.post("/bot/momentum/auto", (req, res): void => {
     balanceFloorCents:    balanceFloorCents    ?? 0,
     maxSessionLossCents:  maxSessionLossCents  ?? 0,
     consecutiveLossLimit: consecutiveLossLimit ?? 3,
+    betCostCents:         betCostCents         ?? 30,
   });
 
   const state = enabled ? startMomentumBot() : stopMomentumBot();

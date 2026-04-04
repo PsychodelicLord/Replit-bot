@@ -105,6 +105,7 @@ export interface MomentumBotState {
   balanceFloorCents: number;
   maxSessionLossCents: number;
   consecutiveLossLimit: number;
+  betCostCents: number;        // how many cents to spend per trade (fractional contract support)
 }
 
 const state: MomentumBotState = {
@@ -124,12 +125,14 @@ const state: MomentumBotState = {
   balanceFloorCents: 0,
   maxSessionLossCents: 0,
   consecutiveLossLimit: 0,
+  betCostCents: 30,
 };
 
 export interface MomentumBotConfig {
   balanceFloorCents: number;     // 0 = disabled
   maxSessionLossCents: number;   // 0 = disabled
   consecutiveLossLimit: number;  // 0 = disabled
+  betCostCents: number;          // cents to spend per trade (min 1)
 }
 
 // Per-market momentum counter state
@@ -497,15 +500,18 @@ async function placeBuyOrder(
   ticker: string,
   side: "YES" | "NO",
   limitCents: number,
-): Promise<{ orderId: string; fillPrice: number } | null> {
+  betCostCents: number,
+): Promise<{ orderId: string; fillPrice: number; contractCount: number } | null> {
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
+  // Use cost-based ordering: specify how many cents to spend.
+  // Kalshi returns the actual fractional contract count filled.
   const payload = {
     ticker,
     client_order_id: clientOrderId,
-    type: "limit",
+    type:   "limit",
     action: "buy",
-    side: side.toLowerCase(),
-    count: 1,
+    side:   side.toLowerCase(),
+    cost:   betCostCents,   // cents to spend — Kalshi resolves fractional count
     yes_price: side === "YES" ? limitCents : undefined,
     no_price:  side === "NO"  ? limitCents : undefined,
   };
@@ -513,14 +519,15 @@ async function placeBuyOrder(
   console.log(`[ORDER PAYLOAD] ${JSON.stringify(payload)}`);
   try {
     const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
-      order?: { order_id?: string; yes_price?: number; no_price?: number }
+      order?: { order_id?: string; yes_price?: number; no_price?: number; count?: number }
     };
     console.log(`[ORDER RESPONSE] ${JSON.stringify(resp)}`);
-    const orderId = resp?.order?.order_id ?? clientOrderId;
-    const rawPrice = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
-    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : limitCents;
-    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢`);
-    return { orderId, fillPrice };
+    const orderId        = resp?.order?.order_id ?? clientOrderId;
+    const rawPrice       = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
+    const fillPrice      = rawPrice > 0 ? Math.round(rawPrice * 100) : limitCents;
+    const contractCount  = resp?.order?.count ?? Math.round(betCostCents / limitCents);
+    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${contractCount} cost:${betCostCents}¢`);
+    return { orderId, fillPrice, contractCount };
   } catch (err) {
     console.error(`[ORDER FAILED] ${String(err)}`);
     warn(`placeBuyOrder failed: ${String(err)}`, { ticker, side, limitCents });
@@ -624,10 +631,9 @@ export async function executeMomentumTrade(
   askCents: number,
 ): Promise<void> {
   // Buy near bid (not ask) to avoid instant drawdown
-  // For YES: bid. For NO: same principle (100 - yes_ask is the no_bid effectively)
   const limitCents = Math.min(askCents, bidCents + 1);
 
-  const result = await placeBuyOrder(ticker, side, limitCents);
+  const result = await placeBuyOrder(ticker, side, limitCents, state.betCostCents);
   if (!result) return;
 
   // Insert trade row to DB (fire-and-forget)
@@ -637,7 +643,7 @@ export async function executeMomentumTrade(
     marketTitle:    title,
     side,
     buyPriceCents:  result.fillPrice,
-    contractCount:  1,
+    contractCount:  result.contractCount,
     feeCents:       0,
     pnlCents:       null,
     status:         "open",
@@ -658,7 +664,7 @@ export async function executeMomentumTrade(
     marketTitle: title,
     side,
     entryPriceCents: result.fillPrice,
-    contractCount: 1,
+    contractCount: result.contractCount,
     enteredAt: Date.now(),
     lastSeenPriceCents: result.fillPrice,
     lastMovedAt: Date.now(),
@@ -925,6 +931,7 @@ export function saveMomentumConfig(): void {
     balanceFloorCents:    state.balanceFloorCents,
     maxSessionLossCents:  state.maxSessionLossCents,
     consecutiveLossLimit: state.consecutiveLossLimit,
+    betCostCents:         state.betCostCents,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -943,6 +950,7 @@ export async function loadMomentumConfig(): Promise<void> {
     state.balanceFloorCents    = r.balanceFloorCents;
     state.maxSessionLossCents  = r.maxSessionLossCents;
     state.consecutiveLossLimit = r.consecutiveLossLimit;
+    state.betCostCents         = r.betCostCents ?? 30;
 
     if (r.enabled) {
       console.log("[momentumBot] 🔄 Restoring enabled state from DB — auto-restarting bot");
@@ -1005,6 +1013,7 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.balanceFloorCents !== undefined) state.balanceFloorCents = cfg.balanceFloorCents;
   if (cfg.maxSessionLossCents !== undefined) state.maxSessionLossCents = cfg.maxSessionLossCents;
   if (cfg.consecutiveLossLimit !== undefined) state.consecutiveLossLimit = cfg.consecutiveLossLimit;
+  if (cfg.betCostCents !== undefined) state.betCostCents = cfg.betCostCents;
 }
 
 export function startMomentumBot(): MomentumBotState {
