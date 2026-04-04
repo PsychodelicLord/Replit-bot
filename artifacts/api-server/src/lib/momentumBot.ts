@@ -25,8 +25,9 @@ import { eq } from "drizzle-orm";
 const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB", "HYPE"];
 const ALLOWED_TICKER_PREFIXES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXDOGE15M", "KXXRP15M", "KXBNB15M", "KXHYPE15M"];
 
-const PRICE_MIN  = 20;
+const PRICE_MIN  = 20;   // start tracking a market when price is in this range
 const PRICE_MAX  = 80;
+const ENTRY_BUFFER_CENTS = 5; // allow entry even if momentum has pushed price ±5¢ outside range
 const SPREAD_MAX = 5;
 const MIN_MINUTES_REMAINING = 3;
 const MAX_POSITIONS = 2;
@@ -797,15 +798,20 @@ export async function scanMomentumMarkets(): Promise<void> {
       console.log(`[SCAN] ${coinLabel(market.ticker)} — zero prices (ask:${ask} bid:${bid}), skipping`);
       continue;
     }
-    if (mid < PRICE_MIN || mid > PRICE_MAX) {
-      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${PRICE_MIN}-${PRICE_MAX}¢ range, skipping`);
+    // Hard skip only if price is well outside range — momentum may have pushed it slightly past edge
+    if (mid < PRICE_MIN - ENTRY_BUFFER_CENTS || mid > PRICE_MAX + ENTRY_BUFFER_CENTS) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${PRICE_MIN - ENTRY_BUFFER_CENTS}-${PRICE_MAX + ENTRY_BUFFER_CENTS}¢ hard limit, skipping`);
       continue;
     }
     if (spread > SPREAD_MAX) {
       console.log(`[SCAN] ${coinLabel(market.ticker)} — spread ${spread}¢ > ${SPREAD_MAX}¢ max, skipping`);
       continue;
     }
-    inRangeCount++;
+    // Count as "in range" only within core range — used to detect stale market cache
+    if (mid >= PRICE_MIN && mid <= PRICE_MAX) inRangeCount++;
+    if (mid < PRICE_MIN || mid > PRICE_MAX) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ in buffer zone (${PRICE_MIN - ENTRY_BUFFER_CENTS}-${PRICE_MIN} or ${PRICE_MAX}-${PRICE_MAX + ENTRY_BUFFER_CENTS}¢) — momentum continuation allowed`);
+    }
 
     const decision = evaluateMomentum(market.ticker, mid);
 
@@ -850,18 +856,19 @@ export async function scanMomentumMarkets(): Promise<void> {
     if (openPositions.some(p => p.side === side && p.marketId === market.ticker)) continue;
 
     // ── Signal scoring: higher = better setup ─────────────────────────────
+    // Scalping mode: score only on momentum strength, spread, and time — NOT payout ratio.
+    // We're targeting 3-5¢ price movement, not holding to expiration.
+
     // Momentum strength (primary driver)
     const momentumScore  = (decision.upMoves + decision.downMoves) * 15;
-    // Bonus for fast/flat-hold signals (strong conviction)
-    const signalBonus    = decision.reason.includes("Fast momentum") ? 10
-                         : decision.reason.includes("Flat tick") ? 5 : 0;
-    // Price near 50¢ = more room to move either way
-    const priceScore     = (50 - Math.abs(mid - 50)) * 0.5;
+    // Bonus for fast signals (strong conviction)
+    const signalBonus    = decision.reason.includes("Fast momentum") ? 10 : 0;
     // Tighter spread = cheaper round-trip
     const spreadScore    = (SPREAD_MAX - spread) * 3;
     // More time left = more room to TP before expiry
     const timeScore      = Math.min(market.minutesRemaining, 10);
-    const score = momentumScore + signalBonus + priceScore + spreadScore + timeScore;
+    // NOTE: priceScore (distance from 50¢) intentionally removed — payout ratio is irrelevant for scalping
+    const score = momentumScore + signalBonus + spreadScore + timeScore;
 
     log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)} | ${decision.reason}`);
     dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)}`);
