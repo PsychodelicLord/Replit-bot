@@ -402,20 +402,50 @@ export function MomentumBot() {
             </div>
           )}
 
-          {/* Auto toggle */}
+          {/* Simulator toggle — visible above Auto Mode */}
           <div className="border-t border-white/5 pt-4 mt-4">
+            <div className={`flex items-center justify-between rounded-xl px-3 py-2.5 transition-colors ${simulatorMode ? "bg-violet-500/15 border border-violet-500/30" : "bg-white/[0.03] border border-white/5"}`}>
+              <div>
+                <p className="text-xs font-semibold text-violet-300">🎮 Paper Trading</p>
+                <p className="text-[10px] mt-0.5" style={{ color: simulatorMode ? "#a78bfa99" : "#475569" }}>
+                  {simulatorMode ? "Real markets, fake money — no real orders placed" : "Enable to test strategy without spending money"}
+                </p>
+              </div>
+              <button
+                onClick={() => setSimulatorMode(v => !v)}
+                disabled={enabled}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none shrink-0 ml-3 ${
+                  simulatorMode ? "bg-violet-500" : "bg-white/10"
+                } disabled:opacity-40`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                  simulatorMode ? "translate-x-6" : "translate-x-1"
+                }`} />
+              </button>
+            </div>
+            {enabled && (
+              <p className="text-[9px] text-slate-600 mt-1 pl-1">Stop the bot first to change trading mode</p>
+            )}
+          </div>
+
+          {/* Auto toggle */}
+          <div className="border-t border-white/5 pt-4 mt-2">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-semibold text-slate-300">Auto Mode</p>
                 <p className="text-[10px] text-slate-600 mt-0.5">
-                  {enabled ? "Scanning every 3s for clean setups" : "Tap to start momentum trading"}
+                  {enabled
+                    ? simulatorMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
+                    : "Tap to start momentum trading"}
                 </p>
               </div>
               <button
                 onClick={toggleAuto}
                 disabled={setAuto.isPending}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                  enabled ? "bg-sky-500/70" : "bg-white/10"
+                  enabled
+                    ? simulatorMode ? "bg-violet-500/70" : "bg-sky-500/70"
+                    : "bg-white/10"
                 }`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
@@ -425,9 +455,9 @@ export function MomentumBot() {
             </div>
 
             {enabled && !isPaused && (
-              <div className="flex items-center gap-1.5 mt-2 text-[10px] text-sky-400/70">
+              <div className={`flex items-center gap-1.5 mt-2 text-[10px] ${simulatorMode ? "text-violet-400/70" : "text-sky-400/70"}`}>
                 <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
-                <span>Scanning BTC · ETH · SOL — waiting for strong signal</span>
+                <span>{simulatorMode ? "🎮 Paper trading — tracking imaginary P&L" : "Scanning BTC · ETH · SOL — waiting for strong signal"}</span>
               </div>
             )}
           </div>
