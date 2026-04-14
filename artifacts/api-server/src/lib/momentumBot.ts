@@ -104,6 +104,13 @@ export interface MomentumBotState {
   maxSessionLossCents: number;
   consecutiveLossLimit: number;
   betCostCents: number;        // how many cents to spend per trade (fractional contract support)
+
+  // Simulator (paper trading) state — uses real market data, zero real money
+  simulatorMode: boolean;
+  simPnlCents: number;         // paper P&L this session
+  simWins: number;
+  simLosses: number;
+  simOpenTradeCount: number;
 }
 
 const state: MomentumBotState = {
@@ -124,6 +131,11 @@ const state: MomentumBotState = {
   maxSessionLossCents: 0,
   consecutiveLossLimit: 0,
   betCostCents: 30,
+  simulatorMode: false,
+  simPnlCents: 0,
+  simWins: 0,
+  simLosses: 0,
+  simOpenTradeCount: 0,
 };
 
 export interface MomentumBotConfig {
@@ -131,6 +143,7 @@ export interface MomentumBotConfig {
   maxSessionLossCents: number;   // 0 = disabled
   consecutiveLossLimit: number;  // 0 = disabled
   betCostCents: number;          // cents to spend per trade (min 1)
+  simulatorMode?: boolean;       // paper trading — real data, fake money
 }
 
 // Per-market momentum counter state
@@ -138,6 +151,9 @@ const marketMomentum = new Map<string, MarketMomentumState>();
 
 // Open positions tracked in-memory (no DB read needed for sell decisions)
 const openPositions: MomentumPosition[] = [];
+
+// Paper positions for simulator mode — same structure, no real orders
+const simPositions: MomentumPosition[] = [];
 
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expiry ms
@@ -660,6 +676,92 @@ export async function executeMomentumTrade(
   dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
 }
 
+// ─── Simulator (Paper Trading) ───────────────────────────────────────────────
+/** Create a paper position — identical logic to executeMomentumTrade but no Kalshi API call */
+function enterSimPosition(
+  ticker: string,
+  title: string,
+  side: "YES" | "NO",
+  bidCents: number,
+  askCents: number,
+): void {
+  const limitCents    = Math.min(askCents, bidCents + 1);
+  const contractCount = state.betCostCents / Math.max(limitCents, 1);
+  const tradeId       = -(Date.now());
+
+  const pos: MomentumPosition = {
+    tradeId,
+    marketId: ticker,
+    marketTitle: title,
+    side,
+    entryPriceCents: limitCents,
+    contractCount,
+    enteredAt: Date.now(),
+    lastSeenPriceCents: limitCents,
+    lastMovedAt: Date.now(),
+    buyOrderId: null,
+  };
+
+  simPositions.push(pos);
+  state.simOpenTradeCount = simPositions.length;
+  state.status = "IN_TRADE";
+
+  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢ | contracts:${contractCount.toFixed(3)} cost:${state.betCostCents}¢`);
+  dbLog("info", `[SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢`);
+}
+
+/** Close a paper position at current price — no Kalshi API call */
+function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason: string): void {
+  const rawGain  = pos.side === "YES"
+    ? exitPriceCents - pos.entryPriceCents
+    : pos.entryPriceCents - exitPriceCents;
+  const pnlCents = Math.round(rawGain * pos.contractCount);
+
+  const idx = simPositions.findIndex(p => p.tradeId === pos.tradeId);
+  if (idx >= 0) simPositions.splice(idx, 1);
+
+  state.simPnlCents      += pnlCents;
+  state.simOpenTradeCount = simPositions.length;
+  if (pnlCents > 0) state.simWins++; else state.simLosses++;
+
+  marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+
+  const pnlSign = pnlCents >= 0 ? "+" : "";
+  log(`🎮 [SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} | entry:${pos.entryPriceCents}¢ exit:${exitPriceCents}¢ pnl:${pnlSign}${pnlCents}¢ | ${reason}`);
+  log(`🎮 [SIM] Session: ${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢ | W:${state.simWins} L:${state.simLosses}`);
+  dbLog("info", `[SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} pnl:${pnlSign}${pnlCents}¢ | session:${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢`);
+}
+
+/** Monitor open paper positions — same TP/SL/stale logic as real monitor */
+async function monitorSimPositions(): Promise<void> {
+  if (simPositions.length === 0) return;
+  const now = Date.now();
+  const toClose: { pos: MomentumPosition; exitPrice: number; reason: string }[] = [];
+
+  for (const pos of [...simPositions]) {
+    let currentMid = pos.lastSeenPriceCents;
+    try {
+      const ob = await fetchMarketOrderBook(pos.marketId);
+      if (ob) currentMid = ob.mid;
+    } catch { /* keep last known */ }
+
+    const gain = pos.side === "YES"
+      ? currentMid - pos.entryPriceCents
+      : pos.entryPriceCents - currentMid;
+
+    if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) pos.lastMovedAt = now;
+    pos.lastSeenPriceCents = currentMid;
+
+    if      (gain >= TP_CENTS)                  toClose.push({ pos, exitPrice: currentMid, reason: `TP +${gain}¢` });
+    else if (gain <= -SL_CENTS)                 toClose.push({ pos, exitPrice: currentMid, reason: `SL ${gain}¢` });
+    else if (now - pos.lastMovedAt >= STALE_MS) toClose.push({ pos, exitPrice: currentMid, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
+  }
+
+  for (const { pos, exitPrice, reason } of toClose) closeSimPosition(pos, exitPrice, reason);
+
+  state.simOpenTradeCount = simPositions.length;
+}
+
 // ─── Sell Monitor ───────────────────────────────────────────────────────────
 async function runSellMonitor(): Promise<void> {
   if (openPositions.length === 0) return;
@@ -727,12 +829,13 @@ export async function scanMomentumMarkets(): Promise<void> {
     return;
   }
 
-  if (openPositions.length >= MAX_POSITIONS) {
+  const activePositions = state.simulatorMode ? simPositions : openPositions;
+  if (activePositions.length >= MAX_POSITIONS) {
     state.status = "IN_TRADE";
     return;
   }
 
-  state.status = openPositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
+  state.status = activePositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
 
   const markets = await fetchActiveMarkets();
   if (markets.length === 0) {
@@ -759,7 +862,7 @@ export async function scanMomentumMarkets(): Promise<void> {
   let inRangeCount = 0;
 
   for (const market of markets) {
-    if (openPositions.some(p => p.marketId === market.ticker)) continue;
+    if (activePositions.some(p => p.marketId === market.ticker)) continue;
     const cooldown = marketCooldowns.get(market.ticker);
     if (cooldown && Date.now() < cooldown) continue;
 
@@ -820,7 +923,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.totalMove}¢ timeDiff:${decision.timeDiff}ms — all filters passed`);
 
     const side = decision.action === "BUY_YES" ? "YES" : "NO";
-    if (openPositions.some(p => p.side === side && p.marketId === market.ticker)) continue;
+    if (activePositions.some(p => p.side === side && p.marketId === market.ticker)) continue;
 
     // ── Signal scoring: higher = better setup ─────────────────────────────
     // Scalping mode: score only on momentum strength, spread, and time — NOT payout ratio.
@@ -855,7 +958,7 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   // ── Phase 3: Execute top-ranked signals up to MAX_POSITIONS ──────────────
   for (const candidate of candidates) {
-    if (openPositions.length >= MAX_POSITIONS) break;
+    if (activePositions.length >= MAX_POSITIONS) break;
 
     // Safety guard — if bot was stopped between Phase 1 and Phase 3, abort
     if (!state.enabled) {
@@ -863,27 +966,35 @@ export async function scanMomentumMarkets(): Promise<void> {
       return;
     }
 
-    // Balance floor check — use the already-refreshed balance from main bot state
-    if (state.balanceFloorCents > 0) {
-      try {
-        await refreshBalance(); // bring it up to date before checking
-        const balance = getBotState().balanceCents;
-        console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${state.balanceFloorCents}¢`);
-        if (balance > 0 && balance < state.balanceFloorCents) {
-          stopMomentumBot(`Balance floor hit: ${balance}¢ < ${state.balanceFloorCents}¢ floor`);
-          return;
-        }
-      } catch { /* non-blocking */ }
-    }
-
     const { market, ob, side } = candidate;
-    console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | enabled:${state.enabled} positions:${openPositions.length}`);
-    log(
-      `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
-      { market: market.ticker, price: ob.mid, spread: ob.spread },
-    );
-    await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask);
-    console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} enabled:${state.enabled}`);
+
+    if (state.simulatorMode) {
+      // ── Simulator: paper position, no real money ──────────────────────────
+      console.log(`[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`);
+      enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask);
+    } else {
+      // ── Live mode: real Kalshi order ─────────────────────────────────────
+      // Balance floor check — use the already-refreshed balance from main bot state
+      if (state.balanceFloorCents > 0) {
+        try {
+          await refreshBalance();
+          const balance = getBotState().balanceCents;
+          console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${state.balanceFloorCents}¢`);
+          if (balance > 0 && balance < state.balanceFloorCents) {
+            stopMomentumBot(`Balance floor hit: ${balance}¢ < ${state.balanceFloorCents}¢ floor`);
+            return;
+          }
+        } catch { /* non-blocking */ }
+      }
+
+      console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length}`);
+      log(
+        `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
+        { market: market.ticker, price: ob.mid, spread: ob.spread },
+      );
+      await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask);
+      console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length}`);
+    }
   }
 
   // If no markets were in tradeable range, cache is likely stale (end-of-cycle)
@@ -892,8 +1003,9 @@ export async function scanMomentumMarkets(): Promise<void> {
     _marketCache = null;
   }
 
-  state.openTradeCount = openPositions.length;
-  if (openPositions.length > 0) state.status = "IN_TRADE";
+  state.openTradeCount    = openPositions.length;
+  state.simOpenTradeCount = simPositions.length;
+  if (activePositions.length > 0) state.status = "IN_TRADE";
 }
 
 // ─── Config Persistence ─────────────────────────────────────────────────────
@@ -906,6 +1018,7 @@ export function saveMomentumConfig(): void {
     maxSessionLossCents:  state.maxSessionLossCents,
     consecutiveLossLimit: state.consecutiveLossLimit,
     betCostCents:         state.betCostCents,
+    simulatorMode:        state.simulatorMode,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -925,6 +1038,7 @@ export async function loadMomentumConfig(): Promise<void> {
     state.maxSessionLossCents  = r.maxSessionLossCents;
     state.consecutiveLossLimit = r.consecutiveLossLimit;
     state.betCostCents         = r.betCostCents ?? 30;
+    state.simulatorMode        = r.simulatorMode ?? false;
 
     if (r.enabled) {
       console.log("[momentumBot] 🔄 Restoring enabled state from DB — auto-restarting bot");
@@ -992,6 +1106,8 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.maxSessionLossCents !== undefined) state.maxSessionLossCents = cfg.maxSessionLossCents;
   if (cfg.consecutiveLossLimit !== undefined) state.consecutiveLossLimit = cfg.consecutiveLossLimit;
   if (cfg.betCostCents !== undefined) state.betCostCents = cfg.betCostCents;
+  if (cfg.simulatorMode !== undefined) state.simulatorMode = cfg.simulatorMode;
+  saveMomentumConfig();
 }
 
 export function startMomentumBot(): MomentumBotState {
@@ -1005,10 +1121,21 @@ export function startMomentumBot(): MomentumBotState {
   state.pausedUntilMs = null;
   state.pauseReason = null;
 
-  // Kick off sell monitor
+  // Reset sim stats on each start
+  if (state.simulatorMode) {
+    state.simPnlCents  = 0;
+    state.simWins      = 0;
+    state.simLosses    = 0;
+    simPositions.length = 0;
+    state.simOpenTradeCount = 0;
+    log("🎮 [SIM] Simulator mode — paper trading active, no real orders will be placed");
+  }
+
+  // Kick off sell monitor (handles both real and sim positions)
   if (!sellTimer) {
     sellTimer = setInterval(() => {
       runSellMonitor().catch(err => warn(`Sell monitor error: ${String(err)}`));
+      monitorSimPositions().catch(err => warn(`Sim monitor error: ${String(err)}`));
     }, SELL_INTERVAL_MS);
   }
 

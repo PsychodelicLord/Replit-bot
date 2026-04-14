@@ -282,6 +282,7 @@ export const MomentumBotAutoBody = zod.object({
   maxSessionLossCents:  zod.number().int().min(0).optional(),
   consecutiveLossLimit: zod.number().int().min(0).optional(),
   betCostCents:         zod.number().int().min(1).optional(),
+  simulatorMode:        zod.boolean().optional(),
 });
 
 export const MomentumBotStatus = zod.object({
@@ -301,6 +302,11 @@ export const MomentumBotStatus = zod.object({
   maxSessionLossCents: zod.number(),
   consecutiveLossLimit:zod.number(),
   betCostCents:        zod.number(),
+  simulatorMode:       zod.boolean(),
+  simPnlCents:         zod.number(),
+  simWins:             zod.number(),
+  simLosses:           zod.number(),
+  simOpenTradeCount:   zod.number(),
   allTimeWins:         zod.number().optional(),
   allTimeLosses:       zod.number().optional(),
   allTimePnlCents:     zod.number().optional(),

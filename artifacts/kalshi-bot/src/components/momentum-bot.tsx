@@ -141,10 +141,12 @@ export function MomentumBot() {
   const [consecutiveLossLimit, setConsecutiveLossLimit] = useState("3");
   const [betCost, setBetCost]                 = useState("0.30");
   const [showSettings, setShowSettings]       = useState(false);
+  const [simulatorMode, setSimulatorMode]     = useState(false);
 
   const enabled  = data?.enabled ?? false;
   const status   = data?.status;
   const isPaused = status === "PAUSED";
+  const isSimMode = data?.simulatorMode ?? simulatorMode;
 
   function toggleAuto() {
     setAuto.mutate({
@@ -154,11 +156,13 @@ export function MomentumBot() {
         maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
         consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
         betCostCents:         Math.round(parseFloat(betCost || "30") * 100),
+        simulatorMode,
       },
     });
   }
 
   const sessionPnl = data?.sessionPnlCents ?? 0;
+  const simPnl     = data?.simPnlCents ?? 0;
   const pausedMins = data?.pausedUntilMs
     ? Math.max(0, Math.ceil((data.pausedUntilMs - Date.now()) / 60_000))
     : null;
@@ -314,8 +318,40 @@ export function MomentumBot() {
             </div>
           </div>
 
+          {/* Simulator mode banner + stats */}
+          {isSimMode && (
+            <div className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] font-bold tracking-widest uppercase text-violet-300 bg-violet-500/20 px-2 py-0.5 rounded-full">Paper Trading</span>
+                <span className="text-[10px] text-violet-400">No real money — real market data</span>
+              </div>
+              {enabled && (
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
+                    <p className="text-[9px] text-violet-400 uppercase tracking-widest">Sim Open</p>
+                    <p className="text-base font-bold text-violet-300 mt-0.5">{data?.simOpenTradeCount ?? 0}</p>
+                  </div>
+                  <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
+                    <p className="text-[9px] text-violet-400 uppercase tracking-widest">Sim W / L</p>
+                    <div className="flex items-baseline justify-center gap-1 mt-0.5">
+                      <span className="text-sm font-bold text-emerald-400">{data?.simWins ?? 0}</span>
+                      <span className="text-slate-600 text-xs">/</span>
+                      <span className="text-sm font-bold text-red-400">{data?.simLosses ?? 0}</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
+                    <p className="text-[9px] text-violet-400 uppercase tracking-widest">Sim P&L</p>
+                    <p className={`text-sm font-bold mt-0.5 ${simPnl > 0 ? "text-emerald-400" : simPnl < 0 ? "text-red-400" : "text-violet-300"}`}>
+                      {simPnl >= 0 ? "+" : ""}{(simPnl / 100).toFixed(2)}¢
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* All-time stats from DB */}
-          {((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
+          {!isSimMode && ((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
             <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between mt-4">
               <p className="text-[10px] text-slate-500 uppercase tracking-widest">All-Time</p>
               <div className="flex items-center gap-3 text-xs">
@@ -469,6 +505,23 @@ export function MomentumBot() {
                     />
                     <p className="text-[9px] text-slate-600 mt-0.5">Amount spent per trade — win scales proportionally (e.g. $0.30 at 50¢ → win $0.60)</p>
                   </label>
+
+                  {/* Simulator toggle */}
+                  <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-2.5">
+                    <label className="flex items-center justify-between cursor-pointer">
+                      <div>
+                        <span className="text-[10px] text-violet-300 font-semibold block">Paper Trading (Simulator)</span>
+                        <span className="text-[9px] text-violet-500">Scans real markets, places NO real orders — tracks imaginary P&L</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSimulatorMode(v => !v)}
+                        className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ml-3 ${simulatorMode ? "bg-violet-500" : "bg-white/10"}`}
+                      >
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${simulatorMode ? "translate-x-4" : "translate-x-0"}`} />
+                      </button>
+                    </label>
+                  </div>
                 </div>
 
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
