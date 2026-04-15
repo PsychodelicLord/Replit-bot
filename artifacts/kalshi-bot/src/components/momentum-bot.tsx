@@ -1,7 +1,26 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useGetMomentumBotStatus, useSetMomentumBotAuto, getGetMomentumBotStatusQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Clock, RefreshCw } from "lucide-react";
+
+type DebugMarket = { ticker: string; minutesRemaining: number; askCents: number; bidCents: number };
+type DebugCounter = { lastPrice: number | null; upMoves: number; downMoves: number; flatMoves: number; windowSize: number };
+type DebugData = {
+  filteredMarkets: DebugMarket[];
+  momentumCounters: Record<string, DebugCounter>;
+  config: { DOMINANCE_REQUIRED: number; TICK_WINDOW_SIZE: number };
+};
+
+const COIN_LABELS: Record<string, string> = {
+  KXBTC: "BTC", KXETH: "ETH", KXSOL: "SOL", KXDOGE: "DOGE",
+  KXXRP: "XRP", KXBNB: "BNB", KXHYPE: "HYPE",
+};
+function coinLabel(ticker: string) {
+  for (const [prefix, label] of Object.entries(COIN_LABELS)) {
+    if (ticker.startsWith(prefix)) return label;
+  }
+  return ticker.slice(0, 6);
+}
 
 // ── Lightning animation styles ────────────────────────────────────────────────
 const LIGHTNING_STYLES = `
@@ -119,6 +138,21 @@ export function MomentumBot() {
       onSuccess: () => queryClient.invalidateQueries({ queryKey: getGetMomentumBotStatusQueryKey() }),
     },
   });
+
+  // ── Live scan debug data ─────────────────────────────────────────────────
+  const [debugData, setDebugData] = useState<DebugData | null>(null);
+  const fetchDebug = useCallback(async () => {
+    try {
+      const res = await fetch("/api/bot/momentum/debug");
+      if (res.ok) setDebugData(await res.json());
+    } catch { /* non-fatal */ }
+  }, []);
+
+  useEffect(() => {
+    fetchDebug();
+    const id = setInterval(fetchDebug, 15_000);
+    return () => clearInterval(id);
+  }, [fetchDebug]);
 
   // ── Signal flash state ───────────────────────────────────────────────────
   const [signalFlash, setSignalFlash] = useState(false);
@@ -405,6 +439,77 @@ export function MomentumBot() {
             <div className="space-y-1 mt-4">
               <p className="text-[10px] text-slate-600 uppercase tracking-widest">Last Decision</p>
               <DecisionChip decision={data.lastDecision} />
+            </div>
+          )}
+
+          {/* Live Scan Panel */}
+          {debugData && debugData.filteredMarkets.length > 0 && (
+            <div className="mt-4 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] text-slate-600 uppercase tracking-widest">Live Markets</p>
+                <span className="text-[9px] text-slate-700">need {isSimMode ? 2 : (debugData.config?.DOMINANCE_REQUIRED ?? 3)}/5 ticks same dir</span>
+              </div>
+              {debugData.filteredMarkets.map(m => {
+                const mid = Math.round((m.askCents + m.bidCents) / 2);
+                const spread = m.askCents - m.bidCents;
+                const counter = debugData.momentumCounters[m.ticker];
+                const up   = counter?.upMoves   ?? 0;
+                const down = counter?.downMoves  ?? 0;
+                const flat = counter?.flatMoves  ?? 0;
+                const total = counter?.windowSize ?? 0;
+                const needed = isSimMode ? 2 : (debugData.config?.DOMINANCE_REQUIRED ?? 3);
+                const hasSignal = up >= needed || down >= needed;
+                const isFlat = total > 0 && up === 0 && down === 0;
+                const coin = coinLabel(m.ticker);
+
+                return (
+                  <div
+                    key={m.ticker}
+                    className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 border text-[10px] ${
+                      hasSignal
+                        ? "bg-emerald-500/10 border-emerald-500/25"
+                        : "bg-white/[0.02] border-white/5"
+                    }`}
+                  >
+                    <span className="font-bold text-slate-300 w-9 shrink-0">{coin}</span>
+                    <span className="text-slate-500 w-8 shrink-0">{mid}¢</span>
+                    <span className="text-slate-700 w-10 shrink-0">±{spread}¢</span>
+                    <div className="flex gap-0.5 items-center flex-1">
+                      {total === 0 ? (
+                        <span className="text-slate-700">waiting…</span>
+                      ) : (
+                        <>
+                          {Array.from({ length: up }).map((_, i) => (
+                            <span key={`u${i}`} className="w-2 h-2 rounded-sm bg-emerald-500/70" title="up" />
+                          ))}
+                          {Array.from({ length: down }).map((_, i) => (
+                            <span key={`d${i}`} className="w-2 h-2 rounded-sm bg-red-500/70" title="down" />
+                          ))}
+                          {Array.from({ length: flat }).map((_, i) => (
+                            <span key={`f${i}`} className="w-2 h-2 rounded-sm bg-white/10" title="flat" />
+                          ))}
+                        </>
+                      )}
+                    </div>
+                    <span className={`shrink-0 font-bold ${
+                      hasSignal ? "text-emerald-400" : isFlat ? "text-slate-700" : "text-slate-600"
+                    }`}>
+                      {hasSignal ? (up >= needed ? "▲ FIRE" : "▼ FIRE") : isFlat ? "flat" : `${Math.max(up,down)}/${needed}`}
+                    </span>
+                    <span className="text-slate-700 shrink-0">{m.minutesRemaining.toFixed(0)}m</span>
+                  </div>
+                );
+              })}
+              <p className="text-[9px] text-slate-700 pl-1">
+                <span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 mr-1 align-middle" />up
+                <span className="inline-block w-2 h-2 rounded-sm bg-red-500/70 mx-1 ml-2 align-middle" />down
+                <span className="inline-block w-2 h-2 rounded-sm bg-white/10 mx-1 ml-2 align-middle" />flat
+              </p>
+            </div>
+          )}
+          {debugData && debugData.filteredMarkets.length === 0 && (
+            <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 text-[10px] text-slate-600">
+              No active markets in price range — waiting for next 15-min cycle to open
             </div>
           )}
 
