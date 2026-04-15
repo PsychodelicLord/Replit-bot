@@ -422,10 +422,12 @@ export async function refreshBalance(): Promise<void> {
   try {
     const resp = await kalshiFetch("GET", "/portfolio/balance");
     console.log(`[BALANCE RAW] ${JSON.stringify(resp)}`);
-    const r = resp as { balance?: { balance?: number } };
-    const balanceDollars = r?.balance?.balance ?? 0;
-    state.balanceCents = Math.round(balanceDollars * 100);
-    console.log(`[BALANCE PARSED] dollars:${balanceDollars} cents:${state.balanceCents}`);
+    // Kalshi returns { balance: <cents as integer>, portfolio_value: <cents>, ... }
+    const r = resp as { balance?: number; balance_cents?: number };
+    const rawCents = r?.balance ?? r?.balance_cents ?? 0;
+    // If value looks like dollars (< 20 and non-zero), convert; otherwise treat as cents
+    state.balanceCents = rawCents > 0 && rawCents < 20 ? Math.round(rawCents * 100) : rawCents;
+    console.log(`[BALANCE PARSED] raw:${rawCents} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`);
   } catch (err) {
     console.log(`[BALANCE ERROR] ${String(err)}`);
     // non-fatal; keep last known value
