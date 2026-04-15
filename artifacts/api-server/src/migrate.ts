@@ -55,6 +55,15 @@ export async function runMigrations(): Promise<void> {
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS price_max INTEGER NOT NULL DEFAULT 80
     `);
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS sim_wins INTEGER NOT NULL DEFAULT 0
+    `);
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS sim_losses INTEGER NOT NULL DEFAULT 0
+    `);
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS sim_pnl_cents INTEGER NOT NULL DEFAULT 0
+    `);
 
     console.log("[migrate] Tables ready.");
   } catch (err) {

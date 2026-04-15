@@ -3,6 +3,8 @@ import { useGetMomentumBotStatus, useSetMomentumBotAuto, getGetMomentumBotStatus
 import { useQueryClient } from "@tanstack/react-query";
 import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Clock, RefreshCw } from "lucide-react";
 
+const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
+
 type DebugMarket = { ticker: string; minutesRemaining: number; askCents: number; bidCents: number };
 type DebugCounter = { lastPrice: number | null; upMoves: number; downMoves: number; flatMoves: number; windowSize: number };
 type DebugData = {
@@ -366,26 +368,37 @@ export function MomentumBot() {
                 <span className="text-[10px] text-violet-400">No real money — real market data</span>
               </div>
               {enabled && (
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
-                    <p className="text-[9px] text-violet-400 uppercase tracking-widest">Sim Open</p>
-                    <p className="text-base font-bold text-violet-300 mt-0.5">{data?.simOpenTradeCount ?? 0}</p>
-                  </div>
-                  <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
-                    <p className="text-[9px] text-violet-400 uppercase tracking-widest">Sim W / L</p>
-                    <div className="flex items-baseline justify-center gap-1 mt-0.5">
-                      <span className="text-sm font-bold text-emerald-400">{data?.simWins ?? 0}</span>
-                      <span className="text-slate-600 text-xs">/</span>
-                      <span className="text-sm font-bold text-red-400">{data?.simLosses ?? 0}</span>
+                <>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
+                      <p className="text-[9px] text-violet-400 uppercase tracking-widest">Open</p>
+                      <p className="text-base font-bold text-violet-300 mt-0.5">{data?.simOpenTradeCount ?? 0}</p>
+                    </div>
+                    <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
+                      <p className="text-[9px] text-violet-400 uppercase tracking-widest">Lifetime W / L</p>
+                      <div className="flex items-baseline justify-center gap-1 mt-0.5">
+                        <span className="text-sm font-bold text-emerald-400">{data?.simWins ?? 0}</span>
+                        <span className="text-slate-600 text-xs">/</span>
+                        <span className="text-sm font-bold text-red-400">{data?.simLosses ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
+                      <p className="text-[9px] text-violet-400 uppercase tracking-widest">Lifetime P&L</p>
+                      <p className={`text-sm font-bold mt-0.5 ${simPnl > 0 ? "text-emerald-400" : simPnl < 0 ? "text-red-400" : "text-violet-300"}`}>
+                        {simPnl >= 0 ? "+" : ""}{(simPnl / 100).toFixed(2)}¢
+                      </p>
                     </div>
                   </div>
-                  <div className="rounded-lg border border-violet-500/20 bg-black/20 p-2 text-center">
-                    <p className="text-[9px] text-violet-400 uppercase tracking-widest">Sim P&L</p>
-                    <p className={`text-sm font-bold mt-0.5 ${simPnl > 0 ? "text-emerald-400" : simPnl < 0 ? "text-red-400" : "text-violet-300"}`}>
-                      {simPnl >= 0 ? "+" : ""}{(simPnl / 100).toFixed(2)}¢
-                    </p>
-                  </div>
-                </div>
+                  <button
+                    onClick={async () => {
+                      if (!confirm("Reset lifetime sim scoreboard to 0?")) return;
+                      await fetch(`${BASE_URL}api/bot/momentum/reset-sim`, { method: "POST" });
+                    }}
+                    className="mt-1.5 w-full text-[9px] text-slate-600 hover:text-slate-400 transition-colors text-center py-0.5"
+                  >
+                    reset scoreboard
+                  </button>
+                </>
               )}
             </div>
           )}

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
-import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets } from "../lib/momentumBot";
+import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
 import {
@@ -228,6 +228,10 @@ router.get("/bot/momentum/debug", async (_req, res): Promise<void> => {
   }
 });
 
+router.post("/bot/momentum/reset-sim", (_req, res): void => {
+  res.json(MomentumBotStatus.parse(resetSimStats()));
+});
+
 router.post("/bot/momentum/auto", (req, res): void => {
   const parsed = MomentumBotAutoBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
@@ -244,7 +248,7 @@ router.post("/bot/momentum/auto", (req, res): void => {
   updateMomentumConfig({
     balanceFloorCents:    balanceFloorCents    ?? 0,
     maxSessionLossCents:  maxSessionLossCents  ?? 0,
-    consecutiveLossLimit: consecutiveLossLimit ?? 3,
+    consecutiveLossLimit: consecutiveLossLimit ?? 0,
     betCostCents:         betCostCents         ?? 30,
     simulatorMode:        simulatorMode        ?? false,
     priceMin:             priceMin             ?? 20,

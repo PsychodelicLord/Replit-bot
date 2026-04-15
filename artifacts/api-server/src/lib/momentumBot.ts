@@ -745,8 +745,9 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
 
   const pnlSign = pnlCents >= 0 ? "+" : "";
   log(`🎮 [SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} | entry:${pos.entryPriceCents}¢ exit:${exitPriceCents}¢ pnl:${pnlSign}${pnlCents}¢ | ${reason}`);
-  log(`🎮 [SIM] Session: ${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢ | W:${state.simWins} L:${state.simLosses}`);
-  dbLog("info", `[SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} pnl:${pnlSign}${pnlCents}¢ | session:${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢`);
+  log(`🎮 [SIM] Lifetime: ${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢ | W:${state.simWins} L:${state.simLosses}`);
+  dbLog("info", `[SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} pnl:${pnlSign}${pnlCents}¢ | lifetime:${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢ W:${state.simWins} L:${state.simLosses}`);
+  saveMomentumConfig(); // persist sim stats after every trade so restarts never lose them
 }
 
 /** Monitor open paper positions — same TP/SL/stale logic as real monitor */
@@ -1059,6 +1060,9 @@ export function saveMomentumConfig(): void {
     simulatorMode:        state.simulatorMode,
     priceMin:             state.priceMin,
     priceMax:             state.priceMax,
+    simWins:              state.simWins,
+    simLosses:            state.simLosses,
+    simPnlCents:          state.simPnlCents,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -1085,6 +1089,10 @@ export async function loadMomentumConfig(): Promise<void> {
       state.simulatorMode        = r.simulatorMode ?? false;
       state.priceMin             = r.priceMin ?? 20;
       state.priceMax             = r.priceMax ?? 80;
+      // Restore persisted sim stats so restarts don't wipe the scoreboard
+      state.simWins     = r.simWins    ?? 0;
+      state.simLosses   = r.simLosses  ?? 0;
+      state.simPnlCents = r.simPnlCents ?? 0;
 
       if (r.enabled) {
         console.log(`[momentumBot] 🔄 Restoring enabled state from DB (attempt ${attempt}) — auto-restarting bot | sim:${state.simulatorMode}`);
@@ -1177,14 +1185,10 @@ export function startMomentumBot(): MomentumBotState {
   state.pausedUntilMs = null;
   state.pauseReason = null;
 
-  // Reset sim stats on each start
   if (state.simulatorMode) {
-    state.simPnlCents  = 0;
-    state.simWins      = 0;
-    state.simLosses    = 0;
     simPositions.length = 0;
     state.simOpenTradeCount = 0;
-    log("🎮 [SIM] Simulator mode — paper trading active, no real orders will be placed");
+    log(`🎮 [SIM] Simulator mode — paper trading active, no real orders will be placed | lifetime: W:${state.simWins} L:${state.simLosses} pnl:${state.simPnlCents}¢`);
   }
 
   // Kick off sell monitor (handles both real and sim positions)
@@ -1205,6 +1209,18 @@ export function startMomentumBot(): MomentumBotState {
   log("▶️  Momentum Bot STARTED");
   dbLog("info", `[MOMENTUM] ▶️ Momentum Bot STARTED — scanning every ${SCAN_INTERVAL_MS / 1000}s for ${ALLOWED_COINS.join(",")} 15-min markets`);
   saveMomentumConfig(); // persist enabled=true to DB so Railway restarts restore state
+  return getMomentumBotState();
+}
+
+/** Manually clear lifetime sim scoreboard and save to DB */
+export function resetSimStats(): MomentumBotState {
+  state.simWins     = 0;
+  state.simLosses   = 0;
+  state.simPnlCents = 0;
+  simPositions.length = 0;
+  state.simOpenTradeCount = 0;
+  log("🎮 [SIM] Scoreboard reset by user");
+  saveMomentumConfig();
   return getMomentumBotState();
 }
 
