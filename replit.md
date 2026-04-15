@@ -2,7 +2,7 @@
 
 ## Overview
 
-Kalshi Scalping Bot — automatically scans 15-minute Kalshi prediction markets and scalps small price differences (5–25 cents) all day. Max bet per trade: $0.59. Skips any market with 10 minutes or less remaining.
+Kalshi Instinct Scalper — automated 24/7 momentum-based trading bot for Kalshi 15-minute crypto prediction markets (BTC/ETH/SOL/DOGE/XRP/BNB/HYPE). Detects directional price momentum and scalps 3¢ TP / 4¢ SL. Has a sim mode for risk-free testing with real market data.
 
 ## Stack
 
@@ -11,9 +11,8 @@ Kalshi Scalping Bot — automatically scans 15-minute Kalshi prediction markets 
 - **Package manager**: pnpm
 - **TypeScript version**: 5.9
 - **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
+- **Database**: PostgreSQL + Drizzle ORM (Neon on Railway, local on Replit)
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
 - **Frontend**: React + Vite (dark trading terminal theme)
 
@@ -22,7 +21,7 @@ Kalshi Scalping Bot — automatically scans 15-minute Kalshi prediction markets 
 ```text
 artifacts-monorepo/
 ├── artifacts/
-│   ├── api-server/         # Express API server + Kalshi bot engine
+│   ├── api-server/         # Express API server + Kalshi momentum bot engine
 │   └── kalshi-bot/         # React dashboard (dark terminal UI)
 ├── lib/
 │   ├── api-spec/           # OpenAPI spec + Orval codegen config
@@ -30,43 +29,64 @@ artifacts-monorepo/
 │   ├── api-zod/            # Generated Zod schemas from OpenAPI
 │   └── db/                 # Drizzle ORM schema + DB connection
 ├── scripts/                # Utility scripts
+├── push.sh                 # Push to Railway via GitHub
 ```
 
-## Bot Logic (artifacts/api-server/src/lib/kalshi-bot.ts)
+## Momentum Bot Logic (artifacts/api-server/src/lib/momentumBot.ts)
 
-- Scans Kalshi open markets every 20 seconds
-- Filters for markets with 10–16 minutes remaining (15-min markets, but skips any with ≤10 min left)
-- Looks for YES/NO bid-ask spreads between 5–25 cents
-- Calculates net profit after Kalshi's 7% fee on winnings
-- Only enters a trade if net profit > 0
-- Max bet: $0.59 per trade (as many contracts as that covers at the ask price)
-- Places limit buy orders via Kalshi REST API with RSA-signed requests
-- Attempts to sell at the bid price after 3 seconds to capture the spread
-- Retries selling open positions every 8 seconds
-- Marks positions as expired (full loss) if open for 12+ minutes
+### Core Strategy
+- Scans 7 crypto markets every 15 seconds
+- Tracks price movement direction per market tick
+- **Directional-only tick window**: only actual ¢ price moves count — flat scans don't consume slots, so signals persist until the market actually moves again
+- In sim mode: needs 2 directional ticks same direction; live: needs 3
+- TP = 3¢, SL = 4¢, Stale exit = 45s, Cooldown = 75s per market
+- Max 2 concurrent positions
+
+### Signal Filters
+- `priceMin/priceMax`: scan-level filter (default 5-95¢ in sim, 20-80¢ live)
+- `ENTRY_BUFFER_CENTS=5`: allows momentum tracking ±5¢ outside range
+- **Entry-time price guard**: blocks BUY_NO if mid < priceMin (NO already maxed out), and BUY_YES if mid > priceMax
+- Spread filter: sim ≤8¢ scan / ≤5¢ entry; live ≤5¢ scan / ≤3¢ entry
+- `MIN_TOTAL_MOVE_CENTS`: 1¢ sim / 2¢ live total move before allowing entry
+- `MIN_MINUTES_REMAINING`: 2 min sim / 3 min live
+- `MOMENTUM_EXPIRY_MS=120_000`: reset window if no directional tick for 2 minutes
+
+### Key Files
+- `artifacts/api-server/src/lib/momentumBot.ts` — core bot engine
+- `artifacts/api-server/src/routes/bot.ts` — REST endpoints
+- `artifacts/kalshi-bot/src/components/momentum-bot.tsx` — React dashboard
 
 ## API Endpoints
 
-- `GET /api/bot/status` — bot running state + stats
-- `POST /api/bot/start` — start the bot
-- `POST /api/bot/stop` — stop the bot
-- `GET /api/trades` — trade history (paginated)
-- `GET /api/trades/stats` — win rate, P&L, totals
-- `GET /api/logs` — recent bot activity logs
+- `GET /api/bot/momentum/status` — bot state + sim stats
+- `POST /api/bot/momentum/auto` — start/configure bot (simulatorMode, betCostCents, priceMin/Max, etc.)
+- `POST /api/bot/momentum/stop` — stop bot
+- `GET /api/bot/momentum/debug` — live market data + momentum counters + all positions
+- `GET /api/bot/momentum/config` — current config
+- `PATCH /api/bot/momentum/config` — update config live
 
 ## Secrets Required
 
 - `KALSHI_API_KEY` — Kalshi API key ID
 - `KALSHI_PRIVATE_KEY` — RSA private key PEM (newlines as `\n`)
+- `SESSION_SECRET` — Express session secret
+- `DATABASE_URL` — PostgreSQL connection string (Neon on Railway)
 
-## Database Tables
+## Database Tables (lib/db/src/schema/)
 
-- `trades` — all trade records with buy/sell prices, P&L, status
-- `bot_logs` — timestamped bot activity log
+- `momentum_settings` — persisted bot config (enabled, simulatorMode, priceMin/Max, etc.)
+- `trades` — trade history
+- `bot_logs` — timestamped activity log
+
+## Railway Deployment
+
+- Bot auto-starts via `MOMENTUM_AUTO_START=true` env var (reads config from DB)
+- Railway uses Neon DB; Replit uses local PostgreSQL
+- `loadMomentumConfig` retries up to 10 times (progressive delay ~81s) to handle Neon cold starts
+- Deploy: run `./push.sh` to push HEAD to GitHub → Railway picks up and deploys
 
 ## Root Scripts
 
-- `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
-- `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
+- `pnpm run build` — typecheck + build all packages
+- `pnpm --filter @workspace/kalshi-bot run build` — build frontend (required before Railway deploy)
 - `pnpm --filter @workspace/db run push` — push DB schema changes
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API types from OpenAPI spec

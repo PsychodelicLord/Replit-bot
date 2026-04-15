@@ -447,7 +447,7 @@ export function MomentumBot() {
             <div className="mt-4 space-y-1.5">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] text-slate-600 uppercase tracking-widest">Live Markets</p>
-                <span className="text-[9px] text-slate-700">need {isSimMode ? 2 : (debugData.config?.DOMINANCE_REQUIRED ?? 3)}/5 ticks same dir</span>
+                <span className="text-[9px] text-slate-700">need {isSimMode ? 2 : (debugData.config?.DOMINANCE_REQUIRED ?? 3)} price moves same dir</span>
               </div>
               {debugData.filteredMarkets.map(m => {
                 const mid = Math.round((m.askCents + m.bidCents) / 2);
@@ -501,9 +501,8 @@ export function MomentumBot() {
                 );
               })}
               <p className="text-[9px] text-slate-700 pl-1">
-                <span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 mr-1 align-middle" />up
-                <span className="inline-block w-2 h-2 rounded-sm bg-red-500/70 mx-1 ml-2 align-middle" />down
-                <span className="inline-block w-2 h-2 rounded-sm bg-white/10 mx-1 ml-2 align-middle" />flat
+                <span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 mr-1 align-middle" />up move
+                <span className="inline-block w-2 h-2 rounded-sm bg-red-500/70 mx-1 ml-2 align-middle" />down move
               </p>
             </div>
           )}

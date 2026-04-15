@@ -37,17 +37,17 @@ const SL_CENTS    = 4;   // stop-loss: exit when loss ≥ -4¢
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
-const TICK_WINDOW_SIZE      = 5;      // track last N ticks (including flat)
-const DOMINANCE_REQUIRED    = 3;      // need 3+ of last 5 ticks in same direction to enter
+const TICK_WINDOW_SIZE      = 5;      // track last N *directional* ticks (flat scans don't consume a slot)
+const DOMINANCE_REQUIRED    = 3;      // need 3+ directional ticks in same direction to enter
 const DOMINANCE_REQUIRED_SIM = 2;    // sim mode: only need 2+ (looser)
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
 const MIN_TOTAL_MOVE_CENTS  = 2;      // require ≥2¢ total price move before trading
 const MIN_TOTAL_MOVE_SIM    = 1;      // sim mode: only 1¢ move needed (looser)
 const TRADE_SPREAD_MAX      = 3;      // tighter spread required to actually execute a trade
-const TRADE_SPREAD_MAX_SIM  = 4;     // sim mode: allow up to 4¢ spread (looser)
-const SPREAD_MAX_SIM        = 6;     // sim mode: scan-level spread filter (looser than 5)
+const TRADE_SPREAD_MAX_SIM  = 5;     // sim mode: allow up to 5¢ spread (looser)
+const SPREAD_MAX_SIM        = 8;     // sim mode: scan-level spread filter (looser than 5)
 const MIN_MINUTES_REMAINING_SIM = 2; // sim mode: enter with 2 min left (vs 3)
-const MOMENTUM_EXPIRY_MS    = 30_000; // if no tick for 30s, reset window — avoids stale setups
+const MOMENTUM_EXPIRY_MS    = 120_000; // reset window only if no directional tick for 2 minutes
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -301,46 +301,48 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     if (ms.firstTickPrice === null) ms.firstTickPrice = currentPriceCents;
   }
 
-  // Add tick to sliding window (cap at TICK_WINDOW_SIZE)
-  ms.tickWindow.push({ direction, ts: now });
-  if (ms.tickWindow.length > TICK_WINDOW_SIZE) ms.tickWindow.shift();
+  // Only push DIRECTIONAL ticks into the window — flat scans don't consume a slot.
+  // This means a real move stays in the window until the NEXT real move, not until
+  // 5 flat scans wash it away (which was causing signals to disappear on stable markets).
+  if (direction !== "flat") {
+    ms.tickWindow.push({ direction, ts: now });
+    if (ms.tickWindow.length > TICK_WINDOW_SIZE) ms.tickWindow.shift();
+  }
 
-  // Count directions in window
+  // Count directions in directional-only window
   const upMoves   = ms.tickWindow.filter(t => t.direction === "up").length;
   const downMoves = ms.tickWindow.filter(t => t.direction === "down").length;
   const dirMoves  = upMoves + downMoves;
-  const flatMoves = ms.tickWindow.length - dirMoves;
 
   const totalMove = ms.firstTickPrice !== null ? Math.abs(currentPriceCents - ms.firstTickPrice) : 0;
-  const dirTicks  = ms.tickWindow.filter(t => t.direction !== "flat");
-  const timeDiff  = dirTicks.length >= 2 ? dirTicks[dirTicks.length - 1].ts - dirTicks[0].ts : 0;
+  const timeDiff  = ms.tickWindow.length >= 2 ? ms.tickWindow[ms.tickWindow.length - 1].ts - ms.tickWindow[0].ts : 0;
 
-  console.log(`[MOMENTUM] ${marketId} | ${currentPriceCents}¢ dir:${direction} | window up:${upMoves} dn:${downMoves} flat:${flatMoves}/${TICK_WINDOW_SIZE} | totalMove:${totalMove}¢`);
+  console.log(`[MOMENTUM] ${marketId} | ${currentPriceCents}¢ dir:${direction} | dirWindow up:${upMoves} dn:${downMoves} (${ms.tickWindow.length}/${TICK_WINDOW_SIZE}) | totalMove:${totalMove}¢`);
 
   const decide = (action: "BUY_YES" | "BUY_NO" | "SKIP", reason: string): MomentumDecision => ({
     action, reason, upMoves, downMoves,
     range: Math.abs(delta), ticks: [], totalMove, timeDiff,
   });
 
-  // Fully flat window — market not moving at all
+  // No directional ticks yet — market hasn't moved
   if (dirMoves === 0) {
-    return decide("SKIP", `Flat market — no directional ticks in last ${ms.tickWindow.length} scans`);
+    return decide("SKIP", `No directional ticks yet — waiting for first ¢ move`);
   }
 
-  // Directional dominance — 3+ of last 5 ticks in same direction (flat ticks allowed between)
+  // Directional dominance — need N directional ticks in same direction (flat ignored)
   // In sim mode: only 2+ needed (looser)
   const dominanceThreshold = state.simulatorMode ? DOMINANCE_REQUIRED_SIM : DOMINANCE_REQUIRED;
   if (upMoves >= dominanceThreshold) {
-    console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans${state.simulatorMode ? " [SIM]" : ""}`);
-    return decide("BUY_YES", `Bullish dominance: ${upMoves}/${ms.tickWindow.length} UP ticks`);
+    console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} in ${ms.tickWindow.length} dir-ticks${state.simulatorMode ? " [SIM]" : ""}`);
+    return decide("BUY_YES", `Bullish: ${upMoves}/${ms.tickWindow.length} UP moves`);
   }
   if (downMoves >= dominanceThreshold) {
-    console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans${state.simulatorMode ? " [SIM]" : ""}`);
-    return decide("BUY_NO", `Bearish dominance: ${downMoves}/${ms.tickWindow.length} DOWN ticks`);
+    console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} in ${ms.tickWindow.length} dir-ticks${state.simulatorMode ? " [SIM]" : ""}`);
+    return decide("BUY_NO", `Bearish: ${downMoves}/${ms.tickWindow.length} DOWN moves`);
   }
 
-  // Mixed or still accumulating
-  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} flat:${flatMoves} (need ${dominanceThreshold}/${TICK_WINDOW_SIZE})`);
+  // Mixed or accumulating
+  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} (need ${dominanceThreshold} same-dir, have ${ms.tickWindow.length} total)`);
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
@@ -942,6 +944,20 @@ export async function scanMomentumMarkets(): Promise<void> {
     }
 
     if (filtered) continue;
+
+    // Entry-time price guard: even if momentum pushed price into the buffer zone,
+    // don't enter if the contract we'd buy has no room to profit.
+    // BUY_NO when mid < pMin → NO contract already near 100¢, TP impossible
+    // BUY_YES when mid > pMax → YES contract already near 100¢, TP impossible
+    if (decision.action === "BUY_NO" && mid < pMin) {
+      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_NO at ${mid}¢ < priceMin ${pMin}¢ (NO contract already maxed out)`);
+      continue;
+    }
+    if (decision.action === "BUY_YES" && mid > pMax) {
+      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_YES at ${mid}¢ > priceMax ${pMax}¢ (YES contract already maxed out)`);
+      continue;
+    }
+
     console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.totalMove}¢ timeDiff:${decision.timeDiff}ms — all filters passed`);
 
     const side = decision.action === "BUY_YES" ? "YES" : "NO";
