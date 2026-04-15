@@ -1052,7 +1052,9 @@ export function saveMomentumConfig(): void {
 /** Load saved config from DB and restore state (including re-enabling the bot if it was on).
  *  Retries up to 3 times with 3s delays to handle Neon DB cold starts on Railway. */
 export async function loadMomentumConfig(): Promise<void> {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const MAX_ATTEMPTS = 10;
+  const DELAYS_MS    = [2000, 3000, 5000, 5000, 8000, 8000, 10000, 10000, 15000, 15000];
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const rows = await db.select().from(momentumSettingsTable).where(eq(momentumSettingsTable.id, 1)).limit(1);
       if (rows.length === 0) {
@@ -1069,18 +1071,19 @@ export async function loadMomentumConfig(): Promise<void> {
       state.priceMax             = r.priceMax ?? 80;
 
       if (r.enabled) {
-        console.log("[momentumBot] 🔄 Restoring enabled state from DB — auto-restarting bot");
+        console.log(`[momentumBot] 🔄 Restoring enabled state from DB (attempt ${attempt}) — auto-restarting bot | sim:${state.simulatorMode}`);
         startMomentumBot();
       } else {
-        console.log("[momentumBot] Saved config loaded — bot was stopped, staying disabled");
+        console.log(`[momentumBot] Saved config loaded (attempt ${attempt}) — bot was stopped, staying disabled`);
       }
       return;
     } catch (err) {
-      if (attempt < 3) {
-        console.warn(`[momentumBot] loadMomentumConfig attempt ${attempt} failed — retrying in 3s:`, String(err));
-        await new Promise(r => setTimeout(r, 3000));
+      const delay = DELAYS_MS[attempt - 1] ?? 15000;
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(`[momentumBot] loadMomentumConfig attempt ${attempt}/${MAX_ATTEMPTS} failed — retrying in ${delay / 1000}s:`, String(err));
+        await new Promise(r => setTimeout(r, delay));
       } else {
-        console.error("[momentumBot] loadMomentumConfig failed after 3 attempts (using defaults):", String(err));
+        console.error(`[momentumBot] loadMomentumConfig failed after ${MAX_ATTEMPTS} attempts (~81s) — bot stays disabled. Neon may be offline.`, String(err));
       }
     }
   }
