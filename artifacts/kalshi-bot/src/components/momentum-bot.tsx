@@ -139,7 +139,9 @@ export function MomentumBot() {
   const [balanceFloor, setBalanceFloor]       = useState("0");
   const [maxSessionLoss, setMaxSessionLoss]   = useState("0");
   const [consecutiveLossLimit, setConsecutiveLossLimit] = useState("3");
-  const [betCost, setBetCost]                 = useState("0.30");
+  const [betCostCents, setBetCostCents]       = useState("30");
+  const [priceMin, setPriceMin]               = useState("20");
+  const [priceMax, setPriceMax]               = useState("80");
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
 
@@ -149,14 +151,18 @@ export function MomentumBot() {
   const isSimMode = data?.simulatorMode ?? simulatorMode;
 
   function toggleAuto() {
+    const pMin = parseInt(priceMin || "20", 10);
+    const pMax = parseInt(priceMax || "80", 10);
     setAuto.mutate({
       data: {
         enabled: !enabled,
         balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
         maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
         consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
-        betCostCents:         Math.round(parseFloat(betCost || "30") * 100),
+        betCostCents:         Math.max(1, parseInt(betCostCents || "30", 10)),
         simulatorMode,
+        priceMin:             Math.min(pMin, pMax - 1),
+        priceMax:             Math.max(pMax, pMin + 1),
       },
     });
   }
@@ -475,12 +481,63 @@ export function MomentumBot() {
             {showSettings && (
               <div className="mt-3 space-y-3">
                 <p className="text-[10px] text-slate-600">
-                  Settings apply on next toggle. Set to 0 to disable that guard.
+                  Settings apply when you toggle Auto Mode. Changes while running take effect on next start.
                 </p>
 
                 <div className="space-y-2">
+
+                  {/* Spend per trade */}
                   <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Balance Floor ($)</span>
+                    <span className="text-[10px] text-slate-400 block mb-1">Spend per trade (¢)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="500"
+                      step="1"
+                      value={betCostCents}
+                      onChange={e => setBetCostCents(e.target.value)}
+                      placeholder="30"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      How many cents to bet per trade. e.g. <strong className="text-slate-500">30</strong> = spend 30¢ to buy a YES at 60¢ → you get 0.5 contracts
+                    </p>
+                  </label>
+
+                  {/* Entry price range */}
+                  <div>
+                    <span className="text-[10px] text-slate-400 block mb-1">Entry price range (¢)</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="1"
+                        max="99"
+                        step="1"
+                        value={priceMin}
+                        onChange={e => setPriceMin(e.target.value)}
+                        placeholder="20"
+                        className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                      />
+                      <span className="text-[10px] text-slate-600 shrink-0">to</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="99"
+                        step="1"
+                        value={priceMax}
+                        onChange={e => setPriceMax(e.target.value)}
+                        placeholder="80"
+                        className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                      />
+                    </div>
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      Only enter when market price is in this range. e.g. <strong className="text-slate-500">30 to 70</strong> = buy YES only when it's between 30¢ and 70¢
+                    </p>
+                  </div>
+
+                  {/* Risk guards */}
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Balance floor ($) — stop if balance drops below</span>
                     <input
                       type="number"
                       min="0"
@@ -490,11 +547,10 @@ export function MomentumBot() {
                       placeholder="0"
                       className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
                     />
-                    <p className="text-[9px] text-slate-600 mt-0.5">Stop completely if balance falls below this</p>
                   </label>
 
                   <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Max Session Loss ($)</span>
+                    <span className="text-[10px] text-slate-400 block mb-1">Max session loss ($) — stop if this is lost today</span>
                     <input
                       type="number"
                       min="0"
@@ -504,11 +560,10 @@ export function MomentumBot() {
                       placeholder="0"
                       className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
                     />
-                    <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session if loss exceeds this</p>
                   </label>
 
                   <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Max Consecutive Losses</span>
+                    <span className="text-[10px] text-slate-400 block mb-1">Max losses in a row — stop after N consecutive losses</span>
                     <input
                       type="number"
                       min="0"
@@ -519,47 +574,16 @@ export function MomentumBot() {
                       placeholder="3"
                       className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
                     />
-                    <p className="text-[9px] text-slate-600 mt-0.5">Stop bot for session after N losses in a row</p>
                   </label>
-
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Bet Size ($)</span>
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.05"
-                      value={betCost}
-                      onChange={e => setBetCost(e.target.value)}
-                      placeholder="0.30"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                    />
-                    <p className="text-[9px] text-slate-600 mt-0.5">Amount spent per trade — win scales proportionally (e.g. $0.30 at 50¢ → win $0.60)</p>
-                  </label>
-
-                  {/* Simulator toggle */}
-                  <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-2.5">
-                    <label className="flex items-center justify-between cursor-pointer">
-                      <div>
-                        <span className="text-[10px] text-violet-300 font-semibold block">Paper Trading (Simulator)</span>
-                        <span className="text-[9px] text-violet-500">Scans real markets, places NO real orders — tracks imaginary P&L</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setSimulatorMode(v => !v)}
-                        className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ml-3 ${simulatorMode ? "bg-violet-500" : "bg-white/10"}`}
-                      >
-                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${simulatorMode ? "translate-x-4" : "translate-x-0"}`} />
-                      </button>
-                    </label>
-                  </div>
                 </div>
 
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
-                  <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Active guards on this session:</span></p>
-                  <p>· Bet size: ${((data?.betCostCents ?? 30) / 100).toFixed(2)} per trade</p>
+                  <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Current active settings:</span></p>
+                  <p>· Spend: {data?.betCostCents ?? 30}¢ per trade</p>
+                  <p>· Entry range: {data?.priceMin ?? 20}¢ – {data?.priceMax ?? 80}¢</p>
                   <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
-                  <p>· Consec. losses: {data?.consecutiveLossLimit ?? 3} in a row</p>
+                  <p>· Losses in a row: {data?.consecutiveLossLimit || "OFF"}</p>
                 </div>
               </div>
             )}

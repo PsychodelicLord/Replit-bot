@@ -116,6 +116,10 @@ export interface MomentumBotState {
   simWins: number;
   simLosses: number;
   simOpenTradeCount: number;
+
+  // Entry price range (cents) — only enter trades within this price band
+  priceMin: number;
+  priceMax: number;
 }
 
 const state: MomentumBotState = {
@@ -141,6 +145,8 @@ const state: MomentumBotState = {
   simWins: 0,
   simLosses: 0,
   simOpenTradeCount: 0,
+  priceMin: 20,
+  priceMax: 80,
 };
 
 export interface MomentumBotConfig {
@@ -149,6 +155,8 @@ export interface MomentumBotConfig {
   consecutiveLossLimit: number;  // 0 = disabled
   betCostCents: number;          // cents to spend per trade (min 1)
   simulatorMode?: boolean;       // paper trading — real data, fake money
+  priceMin?: number;             // min entry price in cents (default 20)
+  priceMax?: number;             // max entry price in cents (default 80)
 }
 
 // Per-market momentum counter state
@@ -884,9 +892,11 @@ export async function scanMomentumMarkets(): Promise<void> {
       console.log(`[SCAN] ${coinLabel(market.ticker)} — zero prices (ask:${ask} bid:${bid}), skipping`);
       continue;
     }
-    // Hard skip only if price is well outside range — momentum may have pushed it slightly past edge
-    if (mid < PRICE_MIN - ENTRY_BUFFER_CENTS || mid > PRICE_MAX + ENTRY_BUFFER_CENTS) {
-      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${PRICE_MIN - ENTRY_BUFFER_CENTS}-${PRICE_MAX + ENTRY_BUFFER_CENTS}¢ hard limit, skipping`);
+    // Hard skip only if price is well outside configurable range (with ±5¢ buffer for momentum continuation)
+    const pMin = state.priceMin;
+    const pMax = state.priceMax;
+    if (mid < pMin - ENTRY_BUFFER_CENTS || mid > pMax + ENTRY_BUFFER_CENTS) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${pMin - ENTRY_BUFFER_CENTS}-${pMax + ENTRY_BUFFER_CENTS}¢ hard limit, skipping`);
       continue;
     }
     const scanSpreadLimit = state.simulatorMode ? SPREAD_MAX_SIM : SPREAD_MAX;
@@ -895,9 +905,9 @@ export async function scanMomentumMarkets(): Promise<void> {
       continue;
     }
     // Count as "in range" only within core range — used to detect stale market cache
-    if (mid >= PRICE_MIN && mid <= PRICE_MAX) inRangeCount++;
-    if (mid < PRICE_MIN || mid > PRICE_MAX) {
-      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ in buffer zone (${PRICE_MIN - ENTRY_BUFFER_CENTS}-${PRICE_MIN} or ${PRICE_MAX}-${PRICE_MAX + ENTRY_BUFFER_CENTS}¢) — momentum continuation allowed`);
+    if (mid >= pMin && mid <= pMax) inRangeCount++;
+    if (mid < pMin || mid > pMax) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ in buffer zone (${pMin - ENTRY_BUFFER_CENTS}-${pMin} or ${pMax}-${pMax + ENTRY_BUFFER_CENTS}¢) — momentum continuation allowed`);
     }
 
     const decision = evaluateMomentum(market.ticker, mid);
@@ -1031,35 +1041,48 @@ export function saveMomentumConfig(): void {
     consecutiveLossLimit: state.consecutiveLossLimit,
     betCostCents:         state.betCostCents,
     simulatorMode:        state.simulatorMode,
+    priceMin:             state.priceMin,
+    priceMax:             state.priceMax,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
     .catch(err => console.error("[momentumBot] saveMomentumConfig failed:", String(err)));
 }
 
-/** Load saved config from DB and restore state (including re-enabling the bot if it was on). */
+/** Load saved config from DB and restore state (including re-enabling the bot if it was on).
+ *  Retries up to 3 times with 3s delays to handle Neon DB cold starts on Railway. */
 export async function loadMomentumConfig(): Promise<void> {
-  try {
-    const rows = await db.select().from(momentumSettingsTable).where(eq(momentumSettingsTable.id, 1)).limit(1);
-    if (rows.length === 0) {
-      console.log("[momentumBot] No saved config — using defaults (bot starts disabled)");
-      return;
-    }
-    const r = rows[0];
-    state.balanceFloorCents    = r.balanceFloorCents;
-    state.maxSessionLossCents  = r.maxSessionLossCents;
-    state.consecutiveLossLimit = r.consecutiveLossLimit;
-    state.betCostCents         = r.betCostCents ?? 30;
-    state.simulatorMode        = r.simulatorMode ?? false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const rows = await db.select().from(momentumSettingsTable).where(eq(momentumSettingsTable.id, 1)).limit(1);
+      if (rows.length === 0) {
+        console.log("[momentumBot] No saved config — using defaults (bot starts disabled)");
+        return;
+      }
+      const r = rows[0];
+      state.balanceFloorCents    = r.balanceFloorCents;
+      state.maxSessionLossCents  = r.maxSessionLossCents;
+      state.consecutiveLossLimit = r.consecutiveLossLimit;
+      state.betCostCents         = r.betCostCents ?? 30;
+      state.simulatorMode        = r.simulatorMode ?? false;
+      state.priceMin             = r.priceMin ?? 20;
+      state.priceMax             = r.priceMax ?? 80;
 
-    if (r.enabled) {
-      console.log("[momentumBot] 🔄 Restoring enabled state from DB — auto-restarting bot");
-      startMomentumBot();
-    } else {
-      console.log("[momentumBot] Saved config loaded — bot was stopped, staying disabled");
+      if (r.enabled) {
+        console.log("[momentumBot] 🔄 Restoring enabled state from DB — auto-restarting bot");
+        startMomentumBot();
+      } else {
+        console.log("[momentumBot] Saved config loaded — bot was stopped, staying disabled");
+      }
+      return;
+    } catch (err) {
+      if (attempt < 3) {
+        console.warn(`[momentumBot] loadMomentumConfig attempt ${attempt} failed — retrying in 3s:`, String(err));
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        console.error("[momentumBot] loadMomentumConfig failed after 3 attempts (using defaults):", String(err));
+      }
     }
-  } catch (err) {
-    console.error("[momentumBot] loadMomentumConfig failed (using defaults):", String(err));
   }
 }
 
@@ -1119,6 +1142,8 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.consecutiveLossLimit !== undefined) state.consecutiveLossLimit = cfg.consecutiveLossLimit;
   if (cfg.betCostCents !== undefined) state.betCostCents = cfg.betCostCents;
   if (cfg.simulatorMode !== undefined) state.simulatorMode = cfg.simulatorMode;
+  if (cfg.priceMin !== undefined) state.priceMin = Math.max(1, Math.min(cfg.priceMin, 99));
+  if (cfg.priceMax !== undefined) state.priceMax = Math.max(1, Math.min(cfg.priceMax, 99));
   saveMomentumConfig();
 }
 

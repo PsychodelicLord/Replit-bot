@@ -8,4 +8,6 @@ export const momentumSettingsTable = pgTable("momentum_settings", {
   consecutiveLossLimit: integer("consecutive_loss_limit").notNull().default(0),
   betCostCents:         integer("bet_cost_cents").notNull().default(30),
   simulatorMode:        boolean("simulator_mode").notNull().default(false),
+  priceMin:             integer("price_min").notNull().default(20),
+  priceMax:             integer("price_max").notNull().default(80),
 });
