@@ -39,9 +39,14 @@ const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
 const TICK_WINDOW_SIZE      = 5;      // track last N ticks (including flat)
 const DOMINANCE_REQUIRED    = 3;      // need 3+ of last 5 ticks in same direction to enter
+const DOMINANCE_REQUIRED_SIM = 2;    // sim mode: only need 2+ (looser)
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
 const MIN_TOTAL_MOVE_CENTS  = 2;      // require ≥2¢ total price move before trading
+const MIN_TOTAL_MOVE_SIM    = 1;      // sim mode: only 1¢ move needed (looser)
 const TRADE_SPREAD_MAX      = 3;      // tighter spread required to actually execute a trade
+const TRADE_SPREAD_MAX_SIM  = 4;     // sim mode: allow up to 4¢ spread (looser)
+const SPREAD_MAX_SIM        = 6;     // sim mode: scan-level spread filter (looser than 5)
+const MIN_MINUTES_REMAINING_SIM = 2; // sim mode: enter with 2 min left (vs 3)
 const MOMENTUM_EXPIRY_MS    = 30_000; // if no tick for 30s, reset window — avoids stale setups
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
@@ -315,17 +320,19 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
   }
 
   // Directional dominance — 3+ of last 5 ticks in same direction (flat ticks allowed between)
-  if (upMoves >= DOMINANCE_REQUIRED) {
-    console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans`);
+  // In sim mode: only 2+ needed (looser)
+  const dominanceThreshold = state.simulatorMode ? DOMINANCE_REQUIRED_SIM : DOMINANCE_REQUIRED;
+  if (upMoves >= dominanceThreshold) {
+    console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans${state.simulatorMode ? " [SIM]" : ""}`);
     return decide("BUY_YES", `Bullish dominance: ${upMoves}/${ms.tickWindow.length} UP ticks`);
   }
-  if (downMoves >= DOMINANCE_REQUIRED) {
-    console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans`);
+  if (downMoves >= dominanceThreshold) {
+    console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} flat:${flatMoves} in last ${ms.tickWindow.length} scans${state.simulatorMode ? " [SIM]" : ""}`);
     return decide("BUY_NO", `Bearish dominance: ${downMoves}/${ms.tickWindow.length} DOWN ticks`);
   }
 
   // Mixed or still accumulating
-  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} flat:${flatMoves} (need ${DOMINANCE_REQUIRED}/${TICK_WINDOW_SIZE})`);
+  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} flat:${flatMoves} (need ${dominanceThreshold}/${TICK_WINDOW_SIZE})`);
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
@@ -473,7 +480,7 @@ async function fetchActiveMarkets(): Promise<Array<{
     // with ?status=open — treat null/undefined/"open"/"active" all as live
     .filter(m => m.ticker && (!m.status || m.status === "open" || m.status === "active"))
     .map(m => rawToMarket(m, now))
-    .filter(m => m.minutesRemaining > MIN_MINUTES_REMAINING);
+    .filter(m => m.minutesRemaining > (state.simulatorMode ? MIN_MINUTES_REMAINING_SIM : MIN_MINUTES_REMAINING));
 
   console.log(`[FETCH] Refresh complete — ${markets.length} eligible markets found`);
 
@@ -882,8 +889,9 @@ export async function scanMomentumMarkets(): Promise<void> {
       console.log(`[SCAN] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${PRICE_MIN - ENTRY_BUFFER_CENTS}-${PRICE_MAX + ENTRY_BUFFER_CENTS}¢ hard limit, skipping`);
       continue;
     }
-    if (spread > SPREAD_MAX) {
-      console.log(`[SCAN] ${coinLabel(market.ticker)} — spread ${spread}¢ > ${SPREAD_MAX}¢ max, skipping`);
+    const scanSpreadLimit = state.simulatorMode ? SPREAD_MAX_SIM : SPREAD_MAX;
+    if (spread > scanSpreadLimit) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — spread ${spread}¢ > ${scanSpreadLimit}¢ max, skipping${state.simulatorMode ? " [SIM]" : ""}`);
       continue;
     }
     // Count as "in range" only within core range — used to detect stale market cache
@@ -908,14 +916,18 @@ export async function scanMomentumMarkets(): Promise<void> {
     let filtered = false;
 
     // Filter 1: Spread must be ≤ TRADE_SPREAD_MAX (tighter than scan filter)
-    if (spread > TRADE_SPREAD_MAX) {
-      console.log(`[FILTER:SPREAD] ${coinLabel(market.ticker)} REJECTED — spread ${spread}¢ > ${TRADE_SPREAD_MAX}¢ trade threshold`);
+    // Sim mode uses a looser threshold (4¢ vs 3¢)
+    const tradeSpreadLimit = state.simulatorMode ? TRADE_SPREAD_MAX_SIM : TRADE_SPREAD_MAX;
+    if (spread > tradeSpreadLimit) {
+      console.log(`[FILTER:SPREAD] ${coinLabel(market.ticker)} REJECTED — spread ${spread}¢ > ${tradeSpreadLimit}¢ trade threshold${state.simulatorMode ? " [SIM]" : ""}`);
       filtered = true;
     }
 
-    // Filter 2: Minimum total price movement ≥ MIN_TOTAL_MOVE_CENTS
-    if (!filtered && decision.totalMove < MIN_TOTAL_MOVE_CENTS) {
-      console.log(`[FILTER:MOVE] ${coinLabel(market.ticker)} REJECTED — totalMove ${decision.totalMove}¢ < ${MIN_TOTAL_MOVE_CENTS}¢ minimum`);
+    // Filter 2: Minimum total price movement
+    // Sim mode: only 1¢ needed (vs 2¢ live)
+    const totalMoveLimit = state.simulatorMode ? MIN_TOTAL_MOVE_SIM : MIN_TOTAL_MOVE_CENTS;
+    if (!filtered && decision.totalMove < totalMoveLimit) {
+      console.log(`[FILTER:MOVE] ${coinLabel(market.ticker)} REJECTED — totalMove ${decision.totalMove}¢ < ${totalMoveLimit}¢ minimum${state.simulatorMode ? " [SIM]" : ""}`);
       filtered = true;
     }
 
