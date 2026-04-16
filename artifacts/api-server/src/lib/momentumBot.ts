@@ -64,6 +64,7 @@ interface MarketMomentumState {
 
 interface MomentumPosition {
   tradeId: number;
+  entrySlippageCents?: number;  // abs(actual fill − expected limit) — 0 in sim, real in live
   marketId: string;         // Kalshi ticker
   marketTitle: string;
   side: "YES" | "NO";
@@ -174,6 +175,18 @@ const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expi
 // Scan / sell timers
 let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
+
+// ─── Bot Health Score rolling buffer ────────────────────────────────────────
+interface TradeRecord {
+  pnlCents:      number;
+  isWin:         boolean;
+  exitReason:    "TP" | "SL" | "STALE";
+  slippageCents: number;  // entry slippage (always 0 in sim, real in live)
+  timestamp:     number;
+}
+
+const healthBuffer: TradeRecord[] = [];  // last 100 closed trades
+let   healthTradeCount = 0;             // lifetime total fed into buffer
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 function log(msg: string, data?: Record<string, unknown>) {
@@ -585,6 +598,11 @@ async function placeSellOrder(
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPrice, netPnl);
 
+    // ── Health score tracking ──
+    const liveGain = exitPrice - pos.entryPriceCents;
+    const liveReason: "TP" | "SL" | "STALE" = liveGain >= TP_CENTS ? "TP" : liveGain <= -SL_CENTS ? "SL" : "STALE";
+    recordTradeForHealth(netPnl, liveReason, pos.entrySlippageCents ?? 0);
+
     // ── Async DB update — fire-and-forget, never blocks ──
     const sellFields = {
       status: "closed" as const,
@@ -673,7 +691,8 @@ export async function executeMomentumTrade(
     marketId: ticker,
     marketTitle: title,
     side,
-    entryPriceCents: result.fillPrice,
+    entryPriceCents:   result.fillPrice,
+    entrySlippageCents: Math.abs(result.fillPrice - limitCents), // actual vs expected
     contractCount: result.contractCount,
     enteredAt: Date.now(),
     lastSeenPriceCents: result.fillPrice,
@@ -741,6 +760,7 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
   state.simOpenTradeCount = simPositions.length;
   if (pnlCents > 0) state.simWins++; else state.simLosses++;
 
+  recordTradeForHealth(pnlCents, parseExitReason(reason), 0); // slippage always 0 in sim
   marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
 
   const pnlSign = pnlCents >= 0 ? "+" : "";
@@ -1123,6 +1143,89 @@ export async function loadMomentumConfig(): Promise<void> {
       }
     }
   }
+}
+
+// ─── Bot Health Score ────────────────────────────────────────────────────────
+
+function parseExitReason(reason: string): "TP" | "SL" | "STALE" {
+  const first = reason.split(" ")[0].toUpperCase();
+  if (first === "TP") return "TP";
+  if (first === "SL") return "SL";
+  return "STALE";
+}
+
+function recordTradeForHealth(pnlCents: number, exitReason: "TP" | "SL" | "STALE", slippageCents = 0): void {
+  healthBuffer.push({ pnlCents, isWin: pnlCents > 0, exitReason, slippageCents, timestamp: Date.now() });
+  if (healthBuffer.length > 100) healthBuffer.shift();
+  healthTradeCount++;
+  if (healthTradeCount % 50 === 0 && healthBuffer.length >= 50) {
+    logHealthScore(calculateHealthScore());
+  }
+}
+
+function calculateHealthScore(): {
+  total: number; label: string;
+  evScore: number; stabilityScore: number; ratioScore: number; staleScore: number; execScore: number;
+  netEV: number; winRate: number; avgWin: number; avgLoss: number; staleRate: number; avgSlippage: number;
+} {
+  const current = healthBuffer.slice(-50);
+  const prev    = healthBuffer.slice(-100, -50);
+
+  const wins   = current.filter(t => t.isWin);
+  const losses = current.filter(t => !t.isWin);
+  const winRate  = wins.length / current.length;
+  const lossRate = losses.length / current.length;
+  const avgWin  = wins.length   > 0 ? wins.reduce((s, t) => s + t.pnlCents, 0) / wins.length : 0;
+  const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.pnlCents, 0) / losses.length) : 0;
+  const netEV   = (avgWin * winRate) - (avgLoss * lossRate);
+
+  // [1] Net EV per trade
+  const evScore = netEV > 0.1 ? 2 : netEV >= -0.1 ? 1 : 0;
+
+  // [2] Win rate stability vs previous 50-trade window
+  let stabilityScore = 1; // benefit of doubt when < 100 trades seen
+  if (prev.length >= 50) {
+    const prevWinRate = prev.filter(t => t.isWin).length / prev.length;
+    const change = Math.abs(winRate - prevWinRate) * 100;
+    stabilityScore = change <= 5 ? 2 : change <= 10 ? 1 : 0;
+  }
+
+  // [3] Avg win vs avg loss ratio
+  const ratio = avgLoss === 0 ? Infinity : avgWin / avgLoss;
+  const ratioScore = ratio >= 1.0 ? 2 : ratio >= 0.75 ? 1 : 0;
+
+  // [4] Stale exit rate
+  const staleCount = current.filter(t => t.exitReason === "STALE").length;
+  const staleRate  = staleCount / current.length;
+  const staleScore = staleRate < 0.25 ? 2 : staleRate <= 0.40 ? 1 : 0;
+
+  // [5] Execution quality (avg entry slippage)
+  const avgSlippage = current.reduce((s, t) => s + t.slippageCents, 0) / current.length;
+  const execScore   = avgSlippage < 0.5 ? 2 : avgSlippage <= 1.0 ? 1 : 0;
+
+  const total = evScore + stabilityScore + ratioScore + staleScore + execScore;
+  const label = total >= 8 ? "Healthy" : total >= 5 ? "Fragile" : "Broken";
+
+  return { total, label, evScore, stabilityScore, ratioScore, staleScore, execScore,
+           netEV, winRate, avgWin, avgLoss, staleRate, avgSlippage };
+}
+
+function logHealthScore(s: ReturnType<typeof calculateHealthScore>): void {
+  const icon  = s.label === "Healthy" ? "✅" : s.label === "Fragile" ? "⚠️" : "🔴";
+  const ratio = s.avgLoss > 0 ? (s.avgWin / s.avgLoss).toFixed(2) : "∞";
+  const msg = [
+    "",
+    `🏥 ══════ BOT HEALTH SCORE (trade #${healthTradeCount}, rolling 50) ══════`,
+    `${icon}  ${s.label.toUpperCase()}  —  ${s.total}/10`,
+    `  [1] Net EV:          ${s.evScore}/2  (EV=${s.netEV.toFixed(3)}¢  WR=${(s.winRate*100).toFixed(1)}%  avgWin=${s.avgWin.toFixed(2)}¢  avgLoss=${s.avgLoss.toFixed(2)}¢)`,
+    `  [2] WR Stability:    ${s.stabilityScore}/2  (vs previous 50-trade window)`,
+    `  [3] Win/Loss Ratio:  ${s.ratioScore}/2  (avgWin÷avgLoss=${ratio})`,
+    `  [4] Stale Rate:      ${s.staleScore}/2  (${(s.staleRate*100).toFixed(1)}% of exits were STALE)`,
+    `  [5] Execution:       ${s.execScore}/2  (avg slippage=${s.avgSlippage.toFixed(3)}¢)`,
+    "",
+  ].join("\n");
+  console.log(msg);
+  dbLog("info", msg);
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
