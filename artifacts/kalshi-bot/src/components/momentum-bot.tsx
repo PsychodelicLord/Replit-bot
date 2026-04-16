@@ -131,9 +131,13 @@ function DecisionChip({ decision }: { decision: string | null | undefined }) {
 export function MomentumBot() {
   const queryClient = useQueryClient();
 
-  const { data } = useGetMomentumBotStatus({
-    query: { refetchInterval: 2000 },
+  const { data, isError, dataUpdatedAt } = useGetMomentumBotStatus({
+    query: { refetchInterval: 2000, retry: 3 },
   });
+
+  // True only when we genuinely have no data (API unreachable / first load)
+  const isConnected = dataUpdatedAt > 0;
+  const isReconnecting = !isConnected || (isError && data === undefined);
 
   const setAuto = useSetMomentumBotAuto({
     mutation: {
@@ -556,12 +560,19 @@ export function MomentumBot() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-semibold text-slate-300">Auto Mode</p>
-                <p className="text-[10px] text-slate-600 mt-0.5">
-                  {enabled
-                    ? simulatorMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
-                    : "Tap to start momentum trading"}
+                <p className="text-[10px] mt-0.5 text-slate-600">
+                  {isReconnecting
+                    ? "⟳ Reconnecting to server..."
+                    : enabled
+                      ? simulatorMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
+                      : "Tap to start momentum trading"}
                 </p>
               </div>
+              {isReconnecting ? (
+                <div className="relative inline-flex h-6 w-11 items-center rounded-full bg-amber-500/30 animate-pulse">
+                  <span className="inline-block h-4 w-4 transform rounded-full bg-amber-400/70 shadow translate-x-3" />
+                </div>
+              ) : (
               <button
                 onClick={toggleAuto}
                 disabled={setAuto.isPending}
@@ -575,6 +586,7 @@ export function MomentumBot() {
                   enabled ? "translate-x-6" : "translate-x-1"
                 }`} />
               </button>
+              )}
             </div>
 
             {enabled && !isPaused && (
