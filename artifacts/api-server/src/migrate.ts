@@ -49,6 +49,12 @@ export async function runMigrations(): Promise<void> {
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS simulator_mode BOOLEAN NOT NULL DEFAULT TRUE
     `);
+    // One-time fix: correct any row that got simulator_mode=FALSE from the old DEFAULT FALSE.
+    // This ensures Railway always boots in paper mode after a deploy.
+    // Users who intentionally want live mode can toggle it off in the dashboard after startup.
+    await db.execute(sql`
+      UPDATE momentum_settings SET simulator_mode = TRUE WHERE id = 1 AND simulator_mode = FALSE
+    `);
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS price_min INTEGER NOT NULL DEFAULT 20
     `);
