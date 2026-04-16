@@ -36,6 +36,10 @@ const TP_CENTS    = 3;   // take-profit: exit when gain ≥ +3¢
 const SL_CENTS    = 3;   // stop-loss: exit when loss ≥ -3¢  (equal risk/reward — need >50% WR)
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
+// Contract count cap: treat price as ≥ MIN_PRICE_FOR_CONTRACTS when sizing.
+// Prevents outsized losses at extreme prices (e.g. 5¢ entry → 20 contracts → -60¢ SL hit).
+// At 20¢ baseline: 100¢ bet → max 5 contracts → worst-case SL = -3¢ × 5 = -15¢.
+const MIN_PRICE_FOR_CONTRACTS = 20;
 
 const TICK_WINDOW_SIZE      = 5;      // track last N *directional* ticks (flat scans don't consume a slot)
 const DOMINANCE_REQUIRED    = 3;      // need 3+ directional ticks in same direction to enter
@@ -722,7 +726,10 @@ function enterSimPosition(
   askCents: number,
 ): void {
   const limitCents    = Math.min(askCents, bidCents + 1);
-  const contractCount = state.betCostCents / Math.max(limitCents, 1);
+  // Cap contract count: use at least MIN_PRICE_FOR_CONTRACTS as the divisor.
+  // Without this cap, a 5¢-priced entry with 100¢ bet = 20 contracts,
+  // so a -3¢ SL hit becomes -60¢ total. At 20¢ baseline, max loss = -3¢ × 5 = -15¢.
+  const contractCount = state.betCostCents / Math.max(limitCents, MIN_PRICE_FOR_CONTRACTS);
   const tradeId       = -(Date.now());
 
   const pos: MomentumPosition = {
