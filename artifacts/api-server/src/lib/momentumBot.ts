@@ -1069,6 +1069,18 @@ export function saveMomentumConfig(): void {
     .catch(err => console.error("[momentumBot] saveMomentumConfig failed:", String(err)));
 }
 
+/**
+ * Only persist the enabled flag — does NOT touch sim stats.
+ * Use this in startMomentumBot / stopMomentumBot so that a Railway restart
+ * cannot overwrite sim stats with zeros before loadMomentumConfig restores them.
+ */
+function saveEnabledFlag(enabled: boolean): void {
+  db.insert(momentumSettingsTable)
+    .values({ id: 1, enabled })
+    .onConflictDoUpdate({ target: momentumSettingsTable.id, set: { enabled } })
+    .catch(err => console.error("[momentumBot] saveEnabledFlag failed:", String(err)));
+}
+
 /** Load saved config from DB and restore state (including re-enabling the bot if it was on).
  *  Retries up to 3 times with 3s delays to handle Neon DB cold starts on Railway. */
 export async function loadMomentumConfig(): Promise<void> {
@@ -1208,7 +1220,7 @@ export function startMomentumBot(): MomentumBotState {
 
   log("▶️  Momentum Bot STARTED");
   dbLog("info", `[MOMENTUM] ▶️ Momentum Bot STARTED — scanning every ${SCAN_INTERVAL_MS / 1000}s for ${ALLOWED_COINS.join(",")} 15-min markets`);
-  saveMomentumConfig(); // persist enabled=true to DB so Railway restarts restore state
+  saveEnabledFlag(true); // only persist enabled=true — never overwrites sim stats with zeros
   return getMomentumBotState();
 }
 
@@ -1239,6 +1251,6 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
   console.log(`🛑 STOP CALLER: ${stack}`);
   dbLog("info", `[MOMENTUM] ⏹️ Momentum Bot STOPPED — ${reason}`);
   log(`⏹️  Momentum Bot STOPPED — ${reason}`);
-  saveMomentumConfig(); // persist enabled=false to DB
+  saveEnabledFlag(false); // only persist enabled=false — never overwrites sim stats with zeros
   return getMomentumBotState();
 }
