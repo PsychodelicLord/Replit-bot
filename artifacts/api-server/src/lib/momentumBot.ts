@@ -33,7 +33,7 @@ const MIN_MINUTES_REMAINING = 3;
 const MAX_POSITIONS = 2;
 
 const TP_CENTS    = 3;   // take-profit: exit when gain ≥ +3¢
-const SL_CENTS    = 4;   // stop-loss: exit when loss ≥ -4¢
+const SL_CENTS    = 3;   // stop-loss: exit when loss ≥ -3¢  (equal risk/reward — need >50% WR)
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 
