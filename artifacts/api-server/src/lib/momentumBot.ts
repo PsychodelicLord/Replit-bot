@@ -1108,9 +1108,14 @@ function saveEnabledFlag(enabled: boolean): void {
     .catch(err => console.error("[momentumBot] saveEnabledFlag failed:", String(err)));
 }
 
-/** Load saved config from DB and restore state (including re-enabling the bot if it was on).
- *  Retries up to 3 times with 3s delays to handle Neon DB cold starts on Railway. */
-export async function loadMomentumConfig(): Promise<void> {
+/**
+ * Load persisted config from DB and optionally auto-start the bot.
+ *
+ * @param autoStartFallback - when true (MOMENTUM_AUTO_START=true), the bot
+ *   starts even if Neon is unreachable after all retries — but always in
+ *   PAPER (sim) mode so real money is never risked without DB confirmation.
+ */
+export async function loadMomentumConfig(autoStartFallback = false): Promise<void> {
   const MAX_ATTEMPTS = 10;
   const DELAYS_MS    = [2000, 3000, 5000, 5000, 8000, 8000, 10000, 10000, 15000, 15000];
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -1118,6 +1123,11 @@ export async function loadMomentumConfig(): Promise<void> {
       const rows = await db.select().from(momentumSettingsTable).where(eq(momentumSettingsTable.id, 1)).limit(1);
       if (rows.length === 0) {
         console.log("[momentumBot] No saved config — using defaults (bot starts disabled)");
+        if (autoStartFallback) {
+          state.simulatorMode = true; // always paper mode when no DB record
+          console.log("[momentumBot] ⚠️  No DB record — starting in PAPER mode as safe default");
+          startMomentumBot();
+        }
         return;
       }
       const r = rows[0];
@@ -1125,7 +1135,7 @@ export async function loadMomentumConfig(): Promise<void> {
       state.maxSessionLossCents  = r.maxSessionLossCents;
       state.consecutiveLossLimit = r.consecutiveLossLimit;
       state.betCostCents         = r.betCostCents ?? 30;
-      state.simulatorMode        = r.simulatorMode ?? false;
+      state.simulatorMode        = r.simulatorMode ?? true;  // default to paper if null
       state.priceMin             = r.priceMin ?? 20;
       state.priceMax             = r.priceMax ?? 80;
       // Restore persisted sim stats so restarts don't wipe the scoreboard
@@ -1133,8 +1143,9 @@ export async function loadMomentumConfig(): Promise<void> {
       state.simLosses   = r.simLosses  ?? 0;
       state.simPnlCents = r.simPnlCents ?? 0;
 
-      if (r.enabled) {
-        console.log(`[momentumBot] 🔄 Restoring enabled state from DB (attempt ${attempt}) — auto-restarting bot | sim:${state.simulatorMode}`);
+      if (r.enabled || autoStartFallback) {
+        const reason = r.enabled ? "DB shows enabled=true" : "MOMENTUM_AUTO_START fallback";
+        console.log(`[momentumBot] 🔄 Auto-starting bot (${reason}) | sim:${state.simulatorMode} | attempt ${attempt}`);
         startMomentumBot();
       } else {
         console.log(`[momentumBot] Saved config loaded (attempt ${attempt}) — bot was stopped, staying disabled`);
@@ -1146,7 +1157,12 @@ export async function loadMomentumConfig(): Promise<void> {
         console.warn(`[momentumBot] loadMomentumConfig attempt ${attempt}/${MAX_ATTEMPTS} failed — retrying in ${delay / 1000}s:`, String(err));
         await new Promise(r => setTimeout(r, delay));
       } else {
-        console.error(`[momentumBot] loadMomentumConfig failed after ${MAX_ATTEMPTS} attempts (~81s) — bot stays disabled. Neon may be offline.`, String(err));
+        console.error(`[momentumBot] loadMomentumConfig failed after ${MAX_ATTEMPTS} attempts (~81s). Neon may be offline.`, String(err));
+        if (autoStartFallback) {
+          state.simulatorMode = true; // paper mode — never risk real money without DB
+          console.log("[momentumBot] ⚠️  Neon unreachable — starting in PAPER mode as safe fallback");
+          startMomentumBot();
+        }
       }
     }
   }

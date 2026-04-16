@@ -47,7 +47,7 @@ export async function runMigrations(): Promise<void> {
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS bet_cost_cents INTEGER NOT NULL DEFAULT 30
     `);
     await db.execute(sql`
-      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS simulator_mode BOOLEAN NOT NULL DEFAULT FALSE
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS simulator_mode BOOLEAN NOT NULL DEFAULT TRUE
     `);
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS price_min INTEGER NOT NULL DEFAULT 20

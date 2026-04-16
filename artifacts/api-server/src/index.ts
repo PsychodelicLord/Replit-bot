@@ -34,15 +34,14 @@ runMigrations().then(() => {
       logger.warn({ autoStartValue: autoStart ?? "(not set)" }, "COINFLIP_AUTO_START is not 'true' — coin flip will not auto-trade");
     }
 
+    // ── Restore momentum bot state from DB, then auto-start if enabled ────────
+    // loadMomentumConfig reads simulatorMode/betCostCents/etc before starting
+    // the bot, so it never boots in live mode by accident.
+    // If Neon is completely unreachable after all retries, it falls back to
+    // starting in PAPER (sim) mode so real money is never at risk.
     const momentumAutoStart = process.env["MOMENTUM_AUTO_START"];
-    if (momentumAutoStart === "true") {
-      startMomentumBot();
-      logger.info("📈 Momentum bot auto-mode started via MOMENTUM_AUTO_START");
-    }
-
-    // ── Restore momentum bot state from DB (auto-restarts if was enabled) ────
-    // Runs after MOMENTUM_AUTO_START check so explicit env var still wins.
-    loadMomentumConfig().catch(err => logger.warn({ err }, "startup: loadMomentumConfig failed"));
+    loadMomentumConfig(momentumAutoStart === "true")
+      .catch(err => logger.warn({ err }, "startup: loadMomentumConfig failed"));
 
     // ── Load saved config + hydrate positions from DB asynchronously ─────────
     // These are best-effort — bots work fine with defaults if DB is unavailable.
