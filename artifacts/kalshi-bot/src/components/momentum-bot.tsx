@@ -385,7 +385,18 @@ export function MomentumBot() {
                 Momentum Bot
               </h2>
             </div>
-            <StatusBadge status={status} />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
+                  await fetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
+                }}
+                className="rounded-md border border-red-800/60 bg-red-950/40 px-2 py-0.5 text-[10px] font-semibold text-red-400 hover:bg-red-900/50 hover:text-red-300 transition-colors"
+              >
+                Reset Stats
+              </button>
+              <StatusBadge status={status} />
+            </div>
           </div>
 
           <p className="text-xs text-slate-500 leading-relaxed">
