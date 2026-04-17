@@ -247,6 +247,28 @@ export function MomentumBot() {
     });
   }
 
+  function toggleSimMode() {
+    const newSim = !isSimMode;
+    if (!newSim && enabled) {
+      if (!window.confirm("Switch to REAL MONEY mode? The bot will start placing real Kalshi orders immediately.")) return;
+    }
+    const pMin = parseInt(priceMin || "20", 10);
+    const pMax = parseInt(priceMax || "80", 10);
+    setSimulatorMode(newSim);
+    setAuto.mutate({
+      data: {
+        enabled,
+        balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
+        maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
+        consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
+        betCostCents:         Math.max(1, parseInt(betCostCents || "30", 10)),
+        simulatorMode:        newSim,
+        priceMin:             Math.min(pMin, pMax - 1),
+        priceMax:             Math.max(pMax, pMin + 1),
+      },
+    });
+  }
+
   const sessionPnl = data?.sessionPnlCents ?? 0;
   const simPnl     = data?.simPnlCents ?? 0;
   const pausedMins = data?.pausedUntilMs
@@ -750,11 +772,11 @@ export function MomentumBot() {
                 </p>
               </div>
               <button
-                onClick={() => setSimulatorMode(v => !v)}
-                disabled={enabled}
+                onClick={toggleSimMode}
+                disabled={setAuto.isPending}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none shrink-0 ml-3 ${
                   toggleDisplayMode ? "bg-violet-500" : "bg-white/10"
-                } ${enabled ? "opacity-50 cursor-not-allowed" : ""}`}
+                } ${setAuto.isPending ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
                   toggleDisplayMode ? "translate-x-6" : "translate-x-1"
@@ -763,7 +785,7 @@ export function MomentumBot() {
             </div>
             {enabled && (
               <p className="text-[9px] text-slate-500 mt-1 pl-1">
-                {toggleDisplayMode ? "🟣 Paper mode active — stop bot to switch to live" : "🔴 Live mode active — stop bot to switch to paper"}
+                {toggleDisplayMode ? "🟣 Paper mode — tap to switch to live immediately" : "🔴 Live mode — tap to switch to paper immediately"}
               </p>
             )}
           </div>
