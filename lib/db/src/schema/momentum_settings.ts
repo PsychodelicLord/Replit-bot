@@ -18,4 +18,6 @@ export const momentumSettingsTable = pgTable("momentum_settings", {
   totalWins:            integer("total_wins").notNull().default(0),
   totalLosses:          integer("total_losses").notNull().default(0),
   totalPnlCents:        integer("total_pnl_cents").notNull().default(0),
+  // Snapshot balance captured at last reset — persists until user resets again
+  startingBalanceCents: integer("starting_balance_cents"),
 });

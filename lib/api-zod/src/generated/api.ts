@@ -315,6 +315,7 @@ export const MomentumBotStatus = zod.object({
   priceMax:            zod.number(),
   tpCents:             zod.number().optional(),
   slCents:             zod.number().optional(),
+  startingBalanceCents: zod.number().nullable().optional(),
   allTimeWins:         zod.number().optional(),
   allTimeLosses:       zod.number().optional(),
   allTimePnlCents:     zod.number().optional(),

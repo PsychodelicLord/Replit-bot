@@ -111,6 +111,7 @@ export interface MomentumBotState {
   pausedUntilMs: number | null;
   pauseReason: string | null;
   stopReason: string | null;   // why the bot last stopped (deploy reset / loss limit / balance floor)
+  startingBalanceCents: number | null;  // balance snapshot at last stats reset — null until first reset
   balanceFloorCents: number;
   maxSessionLossCents: number;
   consecutiveLossLimit: number;
@@ -160,6 +161,7 @@ const state: MomentumBotState = {
   pausedUntilMs: null,
   pauseReason: null,
   stopReason: "Server started — not yet enabled",
+  startingBalanceCents: null,
   balanceFloorCents: 0,
   maxSessionLossCents: 0,
   consecutiveLossLimit: 0,
@@ -1336,6 +1338,7 @@ export function saveMomentumConfig(): void {
     totalWins:            state.totalWins,
     totalLosses:          state.totalLosses,
     totalPnlCents:        state.totalPnlCents,
+    startingBalanceCents: state.startingBalanceCents,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -1392,6 +1395,7 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
       state.totalWins     = r.totalWins    ?? 0;
       state.totalLosses   = r.totalLosses  ?? 0;
       state.totalPnlCents = r.totalPnlCents ?? 0;
+      state.startingBalanceCents = r.startingBalanceCents ?? null;
 
       if (r.enabled || autoStartFallback) {
         const reason = r.enabled ? "DB shows enabled=true" : "MOMENTUM_AUTO_START fallback";
@@ -1632,6 +1636,11 @@ export function resetSimStats(): MomentumBotState {
 
 /** Reset ALL stats — sim + real trade W/L/PnL + clears trades table */
 export async function resetAllStats(): Promise<MomentumBotState> {
+  // Snapshot the current balance before wiping stats — persists until next reset
+  const liveBalance = getBotState().balanceCents;
+  if (liveBalance != null && liveBalance > 0) {
+    state.startingBalanceCents = liveBalance;
+  }
   // Reset in-memory state
   state.simWins       = 0;
   state.simLosses     = 0;

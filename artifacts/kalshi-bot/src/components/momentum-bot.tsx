@@ -405,7 +405,7 @@ export function MomentumBot() {
           <p className="text-xs text-slate-500 leading-relaxed">
             Scans BTC, ETH & SOL 15-min markets every 3s. Enters only when 4 of 5 recent price ticks
             move the same direction, spread ≤3¢, price 30–60¢, and &gt;7 min left.
-            TP: +3¢ · SL: -4¢ · Stale exit: 45s.
+            TP: +{data?.tpCents ?? 3}¢ · SL: -{data?.slCents ?? 3}¢ · Stale exit: 45s.
           </p>
 
           {/* Stats row — session */}
@@ -439,6 +439,40 @@ export function MomentumBot() {
               <p className="text-[9px] text-slate-600">losses/row</p>
             </div>
           </div>
+
+          {/* Starting Balance Snapshot */}
+          {data?.startingBalanceCents != null && (
+            <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Started at</span>
+                <span className="text-xs font-bold text-slate-300">
+                  ${(data.startingBalanceCents / 100).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Net since reset</span>
+                {(() => {
+                  const net = data.totalPnlCents ?? 0;
+                  return (
+                    <span className={`text-xs font-bold ${net > 0 ? "text-emerald-400" : net < 0 ? "text-red-400" : "text-slate-400"}`}>
+                      {net >= 0 ? "+" : ""}{(net / 100).toFixed(2)}¢
+                    </span>
+                  );
+                })()}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Est. now</span>
+                <span className="text-xs font-bold text-slate-300">
+                  ${((data.startingBalanceCents + (data.totalPnlCents ?? 0)) / 100).toFixed(2)}
+                </span>
+              </div>
+            </div>
+          )}
+          {data?.startingBalanceCents == null && (
+            <p className="mt-3 text-[9px] text-slate-600 text-center">
+              Press <strong className="text-slate-500">Reset All Winnings</strong> to snapshot your starting balance here.
+            </p>
+          )}
 
           {/* Simulator mode banner + stats */}
           {isSimMode && (
