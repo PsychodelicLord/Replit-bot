@@ -800,7 +800,10 @@ async function executeSell(
   );
 
   // ── Place the sell on Kalshi — limit at 1¢ guarantees fill (market orders not supported) ──
-  const limitSellCents = Math.max(1, currentBidCents - 2);
+  // Near-settled markets (bid ≥90¢): only 1¢ below bid — tighter spread, faster fill
+  const limitSellCents = currentBidCents >= 90
+    ? Math.max(1, currentBidCents - 1)
+    : Math.max(1, currentBidCents - 2);
   const payload = buildOrderPayload(
     pos.marketId, `sell-${Math.abs(pos.tradeId)}-${Date.now()}`, "limit", "sell", pos.side, pos.contractCount, limitSellCents,
   );
@@ -1132,6 +1135,13 @@ export async function retryOpenPositions(): Promise<void> {
           `🔍 Trade ${pos.tradeId} (${pos.side} @${pos.entryPriceCents}¢) | bid: ${currentBid}¢ | profit: ${grossProfit >= 0 ? "+" : ""}${grossProfit}¢ | ${minsLeft.toFixed(1)}min left`,
           { tradeId: pos.tradeId },
         );
+
+        // Near-settled exit — bid ≥90¢ means market is basically decided, grab profit now
+        // at 90¢+ there's almost no liquidity and waiting risks holding to expiry
+        if (currentBid >= 90 && grossProfit > 0) {
+          await executeSell(pos, currentBid, `near-settled bid:${currentBid}¢ (+${grossProfit}¢)`);
+          continue;
+        }
 
         // Take-profit
         if (currentBid > 0 && grossProfit >= botConfig.minNetProfitCents) {
