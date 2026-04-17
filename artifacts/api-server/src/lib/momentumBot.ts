@@ -42,13 +42,13 @@ const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 const MIN_PRICE_FOR_CONTRACTS = 20;
 
 const TICK_WINDOW_SIZE      = 5;      // track last N *directional* ticks (flat scans don't consume a slot)
-const DOMINANCE_REQUIRED    = 3;      // need 3+ directional ticks in same direction to enter
-const DOMINANCE_REQUIRED_SIM = 2;    // sim mode: only need 2+ (looser)
+const DOMINANCE_REQUIRED    = 2;      // need 2+ directional ticks in same direction to enter
+const DOMINANCE_REQUIRED_SIM = 2;    // sim mode: same threshold
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
-const MIN_TOTAL_MOVE_CENTS  = 2;      // require ≥2¢ total price move before trading
-const MIN_TOTAL_MOVE_SIM    = 1;      // sim mode: only 1¢ move needed (looser)
-const TRADE_SPREAD_MAX      = 3;      // tighter spread required to actually execute a trade
-const TRADE_SPREAD_MAX_SIM  = 5;     // sim mode: allow up to 5¢ spread (looser)
+const MIN_TOTAL_MOVE_CENTS  = 1;      // require ≥1¢ total price move before trading
+const MIN_TOTAL_MOVE_SIM    = 1;      // sim mode: same threshold
+const TRADE_SPREAD_MAX      = 4;      // spread required to actually execute a trade
+const TRADE_SPREAD_MAX_SIM  = 5;     // sim mode: allow up to 5¢ spread (slightly looser)
 const SPREAD_MAX_SIM        = 8;     // sim mode: scan-level spread filter (looser than 5)
 const MIN_MINUTES_REMAINING_SIM = 2; // sim mode: enter with 2 min left (vs 3)
 const MOMENTUM_EXPIRY_MS    = 120_000; // reset window only if no directional tick for 2 minutes
@@ -1204,17 +1204,27 @@ export async function scanMomentumMarkets(): Promise<void> {
       enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
-      // Balance floor check — use the already-refreshed balance from main bot state
+      // Balance floor check — fail-safe: if we can't verify balance, block the trade
       if (state.balanceFloorCents > 0) {
+        let balanceOk = false;
         try {
           await refreshBalance();
           const balance = getBotState().balanceCents;
           console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${state.balanceFloorCents}¢`);
-          if (balance > 0 && balance < state.balanceFloorCents) {
+          if (balance > 0 && balance >= state.balanceFloorCents) {
+            balanceOk = true;
+          } else if (balance > 0 && balance < state.balanceFloorCents) {
             stopMomentumBot(`Balance floor hit: ${balance}¢ < ${state.balanceFloorCents}¢ floor`);
             return;
+          } else {
+            // balance came back as 0 — API problem, block trade as precaution
+            console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${state.balanceFloorCents}¢)`);
           }
-        } catch { /* non-blocking */ }
+        } catch (err) {
+          // fetch failed — block trade rather than risk breaching floor
+          console.error(`[BALANCE CHECK] Failed to fetch balance — skipping trade as precaution: ${String(err)}`);
+        }
+        if (!balanceOk) return;
       }
 
       console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length}`);
