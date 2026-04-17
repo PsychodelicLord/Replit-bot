@@ -184,11 +184,24 @@ export function MomentumBot() {
   const [priceMax, setPriceMax]               = useState("80");
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
+  const [simModeSynced, setSimModeSynced]     = useState(false);
+
+  // Sync local simulatorMode from server on first load — prevents accidentally
+  // sending simulatorMode:false when toggling Auto Mode while server is in sim mode.
+  useEffect(() => {
+    if (!simModeSynced && data?.simulatorMode !== undefined) {
+      setSimulatorMode(data.simulatorMode);
+      setSimModeSynced(true);
+    }
+  }, [data?.simulatorMode, simModeSynced]);
 
   const enabled  = data?.enabled ?? false;
   const status   = data?.status;
   const isPaused = status === "PAUSED";
+  // Use server value as source of truth; local state is only for pending changes
   const isSimMode = data?.simulatorMode ?? simulatorMode;
+  // What the toggle should show: server value when bot is running (locked), local when stopped
+  const toggleDisplayMode = enabled ? isSimMode : simulatorMode;
 
   function toggleAuto() {
     const pMin = parseInt(priceMin || "20", 10);
@@ -613,27 +626,35 @@ export function MomentumBot() {
 
           {/* Simulator toggle — visible above Auto Mode */}
           <div className="border-t border-white/5 pt-4 mt-4">
-            <div className={`flex items-center justify-between rounded-xl px-3 py-2.5 transition-colors ${simulatorMode ? "bg-violet-500/15 border border-violet-500/30" : "bg-white/[0.03] border border-white/5"}`}>
+            <div className={`flex items-center justify-between rounded-xl px-3 py-2.5 transition-colors ${toggleDisplayMode ? "bg-violet-500/15 border border-violet-500/30" : "bg-white/[0.03] border border-white/5"}`}>
               <div>
                 <p className="text-xs font-semibold text-violet-300">🎮 Paper Trading</p>
-                <p className="text-[10px] mt-0.5" style={{ color: simulatorMode ? "#a78bfa99" : "#475569" }}>
-                  {simulatorMode ? "Real markets, fake money — no real orders placed" : "Enable to test strategy without spending money"}
+                <p className="text-[10px] mt-0.5" style={{ color: toggleDisplayMode ? "#a78bfa99" : "#475569" }}>
+                  {enabled
+                    ? toggleDisplayMode
+                      ? "✅ Active — real markets, fake money"
+                      : "⚠️ LIVE mode — real money at risk"
+                    : toggleDisplayMode
+                      ? "Real markets, fake money — no real orders placed"
+                      : "Enable to test strategy without spending money"}
                 </p>
               </div>
               <button
                 onClick={() => setSimulatorMode(v => !v)}
                 disabled={enabled}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none shrink-0 ml-3 ${
-                  simulatorMode ? "bg-violet-500" : "bg-white/10"
-                } disabled:opacity-40`}
+                  toggleDisplayMode ? "bg-violet-500" : "bg-white/10"
+                } ${enabled ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-                  simulatorMode ? "translate-x-6" : "translate-x-1"
+                  toggleDisplayMode ? "translate-x-6" : "translate-x-1"
                 }`} />
               </button>
             </div>
             {enabled && (
-              <p className="text-[9px] text-slate-600 mt-1 pl-1">Stop the bot first to change trading mode</p>
+              <p className="text-[9px] text-slate-500 mt-1 pl-1">
+                {toggleDisplayMode ? "🟣 Paper mode active — stop bot to switch to live" : "🔴 Live mode active — stop bot to switch to paper"}
+              </p>
             )}
           </div>
 
@@ -646,7 +667,7 @@ export function MomentumBot() {
                   {isReconnecting
                     ? "⟳ Reconnecting to server..."
                     : enabled
-                      ? simulatorMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
+                      ? isSimMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
                       : "Tap to start momentum trading"}
                 </p>
               </div>
