@@ -203,7 +203,7 @@ router.get("/bot/momentum/status", (_req, res): void => {
   const state = getMomentumBotState();
   db.select({
     allTimeWins:    sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} > 0) as int)`,
-    allTimeLosses:  sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} <= 0 and ${tradesTable.pnlCents} is not null) as int)`,
+    allTimeLosses:  sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} < 0) as int)`,
     allTimePnlCents: sql<number>`cast(coalesce(sum(${tradesTable.pnlCents}), 0) as int)`,
   }).from(tradesTable).where(sql`${tradesTable.status} = 'closed'`)
     .then(([row]) => {

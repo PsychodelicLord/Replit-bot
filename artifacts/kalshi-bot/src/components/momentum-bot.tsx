@@ -562,7 +562,7 @@ export function MomentumBot() {
                   <span className="text-red-400 font-bold">{data?.allTimeLosses ?? 0}L</span>
                 </span>
                 <span className={`font-bold ${(data?.allTimePnlCents ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {(data?.allTimePnlCents ?? 0) >= 0 ? "+" : ""}{((data?.allTimePnlCents ?? 0) / 100).toFixed(2)}¢
+                  {(data?.allTimePnlCents ?? 0) >= 0 ? "+$" : "-$"}{(Math.abs(data?.allTimePnlCents ?? 0) / 100).toFixed(2)}
                 </span>
               </div>
             </div>
