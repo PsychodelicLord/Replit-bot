@@ -1586,6 +1586,26 @@ export function resetSimStats(): MomentumBotState {
   return getMomentumBotState();
 }
 
+/** Reset ALL stats — sim + real trade W/L/PnL + clears trades table */
+export async function resetAllStats(): Promise<MomentumBotState> {
+  // Reset in-memory state
+  state.simWins       = 0;
+  state.simLosses     = 0;
+  state.simPnlCents   = 0;
+  state.simOpenTradeCount = 0;
+  simPositions.length = 0;
+  state.totalWins     = 0;
+  state.totalLosses   = 0;
+  state.totalPnlCents = 0;
+  state.sessionPnlCents = 0;
+  state.consecutiveLosses = 0;
+  log("🗑️ All stats reset by user");
+  saveMomentumConfig();
+  // Wipe trades table so allTimePnlCents DB query also returns 0
+  await db.delete(tradesTable).catch(err => console.error("[momentumBot] resetAllStats: trades delete failed:", String(err)));
+  return getMomentumBotState();
+}
+
 export function stopMomentumBot(reason = "Manually stopped via dashboard"): MomentumBotState {
   state.enabled = false;
   state.autoMode = false;

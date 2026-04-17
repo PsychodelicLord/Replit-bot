@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
-import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, getLivePerformanceReport } from "../lib/momentumBot";
+import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
 import {
@@ -230,6 +230,11 @@ router.get("/bot/momentum/debug", async (_req, res): Promise<void> => {
 
 router.post("/bot/momentum/reset-sim", (_req, res): void => {
   res.json(MomentumBotStatus.parse(resetSimStats()));
+});
+
+router.post("/bot/momentum/reset-all", async (_req, res): Promise<void> => {
+  const state = await resetAllStats();
+  res.json(MomentumBotStatus.parse(state));
 });
 
 // Live execution quality report — purely observational, real trades only
