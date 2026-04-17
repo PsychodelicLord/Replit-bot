@@ -78,6 +78,7 @@ interface MomentumPosition {
   lastSeenPriceCents: number;
   lastMovedAt: number;      // ms — last time price moved ≥1¢
   buyOrderId: string | null;
+  closeTs: number;          // contract expiry epoch ms — 0 if unknown
 }
 
 interface MomentumDecision {
@@ -586,25 +587,26 @@ type RawMarket = {
 };
 
 function rawToMarket(m: RawMarket, now: number) {
-  // If close_time is missing, assume plenty of time remaining so the market isn't silently filtered
-  const closeMs = m.close_time ? new Date(m.close_time).getTime() : now + 30 * 60_000;
-  const minutesRemaining = Math.max(0, (closeMs - now) / 60_000);
+  // If close_time is missing, use 0 — the scan will reject any market with closeTs=0
+  // (old behaviour of assuming 30 min let markets bypass the time filter entirely)
+  const closeTs = m.close_time ? new Date(m.close_time).getTime() : 0;
+  const minutesRemaining = closeTs > 0 ? Math.max(0, (closeTs - now) / 60_000) : 0;
   const askCents = m.yes_ask_dollars != null && m.yes_ask_dollars > 0
     ? Math.round(m.yes_ask_dollars * 100) : 0;
   const bidCents = m.yes_bid_dollars != null && m.yes_bid_dollars > 0
     ? Math.round(m.yes_bid_dollars * 100) : 0;
-  return { ticker: m.ticker!, title: m.title ?? m.ticker!, minutesRemaining, status: m.status ?? "open", askCents, bidCents };
+  return { ticker: m.ticker!, title: m.title ?? m.ticker!, minutesRemaining, closeTs, status: m.status ?? "open", askCents, bidCents };
 }
 
 // ── Market list cache — refreshed every 2 min to avoid rate-limiting Kalshi ──
 let _marketCache: {
-  markets: Array<{ ticker: string; title: string; minutesRemaining: number; status: string; askCents: number; bidCents: number }>;
+  markets: Array<{ ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number }>;
   cachedAt: number;
 } | null = null;
 const MARKET_CACHE_TTL_MS = 2 * 60_000; // re-fetch market list every 2 minutes
 
 async function fetchActiveMarkets(): Promise<Array<{
-  ticker: string; title: string; minutesRemaining: number; status: string; askCents: number; bidCents: number;
+  ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number;
 }>> {
   const now = Date.now();
 
@@ -822,6 +824,7 @@ export async function executeMomentumTrade(
   side: "YES" | "NO",
   bidCents: number,
   askCents: number,
+  closeTs: number = 0,
 ): Promise<void> {
   // Buy near bid (not ask) to avoid instant drawdown
   const limitCents = Math.min(askCents, bidCents + 1);
@@ -863,6 +866,7 @@ export async function executeMomentumTrade(
     lastSeenPriceCents: result.fillPrice,
     lastMovedAt: Date.now(),
     buyOrderId: result.orderId,
+    closeTs,
   };
 
   openPositions.push(pos);
@@ -885,6 +889,7 @@ function enterSimPosition(
   side: "YES" | "NO",
   bidCents: number,
   askCents: number,
+  closeTs: number = 0,
 ): void {
   const limitCents    = Math.min(askCents, bidCents + 1);
   // Cap contract count: use at least MIN_PRICE_FOR_CONTRACTS as the divisor.
@@ -904,6 +909,7 @@ function enterSimPosition(
     lastSeenPriceCents: limitCents,
     lastMovedAt: Date.now(),
     buyOrderId: null,
+    closeTs,
   };
 
   simPositions.push(pos);
@@ -975,7 +981,9 @@ async function monitorSimPositions(): Promise<void> {
       ? (currentBid > 0 ? currentBid : currentMid)
       : (currentAsk > 0 ? currentAsk : currentMid);
 
-    if      (gain >= TP_CENTS)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
+    const simMinsLeft = pos.closeTs > 0 ? (pos.closeTs - now) / 60_000 : 999;
+    if      (simMinsLeft < 2)                   toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
+    else if (gain >= TP_CENTS)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
     else if (gain <= -SL_CENTS)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
     else if (now - pos.lastMovedAt >= STALE_MS) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
   }
@@ -1013,6 +1021,18 @@ async function runSellMonitor(): Promise<void> {
       pos.lastMovedAt = now;
     }
     pos.lastSeenPriceCents = currentMid;
+
+    // Expiry force-exit — if < 2 min left on contract, exit NOW regardless of TP/SL
+    // Holding to expiry in thin markets means binary settlement, not a clean fill
+    if (pos.closeTs > 0) {
+      const minsLeft = (pos.closeTs - now) / 60_000;
+      if (minsLeft < 2) {
+        log(`⚠️ EXPIRY EXIT — ${minsLeft.toFixed(1)}min left on Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — force-closing`);
+        dbLog("warn", `[MOMENTUM] EXPIRY EXIT: ${coinLabel(pos.marketId)} — ${minsLeft.toFixed(1)}min left, gain:${gain}¢`);
+        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+        continue;
+      }
+    }
 
     // Take-profit
     if (gain >= TP_CENTS) {
@@ -1097,6 +1117,21 @@ export async function scanMomentumMarkets(): Promise<void> {
     if (activePositions.some(p => p.marketId === market.ticker)) continue;
     const cooldown = marketCooldowns.get(market.ticker);
     if (cooldown && Date.now() < cooldown) continue;
+
+    // ── Real-time time guard — recomputed NOW, not from stale cache ──────────
+    // Cache can be up to 2 min old; without this check the bot enters markets
+    // with only 1–2 min left when the cache still says "6 min remaining".
+    // Also blocks any market where close_time was missing (closeTs === 0).
+    const minRequired = state.simulatorMode ? MIN_MINUTES_REMAINING_SIM : MIN_MINUTES_REMAINING;
+    if (market.closeTs <= 0) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — no close_time on record, skipping to be safe`);
+      continue;
+    }
+    const actualMinutesLeft = (market.closeTs - Date.now()) / 60_000;
+    if (actualMinutesLeft < minRequired) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — only ${actualMinutesLeft.toFixed(1)}min left (< ${minRequired}min required) — SKIP (stale cache had ${market.minutesRemaining.toFixed(1)}min)`);
+      continue;
+    }
 
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) {
@@ -1224,7 +1259,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     if (state.simulatorMode) {
       // ── Simulator: paper position, no real money ──────────────────────────
       console.log(`[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`);
-      enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask);
+      enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
       // Balance floor check — fail-safe: if we can't verify balance, block the trade
@@ -1255,7 +1290,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask);
+      await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs);
       console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length}`);
     }
   }
