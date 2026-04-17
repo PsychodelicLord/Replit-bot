@@ -1133,7 +1133,9 @@ export async function retryOpenPositions(): Promise<void> {
 
             const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
             if (idx >= 0) openPositions.splice(idx, 1);
-            openMarkets.delete(pos.marketId);
+            // NOTE: intentionally NOT deleting from openMarkets — keeps this market period
+            // locked so the bot cannot immediately re-buy the same market after a manual sell.
+            // The lock expires naturally when a new 15-min period begins (different market ID).
             state.openPositionCount = openPositions.length;
             // DB write — fire-and-forget
             if (pos.tradeId > 0) {
@@ -1145,7 +1147,7 @@ export async function retryOpenPositions(): Promise<void> {
                 .catch(e => logger.warn({ err: e }, "sell-monitor: manual-sell DB write failed"));
             }
             botLog("info",
-              `🖐 Trade ${pos.tradeId} manually closed | sell ~${sellPriceCents}¢ | net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
+              `🖐 Trade ${pos.tradeId} manually closed | sell ~${sellPriceCents}¢ | net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢ | market locked until period ends`,
               { tradeId: pos.tradeId },
             ).catch(() => {});
             fireTradeClosedHook(pos.entryPriceCents, sellPriceCents || pos.entryPriceCents, pnlCents);

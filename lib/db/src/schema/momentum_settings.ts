@@ -14,4 +14,8 @@ export const momentumSettingsTable = pgTable("momentum_settings", {
   simWins:              integer("sim_wins").notNull().default(0),
   simLosses:            integer("sim_losses").notNull().default(0),
   simPnlCents:          integer("sim_pnl_cents").notNull().default(0),
+  // Real trade stats — persisted across restarts
+  totalWins:            integer("total_wins").notNull().default(0),
+  totalLosses:          integer("total_losses").notNull().default(0),
+  totalPnlCents:        integer("total_pnl_cents").notNull().default(0),
 });

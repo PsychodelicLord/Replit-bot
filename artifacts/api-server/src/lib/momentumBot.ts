@@ -103,6 +103,7 @@ export interface MomentumBotState {
   // Trade tracking
   totalWins: number;
   totalLosses: number;
+  totalPnlCents: number;
   sessionPnlCents: number;
   consecutiveLosses: number;
 
@@ -149,6 +150,7 @@ const state: MomentumBotState = {
   lastDecisionAt: null,
   totalWins: 0,
   totalLosses: 0,
+  totalPnlCents: 0,
   sessionPnlCents: 0,
   consecutiveLosses: 0,
   pausedUntilMs: null,
@@ -385,6 +387,13 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
     state.totalLosses++;
     state.consecutiveLosses++;
   }
+  state.totalPnlCents = (state.totalPnlCents ?? 0) + pnlCents;
+
+  // ── Persist real trade W/L to DB so restarts don't wipe the scoreboard ──
+  db.insert(momentumSettingsTable)
+    .values({ id: 1, totalWins: state.totalWins, totalLosses: state.totalLosses, totalPnlCents: state.totalPnlCents ?? 0 })
+    .onConflictDoUpdate({ target: momentumSettingsTable.id, set: { totalWins: state.totalWins, totalLosses: state.totalLosses, totalPnlCents: state.totalPnlCents ?? 0 } })
+    .catch(err => console.error("[momentumBot] recordTradeResult DB save failed:", String(err)));
 
   log(
     `📊 TRADE CLOSED | entry: ${entryPriceCents}¢ → exit: ${exitPriceCents}¢ | P&L: ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢ | W:${state.totalWins} L:${state.totalLosses} | session: ${state.sessionPnlCents >= 0 ? "+" : ""}${state.sessionPnlCents}¢`,
@@ -1282,6 +1291,9 @@ export function saveMomentumConfig(): void {
     simWins:              state.simWins,
     simLosses:            state.simLosses,
     simPnlCents:          state.simPnlCents,
+    totalWins:            state.totalWins,
+    totalLosses:          state.totalLosses,
+    totalPnlCents:        state.totalPnlCents,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -1334,6 +1346,10 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
       state.simWins     = r.simWins    ?? 0;
       state.simLosses   = r.simLosses  ?? 0;
       state.simPnlCents = r.simPnlCents ?? 0;
+      // Restore real trade lifetime stats
+      state.totalWins     = r.totalWins    ?? 0;
+      state.totalLosses   = r.totalLosses  ?? 0;
+      state.totalPnlCents = r.totalPnlCents ?? 0;
 
       if (r.enabled || autoStartFallback) {
         const reason = r.enabled ? "DB shows enabled=true" : "MOMENTUM_AUTO_START fallback";
