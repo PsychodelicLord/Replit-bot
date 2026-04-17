@@ -49,18 +49,15 @@ export async function runMigrations(): Promise<void> {
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS simulator_mode BOOLEAN NOT NULL DEFAULT TRUE
     `);
-    // Safety fixes: correct any row that has dangerous defaults.
-    // simulator_mode=FALSE → TRUE: Railway should always boot in paper mode.
-    // price_min < 20 or price_max > 80: extreme price entries cause huge gap losses
-    //   (e.g. NO @7¢ with YES jumping 54¢ = -270¢ loss). Safe range is 20-80.
-    // Users can adjust these in the dashboard after the bot is running.
+    // Safety fix: only correct dangerous price ranges (extreme prices cause gap losses).
+    // simulator_mode is intentionally NOT forced here — the user controls that via the dashboard
+    // and we must not override it on every deploy.
     await db.execute(sql`
       UPDATE momentum_settings
-      SET simulator_mode = TRUE,
-          price_min      = GREATEST(price_min, 20),
-          price_max      = LEAST(price_max, 80)
+      SET price_min = GREATEST(price_min, 20),
+          price_max = LEAST(price_max, 80)
       WHERE id = 1
-        AND (simulator_mode = FALSE OR price_min < 20 OR price_max > 80)
+        AND (price_min < 20 OR price_max > 80)
     `);
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS price_min INTEGER NOT NULL DEFAULT 20
