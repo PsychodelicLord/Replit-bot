@@ -661,15 +661,20 @@ async function placeBuyOrder(
   betCostCents: number,
 ): Promise<{ orderId: string; fillPrice: number; contractCount: number } | null> {
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
-  // Use cost-based ordering: specify how many cents to spend.
-  // Kalshi returns the actual fractional contract count filled.
-  const payload = {
+  // Kalshi uses count-based ordering (number of contracts), not cost-based.
+  // count = how many contracts to buy. Each YES contract costs limitCents.
+  // Use at least 1 contract; if budget < price we still place 1 (user accepted risk).
+  const contractCount = Math.max(1, Math.floor(betCostCents / limitCents));
+  const estimatedCost = contractCount * limitCents;
+  console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${limitCents}¢ → count:${contractCount} estimatedCost:${estimatedCost}¢`);
+
+  const payload: Record<string, unknown> = {
     ticker,
     client_order_id: clientOrderId,
     type:   "limit",
     action: "buy",
     side:   side.toLowerCase(),
-    cost:   betCostCents,   // cents to spend — Kalshi resolves fractional count
+    count:  contractCount,
     yes_price: side === "YES" ? limitCents : undefined,
     no_price:  side === "NO"  ? limitCents : undefined,
   };
@@ -680,12 +685,12 @@ async function placeBuyOrder(
       order?: { order_id?: string; yes_price?: number; no_price?: number; count?: number }
     };
     console.log(`[ORDER RESPONSE] ${JSON.stringify(resp)}`);
-    const orderId        = resp?.order?.order_id ?? clientOrderId;
-    const rawPrice       = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
-    const fillPrice      = rawPrice > 0 ? Math.round(rawPrice * 100) : limitCents;
-    const contractCount  = resp?.order?.count ?? Math.round(betCostCents / limitCents);
-    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${contractCount} cost:${betCostCents}¢`);
-    return { orderId, fillPrice, contractCount };
+    const orderId   = resp?.order?.order_id ?? clientOrderId;
+    const rawPrice  = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
+    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : limitCents;
+    const filled    = resp?.order?.count ?? contractCount;
+    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filled} cost:${betCostCents}¢`);
+    return { orderId, fillPrice, contractCount: filled };
   } catch (err) {
     console.error(`[ORDER FAILED] ${String(err)}`);
     warn(`placeBuyOrder failed: ${String(err)}`, { ticker, side, limitCents });
