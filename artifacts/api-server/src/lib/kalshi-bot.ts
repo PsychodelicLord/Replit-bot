@@ -1143,6 +1143,12 @@ export async function retryOpenPositions(): Promise<void> {
           continue;
         }
 
+        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL)
+        if (currentBid > 0 && grossProfit <= -3) {
+          await executeSell(pos, currentBid, `stop-loss (${grossProfit}¢)`);
+          continue;
+        }
+
         // Take-profit
         if (currentBid > 0 && grossProfit >= botConfig.minNetProfitCents) {
           await executeSell(pos, currentBid, `take-profit (+${grossProfit}¢)`);
