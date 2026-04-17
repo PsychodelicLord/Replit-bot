@@ -13,6 +13,18 @@ type DebugData = {
   config: { DOMINANCE_REQUIRED: number; TICK_WINDOW_SIZE: number };
 };
 
+type LiveTradeRecord = {
+  timestamp: number; market: string; side: "YES" | "NO"; exitReason: "TP" | "SL" | "STALE";
+  entryPriceCents: number; entrySlippage: number; midAtTrigger: number;
+  expectedExitCents: number; actualFillCents: number; exitSlippage: number; pnlCents: number;
+};
+type LivePerfReport = {
+  sampleSize: number; winRate: number; avgWinCents: number; avgLossCents: number;
+  evPerTrade: number; staleRate: number; totalPnlCents: number;
+  avgEntrySlip: number; avgExitSlip: number; tpRate: number; slRate: number;
+  recentTrades: LiveTradeRecord[];
+};
+
 const COIN_LABELS: Record<string, string> = {
   KXBTC: "BTC", KXETH: "ETH", KXSOL: "SOL", KXDOGE: "DOGE",
   KXXRP: "XRP", KXBNB: "BNB", KXHYPE: "HYPE",
@@ -159,6 +171,21 @@ export function MomentumBot() {
     const id = setInterval(fetchDebug, 15_000);
     return () => clearInterval(id);
   }, [fetchDebug]);
+
+  // ── Live execution performance report (real trades only) ──────────────────
+  const [livePerf, setLivePerf] = useState<LivePerfReport | null>(null);
+  const fetchLivePerf = useCallback(async () => {
+    try {
+      const res = await fetch(`${BASE_URL}api/bot/momentum/live-performance`);
+      if (res.ok) setLivePerf(await res.json());
+    } catch { /* non-fatal */ }
+  }, []);
+
+  useEffect(() => {
+    fetchLivePerf();
+    const id = setInterval(fetchLivePerf, 30_000);
+    return () => clearInterval(id);
+  }, [fetchLivePerf]);
 
   // ── Signal flash state ───────────────────────────────────────────────────
   const [signalFlash, setSignalFlash] = useState(false);
@@ -516,6 +543,89 @@ export function MomentumBot() {
                   {(data?.allTimePnlCents ?? 0) >= 0 ? "+" : ""}{((data?.allTimePnlCents ?? 0) / 100).toFixed(2)}¢
                 </span>
               </div>
+            </div>
+          )}
+
+          {/* Live Execution Performance Card — real money mode only */}
+          {!isSimMode && (
+            <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] p-3">
+              <div className="flex items-center justify-between mb-2.5">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-3.5 h-3.5 text-sky-400" />
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Live Execution Quality</span>
+                </div>
+                {livePerf && livePerf.sampleSize > 0 && (
+                  <span className="text-[9px] text-slate-600">{livePerf.sampleSize} real trades</span>
+                )}
+              </div>
+
+              {(!livePerf || livePerf.sampleSize === 0) ? (
+                <p className="text-[9px] text-slate-600 text-center py-2">No real trades recorded yet this session</p>
+              ) : (
+                <>
+                  {/* Rolling metrics */}
+                  <div className="grid grid-cols-3 gap-1.5 mb-2.5">
+                    {[
+                      { label: "Win Rate", val: `${(livePerf.winRate * 100).toFixed(0)}%`,
+                        color: livePerf.winRate >= 0.6 ? "text-emerald-400" : livePerf.winRate >= 0.45 ? "text-yellow-400" : "text-red-400" },
+                      { label: "EV / Trade", val: `${livePerf.evPerTrade >= 0 ? "+" : ""}${livePerf.evPerTrade.toFixed(1)}¢`,
+                        color: livePerf.evPerTrade > 0 ? "text-emerald-400" : livePerf.evPerTrade > -1 ? "text-yellow-400" : "text-red-400" },
+                      { label: "Total P&L", val: `${livePerf.totalPnlCents >= 0 ? "+" : ""}${livePerf.totalPnlCents}¢`,
+                        color: livePerf.totalPnlCents >= 0 ? "text-emerald-400" : "text-red-400" },
+                      { label: "Avg Win", val: `+${livePerf.avgWinCents.toFixed(1)}¢`, color: "text-emerald-400" },
+                      { label: "Avg Loss", val: `${livePerf.avgLossCents.toFixed(1)}¢`, color: "text-red-400" },
+                      { label: "Stale Rate", val: `${(livePerf.staleRate * 100).toFixed(0)}%`,
+                        color: livePerf.staleRate < 0.2 ? "text-slate-400" : livePerf.staleRate < 0.4 ? "text-yellow-400" : "text-red-400" },
+                    ].map(({ label, val, color }) => (
+                      <div key={label} className="rounded bg-black/20 p-1.5 text-center">
+                        <p className="text-[8px] text-slate-600 uppercase tracking-widest">{label}</p>
+                        <p className={`text-xs font-bold mt-0.5 ${color}`}>{val}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Slippage row */}
+                  <div className="flex justify-between text-[9px] px-0.5 mb-2.5">
+                    <span className="text-slate-600">TP {(livePerf.tpRate * 100).toFixed(0)}% · SL {(livePerf.slRate * 100).toFixed(0)}%</span>
+                    <span className={livePerf.avgExitSlip >= 0 ? "text-emerald-400/70" : "text-red-400/70"}>
+                      Exit slip avg: {livePerf.avgExitSlip >= 0 ? "+" : ""}{livePerf.avgExitSlip.toFixed(1)}¢
+                    </span>
+                    <span className={livePerf.avgEntrySlip === 0 ? "text-slate-600" : "text-yellow-400/70"}>
+                      Entry slip: {livePerf.avgEntrySlip.toFixed(1)}¢
+                    </span>
+                  </div>
+
+                  {/* Recent trades mini-table */}
+                  {livePerf.recentTrades.length > 0 && (
+                    <div className="border-t border-white/5 pt-2">
+                      <p className="text-[8px] text-slate-600 uppercase tracking-widest mb-1.5">Recent real trades</p>
+                      <div className="space-y-1">
+                        {livePerf.recentTrades.slice(0, 5).map((t, i) => {
+                          const coin = t.market.replace(/15M.*$/, "").replace("KX", "");
+                          const slipColor = t.exitSlippage >= 0 ? "text-emerald-400/60" : "text-red-400/60";
+                          return (
+                            <div key={i} className="flex items-center justify-between text-[9px]">
+                              <span className="text-slate-500 w-10">{coin} {t.side}</span>
+                              <span className="text-slate-600">entry:{t.entryPriceCents}¢ → fill:{t.actualFillCents}¢</span>
+                              <span className={`w-12 text-right ${slipColor}`}>
+                                slip:{t.exitSlippage >= 0 ? "+" : ""}{t.exitSlippage}¢
+                              </span>
+                              <span className={`w-10 text-right font-bold ${t.pnlCents > 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {t.pnlCents >= 0 ? "+" : ""}{t.pnlCents}¢
+                              </span>
+                              <span className={`w-8 text-right text-[8px] ${
+                                t.exitReason === "TP" ? "text-emerald-400/70"
+                                : t.exitReason === "SL" ? "text-red-400/70"
+                                : "text-slate-500"
+                              }`}>{t.exitReason}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 

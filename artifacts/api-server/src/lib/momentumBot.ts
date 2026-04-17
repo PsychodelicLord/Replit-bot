@@ -206,6 +206,123 @@ interface TradeRecord {
 const healthBuffer: TradeRecord[] = [];  // last 100 closed trades
 let   healthTradeCount = 0;             // lifetime total fed into buffer
 
+// ─── Live Execution Observation Layer ────────────────────────────────────────
+// Records every REAL-money trade with entry, expected vs actual fill, slippage.
+// Purely observational — execution logic is never changed by these metrics.
+export interface LiveTradeRecord {
+  timestamp:          number;
+  market:             string;
+  side:               "YES" | "NO";
+  exitReason:         "TP" | "SL" | "STALE";
+  entryPriceCents:    number;   // what we paid to enter
+  entrySlippage:      number;   // actual fill minus limit (entry)
+  midAtTrigger:       number;   // mid price when TP/SL/STALE fired
+  expectedExitCents:  number;   // bid we passed to placeSellOrder
+  actualFillCents:    number;   // what Kalshi actually filled us at
+  exitSlippage:       number;   // actualFill − expectedExit (negative = worse)
+  pnlCents:           number;   // net P&L after fees
+}
+
+const liveTradeBuffer: LiveTradeRecord[] = [];  // rolling last 100 real trades
+let   liveTradeCount = 0;                       // lifetime real trade count
+
+export interface LivePerformanceReport {
+  sampleSize:     number;
+  winRate:        number;
+  avgWinCents:    number;
+  avgLossCents:   number;
+  evPerTrade:     number;
+  staleRate:      number;
+  totalPnlCents:  number;
+  avgEntrySlip:   number;   // average entry slippage cents
+  avgExitSlip:    number;   // average exit slippage cents (expected vs actual fill)
+  tpRate:         number;
+  slRate:         number;
+  recentTrades:   LiveTradeRecord[];  // last 20
+}
+
+function emitLivePerformanceReport(): void {
+  const buf = liveTradeBuffer;
+  if (buf.length === 0) return;
+
+  const wins   = buf.filter(t => t.pnlCents > 0);
+  const losses = buf.filter(t => t.pnlCents < 0);
+  const stales = buf.filter(t => t.exitReason === "STALE");
+  const tps    = buf.filter(t => t.exitReason === "TP");
+  const sls    = buf.filter(t => t.exitReason === "SL");
+
+  const winRate    = wins.length / buf.length;
+  const avgWin     = wins.length  ? wins.reduce((s,t)  => s + t.pnlCents, 0) / wins.length  : 0;
+  const avgLoss    = losses.length? losses.reduce((s,t) => s + t.pnlCents, 0) / losses.length: 0;
+  const ev         = buf.reduce((s, t) => s + t.pnlCents, 0) / buf.length;
+  const staleRate  = stales.length / buf.length;
+  const avgEntrySlip = buf.reduce((s,t) => s + t.entrySlippage, 0) / buf.length;
+  const avgExitSlip  = buf.reduce((s,t) => s + t.exitSlippage,  0) / buf.length;
+  const totalPnl   = buf.reduce((s, t) => s + t.pnlCents, 0);
+
+  const report = `\n${"─".repeat(60)}\n📊 LIVE EXECUTION REPORT — last ${buf.length} real trades (total: ${liveTradeCount})\n` +
+    `  Win rate:      ${(winRate * 100).toFixed(1)}%  (${wins.length}W / ${losses.length}L)\n` +
+    `  Avg win:       +${avgWin.toFixed(1)}¢\n` +
+    `  Avg loss:      ${avgLoss.toFixed(1)}¢\n` +
+    `  EV per trade:  ${ev >= 0 ? "+" : ""}${ev.toFixed(2)}¢\n` +
+    `  Stale exits:   ${(staleRate * 100).toFixed(1)}%  (${stales.length})\n` +
+    `  TP / SL split: ${tps.length} TP / ${sls.length} SL\n` +
+    `  Entry slippage avg: ${avgEntrySlip.toFixed(2)}¢\n` +
+    `  Exit  slippage avg: ${avgExitSlip.toFixed(2)}¢  (negative = worse than expected)\n` +
+    `  Total P&L:     ${totalPnl >= 0 ? "+" : ""}${totalPnl}¢\n` +
+    `${"─".repeat(60)}`;
+
+  log(report);
+  dbLog("info", report, "live-perf-report");
+}
+
+function recordLiveTradeExecution(record: LiveTradeRecord): void {
+  liveTradeBuffer.push(record);
+  if (liveTradeBuffer.length > 100) liveTradeBuffer.shift();
+  liveTradeCount++;
+
+  // Detailed per-trade log
+  const slipStr = record.exitSlippage >= 0
+    ? `+${record.exitSlippage}¢ better than expected`
+    : `${record.exitSlippage}¢ worse than expected`;
+  log(
+    `📋 LIVE EXEC | ${record.side} ${record.market} | ` +
+    `entry:${record.entryPriceCents}¢ mid@trigger:${record.midAtTrigger}¢ ` +
+    `expectedExit:${record.expectedExitCents}¢ actualFill:${record.actualFillCents}¢ (${slipStr}) | ` +
+    `reason:${record.exitReason} pnl:${record.pnlCents >= 0 ? "+" : ""}${record.pnlCents}¢`,
+  );
+
+  // Rolling report every 50 real trades
+  if (liveTradeCount % 50 === 0) emitLivePerformanceReport();
+}
+
+export function getLivePerformanceReport(): LivePerformanceReport {
+  const buf = liveTradeBuffer;
+  if (buf.length === 0) {
+    return {
+      sampleSize: 0, winRate: 0, avgWinCents: 0, avgLossCents: 0,
+      evPerTrade: 0, staleRate: 0, totalPnlCents: 0,
+      avgEntrySlip: 0, avgExitSlip: 0, tpRate: 0, slRate: 0, recentTrades: [],
+    };
+  }
+  const wins   = buf.filter(t => t.pnlCents > 0);
+  const losses = buf.filter(t => t.pnlCents < 0);
+  return {
+    sampleSize:    buf.length,
+    winRate:       wins.length / buf.length,
+    avgWinCents:   wins.length   ? wins.reduce((s,t)   => s + t.pnlCents, 0) / wins.length   : 0,
+    avgLossCents:  losses.length ? losses.reduce((s,t)  => s + t.pnlCents, 0) / losses.length : 0,
+    evPerTrade:    buf.reduce((s,t) => s + t.pnlCents, 0) / buf.length,
+    staleRate:     buf.filter(t => t.exitReason === "STALE").length / buf.length,
+    tpRate:        buf.filter(t => t.exitReason === "TP").length    / buf.length,
+    slRate:        buf.filter(t => t.exitReason === "SL").length    / buf.length,
+    totalPnlCents: buf.reduce((s,t) => s + t.pnlCents, 0),
+    avgEntrySlip:  buf.reduce((s,t) => s + t.entrySlippage, 0) / buf.length,
+    avgExitSlip:   buf.reduce((s,t) => s + t.exitSlippage,  0) / buf.length,
+    recentTrades:  buf.slice(-20).reverse(),
+  };
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 function log(msg: string, data?: Record<string, unknown>) {
   logger.info(data ?? {}, `[MOMENTUM BOT] ${msg}`);
@@ -579,6 +696,7 @@ async function placeBuyOrder(
 async function placeSellOrder(
   pos: MomentumPosition,
   currentBidCents: number,
+  midAtTrigger = currentBidCents,  // mid price when TP/SL fired — for execution quality tracking
 ): Promise<boolean> {
   const limitCents = Math.max(1, currentBidCents - 2);
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
@@ -620,6 +738,21 @@ async function placeSellOrder(
     const liveGain = exitPrice - pos.entryPriceCents;
     const liveReason: "TP" | "SL" | "STALE" = liveGain >= TP_CENTS ? "TP" : liveGain <= -SL_CENTS ? "SL" : "STALE";
     recordTradeForHealth(netPnl, liveReason, pos.entrySlippageCents ?? 0);
+
+    // ── Live execution observation (purely observational, never changes logic) ──
+    recordLiveTradeExecution({
+      timestamp:         Date.now(),
+      market:            pos.marketId,
+      side:              pos.side,
+      exitReason:        liveReason,
+      entryPriceCents:   pos.entryPriceCents,
+      entrySlippage:     pos.entrySlippageCents ?? 0,
+      midAtTrigger,
+      expectedExitCents: currentBidCents,
+      actualFillCents:   exitPrice,
+      exitSlippage:      exitPrice - currentBidCents,  // positive = better, negative = worse
+      pnlCents:          netPnl,
+    });
 
     // ── Async DB update — fire-and-forget, never blocks ──
     const sellFields = {
@@ -870,21 +1003,21 @@ async function runSellMonitor(): Promise<void> {
     // Take-profit
     if (gain >= TP_CENTS) {
       log(`💰 TP hit — gain ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid);
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
       continue;
     }
 
     // Stop-loss
     if (gain <= -SL_CENTS) {
       log(`🛑 SL hit — loss ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid);
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
       continue;
     }
 
     // Stale-position exit
     if (now - pos.lastMovedAt >= STALE_MS) {
       log(`⏳ STALE EXIT — price flat for ${Math.round((now - pos.lastMovedAt) / 1000)}s on Trade ${pos.tradeId}`);
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid);
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
       continue;
     }
   }
