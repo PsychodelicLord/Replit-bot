@@ -767,13 +767,15 @@ async function enterTrade(
 // In-memory list of all active trades — synced from DB on every sell-monitor tick
 // so restarts / crashes never lose track of open positions.
 interface OpenPosition {
-  tradeId:         number;
-  marketId:        string;
-  side:            "YES" | "NO";
-  entryPriceCents: number;
-  contractCount:   number;
-  enteredAt:       number;   // ms timestamp
-  buyOrderId:      string | null;
+  tradeId:             number;
+  marketId:            string;
+  side:                "YES" | "NO";
+  entryPriceCents:     number;
+  contractCount:       number;
+  enteredAt:           number;   // ms timestamp
+  buyOrderId:          string | null;
+  pendingSellOrderId?: string | null;  // set when a sell order has been placed but not yet confirmed filled
+  pendingSellAt?:      number | null;  // timestamp of pending sell placement
 }
 
 const openPositions: OpenPosition[] = [];
@@ -808,11 +810,9 @@ async function executeSell(
     pos.marketId, `sell-${Math.abs(pos.tradeId)}-${Date.now()}`, "limit", "sell", pos.side, pos.contractCount, limitSellCents,
   );
 
-  let sellResp: { order?: { order_id?: string; yes_price?: number; no_price?: number } };
+  let sellResp: { order?: { order_id?: string; status?: string; filled_count?: number; remaining_count?: number; yes_price?: number; no_price?: number } };
   try {
-    sellResp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
-      order?: { order_id?: string; yes_price?: number; no_price?: number }
-    };
+    sellResp = await kalshiFetch("POST", "/portfolio/orders", payload) as typeof sellResp;
   } catch (err) {
     await botLog("warn",
       `❌ SELL FAILED (Kalshi rejected) — Trade ${pos.tradeId}: ${String(err)}`,
@@ -821,7 +821,25 @@ async function executeSell(
     return false;
   }
 
-  // ── Remove from in-memory list FIRST — sell monitor never blocks on DB ────
+  const sellOrderId   = sellResp?.order?.order_id ?? null;
+  const orderStatus   = sellResp?.order?.status ?? "";
+  const remainingQty  = sellResp?.order?.remaining_count ?? -1;
+  const isFilledNow   = orderStatus === "filled" || remainingQty === 0;
+
+  // ── Sell placed but not yet filled (resting limit order) ─────────────────
+  // CRITICAL: do NOT remove from openPositions/openMarkets yet — the next scan
+  // would otherwise re-enter this market, resulting in a double-buy.
+  if (!isFilledNow && sellOrderId) {
+    pos.pendingSellOrderId = sellOrderId;
+    pos.pendingSellAt      = Date.now();
+    await botLog("info",
+      `⏳ SELL PENDING — Trade ${pos.tradeId} | order ${sellOrderId} is resting (not yet filled)`,
+      { tradeId: pos.tradeId, sellOrderId },
+    );
+    return true;
+  }
+
+  // ── Immediately filled — commit removal ───────────────────────────────────
   const rawPrice  = pos.side === "YES"
     ? (sellResp?.order?.yes_price ?? 0)
     : (sellResp?.order?.no_price  ?? 0);
@@ -829,7 +847,6 @@ async function executeSell(
   const gross     = fillPrice - pos.entryPriceCents;
   const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
   const netPnl    = gross - fee;
-  const sellOrderId = sellResp?.order?.order_id ?? null;
 
   const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
   if (idx >= 0) openPositions.splice(idx, 1);
@@ -1011,6 +1028,53 @@ export async function retryOpenPositions(): Promise<void> {
       // ── Per-position try/catch: one bad position never kills the others ────
       try {
         const tradeAgeMs = now - pos.enteredAt;
+
+        // ── Pending sell: poll fill status, cancel+retry if stuck >10s ─────────
+        if (pos.pendingSellOrderId) {
+          try {
+            const or = await kalshiFetch("GET", `/portfolio/orders/${pos.pendingSellOrderId}`) as {
+              order?: { status?: string; filled_count?: number; remaining_count?: number; yes_price?: number; no_price?: number }
+            };
+            const status    = or.order?.status ?? "";
+            const filledQty = or.order?.filled_count ?? 0;
+            const filled    = filledQty > 0 || ["filled", "settled", "executed"].includes(status);
+
+            if (filled) {
+              // Sell confirmed filled — commit removal
+              const rawPrice  = pos.side === "YES" ? (or.order?.yes_price ?? 0) : (or.order?.no_price ?? 0);
+              const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pos.entryPriceCents;
+              const gross     = fillPrice - pos.entryPriceCents;
+              const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
+              const netPnl    = gross - fee;
+              const idxP = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+              if (idxP >= 0) openPositions.splice(idxP, 1);
+              openMarkets.delete(pos.marketId);
+              state.openPositionCount = openPositions.length;
+              fireTradeClosedHook(pos.entryPriceCents, fillPrice, netPnl);
+              refreshDailyPnl().catch(() => {});
+              if (pos.tradeId > 0) {
+                db.update(tradesTable).set({ status: "closed", sellPriceCents: fillPrice, pnlCents: netPnl, feeCents: fee, closedAt: new Date() })
+                  .where(eq(tradesTable.id, pos.tradeId)).catch(() => {});
+              }
+              await botLog("info", `✅ SELL CONFIRMED (pending→filled) — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`, { tradeId: pos.tradeId });
+              continue;
+            }
+
+            // Still resting — cancel and retry if stuck >10s
+            const pendingAge = Date.now() - (pos.pendingSellAt ?? Date.now());
+            if (pendingAge > 10_000) {
+              try { await kalshiFetch("DELETE", `/portfolio/orders/${pos.pendingSellOrderId}`); } catch (_) {}
+              pos.pendingSellOrderId = null;
+              pos.pendingSellAt      = null;
+              await botLog("warn", `🔁 SELL TIMED OUT — Trade ${pos.tradeId} — cancelling resting order, will retry`, { tradeId: pos.tradeId });
+              // Fall through to TP/SL logic which will re-fire executeSell
+            } else {
+              continue; // Still within 10s window — keep waiting
+            }
+          } catch (_) {
+            continue; // Can't check order status — keep waiting
+          }
+        }
 
         // ── Cancel if buy never filled (60–90s window) ──────────────────────
         if (tradeAgeMs >= 60_000 && tradeAgeMs < 90_000 && pos.buyOrderId) {
