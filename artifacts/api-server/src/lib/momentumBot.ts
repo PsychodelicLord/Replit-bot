@@ -29,7 +29,7 @@ const PRICE_MIN  = 20;   // start tracking a market when price is in this range
 const PRICE_MAX  = 80;
 const ENTRY_BUFFER_CENTS = 5; // allow entry even if momentum has pushed price ±5¢ outside range
 const SPREAD_MAX = 5;
-const MIN_MINUTES_REMAINING = 3;
+const MIN_MINUTES_REMAINING = 5;
 const MAX_POSITIONS = 2;
 
 const TP_CENTS    = 3;   // take-profit: exit when gain ≥ +3¢
