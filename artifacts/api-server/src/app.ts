@@ -32,7 +32,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
-const frontendDist = path.join(new URL(".", import.meta.url).pathname, "public");
+const frontendDist = path.join(new URL(".", import.meta.url).pathname, "../../kalshi-bot/dist/public");
 app.use(express.static(frontendDist));
 app.use((_req, res) => {
   res.sendFile(path.join(frontendDist, "index.html"), (err) => {
