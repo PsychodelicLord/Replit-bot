@@ -464,16 +464,6 @@ export function MomentumBot() {
                   >
                     reset scoreboard
                   </button>
-                  <button
-                    onClick={async () => {
-                      if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
-                      await fetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
-                    }}
-                    className="mt-1 w-full text-[9px] text-red-700 hover:text-red-400 transition-colors text-center py-0.5 font-semibold"
-                  >
-                    reset all winnings
-                  </button>
-
                   {/* ── Bot Health Score ── */}
                   {(() => {
                     const hs = data?.healthScore;
@@ -576,6 +566,17 @@ export function MomentumBot() {
               </div>
             </div>
           )}
+
+          {/* Reset all stats — always visible */}
+          <button
+            onClick={async () => {
+              if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
+              await fetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
+            }}
+            className="mt-2 w-full text-[9px] text-red-700 hover:text-red-400 transition-colors text-center py-0.5 font-semibold"
+          >
+            reset all winnings
+          </button>
 
           {/* Live Execution Performance Card — real money mode only */}
           {!isSimMode && (
