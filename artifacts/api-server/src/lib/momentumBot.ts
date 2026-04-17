@@ -125,6 +125,19 @@ export interface MomentumBotState {
   // Entry price range (cents) — only enter trades within this price band
   priceMin: number;
   priceMax: number;
+
+  // Bot Health Score — updated after every trade once buffer >= 20
+  healthScore: {
+    total: number;           // 0–10
+    label: "Healthy" | "Fragile" | "Broken" | "Pending";
+    tradesInBuffer: number;  // how many trades are in the rolling window
+    winRate: number;         // 0–1
+    netEV: number;           // expected value per trade in cents
+    avgWin: number;
+    avgLoss: number;
+    staleRate: number;
+    evScore: number; stabilityScore: number; ratioScore: number; staleScore: number; execScore: number;
+  } | null;
 }
 
 const state: MomentumBotState = {
@@ -152,6 +165,7 @@ const state: MomentumBotState = {
   simOpenTradeCount: 0,
   priceMin: 20,
   priceMax: 80,
+  healthScore: null,
 };
 
 export interface MomentumBotConfig {
@@ -1181,7 +1195,20 @@ function recordTradeForHealth(pnlCents: number, exitReason: "TP" | "SL" | "STALE
   healthBuffer.push({ pnlCents, isWin: pnlCents > 0, exitReason, slippageCents, timestamp: Date.now() });
   if (healthBuffer.length > 100) healthBuffer.shift();
   healthTradeCount++;
-  if (healthTradeCount % 50 === 0 && healthBuffer.length >= 50) {
+  // Update live health score after every trade once we have 20+ in the buffer
+  if (healthBuffer.length >= 20) {
+    const s = calculateHealthScore();
+    state.healthScore = {
+      total: s.total, label: s.label as "Healthy" | "Fragile" | "Broken",
+      tradesInBuffer: healthBuffer.length,
+      winRate: s.winRate, netEV: s.netEV, avgWin: s.avgWin, avgLoss: s.avgLoss,
+      staleRate: s.staleRate,
+      evScore: s.evScore, stabilityScore: s.stabilityScore, ratioScore: s.ratioScore,
+      staleScore: s.staleScore, execScore: s.execScore,
+    };
+  }
+  // Log full report every 20 trades
+  if (healthTradeCount % 20 === 0 && healthBuffer.length >= 20) {
     logHealthScore(calculateHealthScore());
   }
 }

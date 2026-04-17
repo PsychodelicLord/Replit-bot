@@ -181,4 +181,30 @@ export interface MomentumBotStatus {
   balanceFloorCents: number;
   maxSessionLossCents: number;
   consecutiveLossLimit: number;
+  betCostCents?: number;
+  simulatorMode?: boolean;
+  simPnlCents?: number;
+  simWins?: number;
+  simLosses?: number;
+  simOpenTradeCount?: number;
+  priceMin?: number;
+  priceMax?: number;
+  allTimeWins?: number;
+  allTimeLosses?: number;
+  allTimePnlCents?: number;
+  healthScore?: {
+    total: number;
+    label: "Healthy" | "Fragile" | "Broken" | "Pending";
+    tradesInBuffer: number;
+    winRate: number;
+    netEV: number;
+    avgWin: number;
+    avgLoss: number;
+    staleRate: number;
+    evScore: number;
+    stabilityScore: number;
+    ratioScore: number;
+    staleScore: number;
+    execScore: number;
+  } | null;
 }

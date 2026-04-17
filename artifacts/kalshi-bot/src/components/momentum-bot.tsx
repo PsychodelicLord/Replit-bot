@@ -402,6 +402,88 @@ export function MomentumBot() {
                   >
                     reset scoreboard
                   </button>
+
+                  {/* ── Bot Health Score ── */}
+                  {(() => {
+                    const hs = data?.healthScore;
+                    const bufferCount = hs?.tradesInBuffer ?? 0;
+                    const needed = Math.max(0, 20 - bufferCount);
+
+                    if (!hs) {
+                      return (
+                        <div className="mt-3 rounded-lg border border-white/5 bg-black/20 p-3">
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-base">🏥</span>
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Bot Health</span>
+                          </div>
+                          <div className="w-full bg-white/5 rounded-full h-1.5 mb-1.5">
+                            <div
+                              className="bg-violet-500 h-1.5 rounded-full transition-all"
+                              style={{ width: `${Math.min(100, (bufferCount / 20) * 100)}%` }}
+                            />
+                          </div>
+                          <p className="text-[9px] text-slate-500 text-center">
+                            {needed > 0 ? `${needed} more trades to unlock health report` : "Calculating..."}
+                          </p>
+                        </div>
+                      );
+                    }
+
+                    const color = hs.label === "Healthy"
+                      ? { dot: "bg-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/5", text: "text-emerald-400" }
+                      : hs.label === "Fragile"
+                      ? { dot: "bg-yellow-400", border: "border-yellow-500/30", bg: "bg-yellow-500/5", text: "text-yellow-400" }
+                      : { dot: "bg-red-500", border: "border-red-500/30", bg: "bg-red-500/5", text: "text-red-400" };
+
+                    const advice = hs.label === "Healthy"
+                      ? "Strategy is working — safe to scale up bet size"
+                      : hs.label === "Fragile"
+                      ? "Borderline — keep sim mode running, watch closely"
+                      : "Not ready for real money — stay in paper mode";
+
+                    return (
+                      <div className={`mt-3 rounded-lg border ${color.border} ${color.bg} p-3`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-2.5 h-2.5 rounded-full ${color.dot} shadow-lg`} style={{ boxShadow: `0 0 6px currentColor` }} />
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Bot Health</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-sm font-bold ${color.text}`}>{hs.total}/10</span>
+                            <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${color.text} border ${color.border}`}>{hs.label}</span>
+                          </div>
+                        </div>
+
+                        <p className={`text-[9px] ${color.text} mb-2.5`}>{advice}</p>
+
+                        <div className="grid grid-cols-5 gap-1 mb-2">
+                          {[
+                            { label: "EV", val: hs.evScore },
+                            { label: "Stab", val: hs.stabilityScore },
+                            { label: "W/L", val: hs.ratioScore },
+                            { label: "Stale", val: hs.staleScore },
+                            { label: "Exec", val: hs.execScore },
+                          ].map(({ label, val }) => (
+                            <div key={label} className="text-center">
+                              <div className="flex justify-center gap-0.5 mb-0.5">
+                                {[0,1].map(i => (
+                                  <div key={i} className={`w-1.5 h-1.5 rounded-sm ${i < val ? color.dot : "bg-white/10"}`} />
+                                ))}
+                              </div>
+                              <span className="text-[8px] text-slate-500">{label}</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="flex justify-between text-[9px] text-slate-500">
+                          <span>WR {(hs.winRate * 100).toFixed(0)}%</span>
+                          <span>EV {hs.netEV >= 0 ? "+" : ""}{hs.netEV.toFixed(1)}¢</span>
+                          <span>Stale {(hs.staleRate * 100).toFixed(0)}%</span>
+                          <span>{hs.tradesInBuffer} trades</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </>
               )}
             </div>

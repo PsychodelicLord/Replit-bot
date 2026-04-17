@@ -314,6 +314,21 @@ export const MomentumBotStatus = zod.object({
   allTimeWins:         zod.number().optional(),
   allTimeLosses:       zod.number().optional(),
   allTimePnlCents:     zod.number().optional(),
+  healthScore: zod.object({
+    total:            zod.number(),
+    label:            zod.enum(["Healthy", "Fragile", "Broken", "Pending"]),
+    tradesInBuffer:   zod.number(),
+    winRate:          zod.number(),
+    netEV:            zod.number(),
+    avgWin:           zod.number(),
+    avgLoss:          zod.number(),
+    staleRate:        zod.number(),
+    evScore:          zod.number(),
+    stabilityScore:   zod.number(),
+    ratioScore:       zod.number(),
+    staleScore:       zod.number(),
+    execScore:        zod.number(),
+  }).nullable().optional(),
 });
 
 /**
