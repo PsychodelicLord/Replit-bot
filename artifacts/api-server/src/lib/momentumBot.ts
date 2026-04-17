@@ -32,8 +32,7 @@ const SPREAD_MAX = 5;
 const MIN_MINUTES_REMAINING = 5;
 const MAX_POSITIONS = 2;
 
-const TP_CENTS    = 3;   // take-profit: exit when gain ≥ +3¢
-const SL_CENTS    = 3;   // stop-loss: exit when loss ≥ -3¢  (equal risk/reward — need >50% WR)
+// TP_CENTS / SL_CENTS are now configurable via state.tpCents / state.slCents (default 3/3)
 const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 // Contract count cap: treat price as ≥ MIN_PRICE_FOR_CONTRACTS when sizing.
@@ -128,6 +127,10 @@ export interface MomentumBotState {
   priceMin: number;
   priceMax: number;
 
+  // Exit thresholds (cents) — configurable from UI
+  tpCents: number;   // take-profit trigger
+  slCents: number;   // stop-loss trigger
+
   // Bot Health Score — updated after every trade once buffer >= 20
   healthScore: {
     total: number;           // 0–10
@@ -168,6 +171,8 @@ const state: MomentumBotState = {
   simOpenTradeCount: 0,
   priceMin: 20,
   priceMax: 80,
+  tpCents: 3,
+  slCents: 3,
   healthScore: null,
 };
 
@@ -179,6 +184,8 @@ export interface MomentumBotConfig {
   simulatorMode?: boolean;       // paper trading — real data, fake money
   priceMin?: number;             // min entry price in cents (default 20)
   priceMax?: number;             // max entry price in cents (default 80)
+  tpCents?: number;              // take-profit threshold in cents (default 3)
+  slCents?: number;              // stop-loss threshold in cents (default 3)
 }
 
 // Per-market momentum counter state
@@ -752,7 +759,7 @@ async function placeSellOrder(
 
     // ── Health score tracking ──
     const liveGain = exitPrice - pos.entryPriceCents;
-    const liveReason: "TP" | "SL" | "STALE" = liveGain >= TP_CENTS ? "TP" : liveGain <= -SL_CENTS ? "SL" : "STALE";
+    const liveReason: "TP" | "SL" | "STALE" = liveGain >= state.tpCents ? "TP" : liveGain <= -state.slCents ? "SL" : "STALE";
     recordTradeForHealth(netPnl, liveReason, pos.entrySlippageCents ?? 0);
 
     // ── Live execution observation (purely observational, never changes logic) ──
@@ -982,9 +989,9 @@ async function monitorSimPositions(): Promise<void> {
       : (currentAsk > 0 ? currentAsk : currentMid);
 
     const simMinsLeft = pos.closeTs > 0 ? (pos.closeTs - now) / 60_000 : 999;
-    if      (simMinsLeft < 2)                   toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
-    else if (gain >= TP_CENTS)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
-    else if (gain <= -SL_CENTS)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
+    if      (simMinsLeft < 2)                        toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
+    else if (gain >= state.tpCents)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
+    else if (gain <= -state.slCents)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
     else if (now - pos.lastMovedAt >= STALE_MS) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
   }
 
@@ -1035,14 +1042,14 @@ async function runSellMonitor(): Promise<void> {
     }
 
     // Take-profit
-    if (gain >= TP_CENTS) {
+    if (gain >= state.tpCents) {
       log(`💰 TP hit — gain ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
       continue;
     }
 
     // Stop-loss
-    if (gain <= -SL_CENTS) {
+    if (gain <= -state.slCents) {
       log(`🛑 SL hit — loss ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
       continue;
@@ -1565,6 +1572,8 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.simulatorMode !== undefined) state.simulatorMode = cfg.simulatorMode;
   if (cfg.priceMin !== undefined) state.priceMin = Math.max(1, Math.min(cfg.priceMin, 99));
   if (cfg.priceMax !== undefined) state.priceMax = Math.max(1, Math.min(cfg.priceMax, 99));
+  if (cfg.tpCents !== undefined) state.tpCents = Math.max(1, cfg.tpCents);
+  if (cfg.slCents !== undefined) state.slCents = Math.max(1, cfg.slCents);
   saveMomentumConfig();
 }
 

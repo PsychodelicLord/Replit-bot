@@ -209,6 +209,8 @@ export function MomentumBot() {
   const [betCostCents, setBetCostCents]       = useState("30");
   const [priceMin, setPriceMin]               = useState("20");
   const [priceMax, setPriceMax]               = useState("80");
+  const [tpCents, setTpCents]                 = useState("3");
+  const [slCents, setSlCents]                 = useState("3");
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
   const [simModeSynced, setSimModeSynced]     = useState(false);
@@ -222,6 +224,16 @@ export function MomentumBot() {
     }
   }, [data?.simulatorMode, simModeSynced]);
 
+  // Sync TP/SL from server on first load
+  const [exitThresholdsSynced, setExitThresholdsSynced] = useState(false);
+  useEffect(() => {
+    if (!exitThresholdsSynced && data?.tpCents !== undefined && data?.slCents !== undefined) {
+      setTpCents(String(data.tpCents));
+      setSlCents(String(data.slCents));
+      setExitThresholdsSynced(true);
+    }
+  }, [data?.tpCents, data?.slCents, exitThresholdsSynced]);
+
   const enabled  = data?.enabled ?? false;
   const status   = data?.status;
   const isPaused = status === "PAUSED";
@@ -230,21 +242,25 @@ export function MomentumBot() {
   // What the toggle should show: server value when bot is running (locked), local when stopped
   const toggleDisplayMode = enabled ? isSimMode : simulatorMode;
 
-  function toggleAuto() {
+  function buildConfig(overrides: Partial<{ enabled: boolean; simulatorMode: boolean }> = {}) {
     const pMin = parseInt(priceMin || "20", 10);
     const pMax = parseInt(priceMax || "80", 10);
-    setAuto.mutate({
-      data: {
-        enabled: !enabled,
-        balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
-        maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
-        consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
-        betCostCents:         Math.max(1, parseInt(betCostCents || "30", 10)),
-        simulatorMode,
-        priceMin:             Math.min(pMin, pMax - 1),
-        priceMax:             Math.max(pMax, pMin + 1),
-      },
-    });
+    return {
+      enabled:              overrides.enabled              ?? !enabled,
+      balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
+      maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
+      consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
+      betCostCents:         Math.max(1, parseInt(betCostCents || "30", 10)),
+      simulatorMode:        overrides.simulatorMode        ?? simulatorMode,
+      priceMin:             Math.min(pMin, pMax - 1),
+      priceMax:             Math.max(pMax, pMin + 1),
+      tpCents:              Math.max(1, parseInt(tpCents || "3", 10)),
+      slCents:              Math.max(1, parseInt(slCents || "3", 10)),
+    };
+  }
+
+  function toggleAuto() {
+    setAuto.mutate({ data: buildConfig() });
   }
 
   function toggleSimMode() {
@@ -252,21 +268,8 @@ export function MomentumBot() {
     if (!newSim && enabled) {
       if (!window.confirm("Switch to REAL MONEY mode? The bot will start placing real Kalshi orders immediately.")) return;
     }
-    const pMin = parseInt(priceMin || "20", 10);
-    const pMax = parseInt(priceMax || "80", 10);
     setSimulatorMode(newSim);
-    setAuto.mutate({
-      data: {
-        enabled,
-        balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
-        maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
-        consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
-        betCostCents:         Math.max(1, parseInt(betCostCents || "30", 10)),
-        simulatorMode:        newSim,
-        priceMin:             Math.min(pMin, pMax - 1),
-        priceMax:             Math.max(pMax, pMin + 1),
-      },
-    });
+    setAuto.mutate({ data: buildConfig({ enabled, simulatorMode: newSim }) });
   }
 
   const sessionPnl = data?.sessionPnlCents ?? 0;
@@ -917,6 +920,42 @@ export function MomentumBot() {
                     </div>
                     <p className="text-[9px] text-slate-600 mt-0.5">
                       Only enter when market price is in this range. e.g. <strong className="text-slate-500">30 to 70</strong> = buy YES only when it's between 30¢ and 70¢
+                    </p>
+                  </div>
+
+                  {/* Exit thresholds */}
+                  <div>
+                    <span className="text-[10px] text-slate-400 block mb-1">Take-profit / Stop-loss (¢)</span>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <input
+                          type="number"
+                          min="1"
+                          max="50"
+                          step="1"
+                          value={tpCents}
+                          onChange={e => setTpCents(e.target.value)}
+                          placeholder="3"
+                          className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
+                        />
+                        <p className="text-[9px] text-slate-600 mt-0.5">TP +¢</p>
+                      </div>
+                      <div className="flex-1">
+                        <input
+                          type="number"
+                          min="1"
+                          max="50"
+                          step="1"
+                          value={slCents}
+                          onChange={e => setSlCents(e.target.value)}
+                          placeholder="3"
+                          className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-red-500/50"
+                        />
+                        <p className="text-[9px] text-slate-600 mt-0.5">SL -¢</p>
+                      </div>
+                    </div>
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      Exit when price moves +TP or −SL cents from entry. Default: <strong className="text-slate-500">3 / 3</strong>
                     </p>
                   </div>
 
