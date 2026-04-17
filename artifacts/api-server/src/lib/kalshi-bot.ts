@@ -9,6 +9,15 @@ import { eq, gte, sql } from "drizzle-orm";
 // bot ticks, which was the root cause of the "endpoint has been disabled" errors.
 setInterval(() => { db.execute(sql`SELECT 1`).catch(() => {}); }, 15_000);
 
+// ─── Trade-closed callback (injected by momentumBot to avoid circular import) ──
+let _onTradeClosed: ((entry: number, exit: number, pnl: number) => void) | null = null;
+export function setTradeClosedHook(fn: (entry: number, exit: number, pnl: number) => void) {
+  _onTradeClosed = fn;
+}
+function fireTradeClosedHook(entry: number, exit: number, pnl: number) {
+  try { _onTradeClosed?.(entry, exit, pnl); } catch (_) {}
+}
+
 // ─── Kalshi API config ───────────────────────────────────────────────────────
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
@@ -829,6 +838,9 @@ async function executeSell(
     { tradeId: pos.tradeId, fillPrice, netPnl },
   );
 
+  // ── Update W/L counter in momentumBot state ───────────────────────────────
+  fireTradeClosedHook(pos.entryPriceCents, fillPrice, netPnl);
+
   // ── DB update — fully fire-and-forget, never blocks ───────────────────────
   // pos.tradeId may still be a provisional negative ID if the buy DB write
   // hasn't completed yet. We try by real ID first; fall back to buyOrderId.
@@ -1069,6 +1081,7 @@ export async function retryOpenPositions(): Promise<void> {
               `🖐 Trade ${pos.tradeId} manually closed | sell ~${sellPriceCents}¢ | net ${pnlCents >= 0 ? "+" : ""}${pnlCents}¢`,
               { tradeId: pos.tradeId },
             ).catch(() => {});
+            fireTradeClosedHook(pos.entryPriceCents, sellPriceCents || pos.entryPriceCents, pnlCents);
             refreshDailyPnl().catch(() => {});
             continue;
           }
@@ -1105,6 +1118,7 @@ export async function retryOpenPositions(): Promise<void> {
               : `💸 Trade ${pos.tradeId} settled — lost ${pos.entryPriceCents}¢`,
             { tradeId: pos.tradeId },
           ).catch(() => {});
+          fireTradeClosedHook(pos.entryPriceCents, ourSideWon ? 100 : 0, pnlCents);
           refreshDailyPnl().catch(() => {});
           continue;
         }

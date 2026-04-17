@@ -752,7 +752,7 @@ export function MomentumBot() {
           )}
           {debugData && debugData.filteredMarkets.length === 0 && (
             <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 text-[10px] text-slate-600">
-              No active markets in price range — waiting for next 15-min cycle to open
+              No tradeable markets right now (spreads too wide or price out of range) — re-scanning shortly
             </div>
           )}
 
