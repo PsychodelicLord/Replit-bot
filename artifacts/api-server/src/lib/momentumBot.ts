@@ -1034,8 +1034,17 @@ async function runSellMonitor(): Promise<void> {
 }
 
 // ─── Market Scanner ─────────────────────────────────────────────────────────
+let scanInProgress = false; // single-instance lock — prevents overlapping scans causing double bets
+
 export async function scanMomentumMarkets(): Promise<void> {
   if (!state.enabled) return;
+  if (scanInProgress) {
+    console.log("[SCAN] Previous scan still running — skipping this tick to prevent double bets");
+    return;
+  }
+  scanInProgress = true;
+
+  try {
 
   // Risk checks
   if (checkRiskPause()) {
@@ -1251,6 +1260,10 @@ export async function scanMomentumMarkets(): Promise<void> {
   state.openTradeCount    = openPositions.length;
   state.simOpenTradeCount = simPositions.length;
   if (activePositions.length > 0) state.status = "IN_TRADE";
+
+  } finally {
+    scanInProgress = false;
+  }
 }
 
 // ─── Config Persistence ─────────────────────────────────────────────────────
