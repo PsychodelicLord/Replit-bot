@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, coinFlipTrade, startCoinFlipAuto, stopCoinFlipAuto, getCoinFlipAutoState, clearStuckPositions } from "../lib/kalshi-bot";
+import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
@@ -17,9 +17,6 @@ import {
   GetTradeStatsResponse,
   ManualTradeBody,
   ManualTradeResponse,
-  CoinFlipResponse,
-  CoinFlipAutoBody,
-  CoinFlipAutoStatus,
   MomentumBotAutoBody,
   MomentumBotStatus,
 } from "@workspace/api-zod";
@@ -164,33 +161,6 @@ router.post("/bot/manual-trade", async (req, res): Promise<void> => {
   const { ticker, side, limitCents, quantity } = parsed.data;
   const result = await manualTrade(ticker, side, limitCents, quantity ?? 1);
   res.json(ManualTradeResponse.parse(result));
-});
-
-router.post("/bot/coin-flip", async (_req, res): Promise<void> => {
-  if (!isProductionDeployment()) {
-    res.status(403).json({ success: false, message: "Trading is disabled on the dev server — use the Railway deployment." });
-    return;
-  }
-  const result = await coinFlipTrade();
-  res.json(CoinFlipResponse.parse(result));
-});
-
-router.get("/bot/coin-flip/auto", (_req, res): void => {
-  res.json(CoinFlipAutoStatus.parse(getCoinFlipAutoState()));
-});
-
-router.post("/bot/coin-flip/auto", (req, res): void => {
-  const parsed = CoinFlipAutoBody.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
-  const { enabled, intervalSecs } = parsed.data;
-  if (enabled && !isProductionDeployment()) {
-    res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
-    return;
-  }
-  const state = enabled
-    ? startCoinFlipAuto(intervalSecs ?? 60)
-    : stopCoinFlipAuto();
-  res.json(CoinFlipAutoStatus.parse(state));
 });
 
 router.post("/bot/clear-positions", async (_req, res): Promise<void> => {

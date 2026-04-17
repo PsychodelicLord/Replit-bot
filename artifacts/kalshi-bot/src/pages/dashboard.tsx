@@ -1,9 +1,7 @@
 import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
-import { CoinFlip } from "@/components/coin-flip";
-import { CoinFlipSettings } from "@/components/coin-flip-settings";
 import { MomentumBot } from "@/components/momentum-bot";
 import { TradeTable } from "@/components/trade-table";
-import { Coins, Wallet, TrendingUp, TrendingDown, Trophy, Skull, BarChart2 } from "lucide-react";
+import { Wallet, TrendingUp, TrendingDown, Trophy, Skull, Zap } from "lucide-react";
 
 const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
 
@@ -36,14 +34,14 @@ export function Dashboard() {
   const { data: stats } = useGetTradeStats({ query: { refetchInterval: 5000 } });
   const { data: status } = useGetBotStatus({ query: { refetchInterval: 3000 } });
 
-  const balance      = status?.balanceCents ?? 0;
-  const todayPnl     = stats?.todayPnlCents ?? 0;
-  const totalPnl     = stats?.totalPnlCents ?? 0;
-  const wins         = stats?.winningTrades ?? 0;
-  const losses       = stats?.losingTrades ?? 0;
-  const winRate      = stats?.winRate ?? 0;
-  const totalEarned  = stats?.totalWinCents ?? 0;
-  const totalLost    = stats?.totalLossCents ?? 0;
+  const balance     = status?.balanceCents ?? 0;
+  const todayPnl    = stats?.todayPnlCents ?? 0;
+  const totalPnl    = stats?.totalPnlCents ?? 0;
+  const wins        = stats?.winningTrades ?? 0;
+  const losses      = stats?.losingTrades ?? 0;
+  const winRate     = stats?.winRate ?? 0;
+  const totalEarned = stats?.totalWinCents ?? 0;
+  const totalLost   = stats?.totalLossCents ?? 0;
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -51,11 +49,11 @@ export function Dashboard() {
       <header className="sticky top-0 z-50 border-b border-white/5 bg-black/60 backdrop-blur-xl">
         <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center border border-yellow-400/30 bg-yellow-400/10">
-              <Coins className="w-4 h-4 text-yellow-400" />
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center border border-sky-400/30 bg-sky-400/10">
+              <Zap className="w-4 h-4 text-sky-400" />
             </div>
             <div>
-              <h1 className="text-base font-bold text-white leading-none">Instinct Coin Flip</h1>
+              <h1 className="text-base font-bold text-white leading-none">Instinct Scalper</h1>
               <p className="text-[10px] text-slate-500 mt-0.5">Kalshi · 15-min markets · 24/7</p>
             </div>
           </div>
@@ -132,13 +130,7 @@ export function Dashboard() {
       </div>
 
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6 pb-12">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-          <CoinFlip />
-          <CoinFlipSettings />
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-          <MomentumBot />
-        </div>
+        <MomentumBot />
         <TradeTable />
       </main>
     </div>
