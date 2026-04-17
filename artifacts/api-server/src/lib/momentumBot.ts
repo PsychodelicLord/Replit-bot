@@ -791,19 +791,30 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
   saveMomentumConfig(); // persist sim stats after every trade so restarts never lose them
 }
 
-/** Monitor open paper positions — same TP/SL/stale logic as real monitor */
+/** Monitor open paper positions — mirrors real sell monitor exactly:
+ *  - TP/SL trigger uses mid (same as real)
+ *  - Exit price uses BID for YES, ASK for NO (same as placeSellOrder in real mode)
+ *  - This means TP fires at mid≥threshold but you only bank the bid, not the mid
+ */
 async function monitorSimPositions(): Promise<void> {
   if (simPositions.length === 0) return;
   const now = Date.now();
   const toClose: { pos: MomentumPosition; exitPrice: number; reason: string }[] = [];
 
   for (const pos of [...simPositions]) {
+    let currentBid = pos.lastSeenPriceCents;
+    let currentAsk = pos.lastSeenPriceCents;
     let currentMid = pos.lastSeenPriceCents;
     try {
       const ob = await fetchMarketOrderBook(pos.marketId);
-      if (ob) currentMid = ob.mid;
+      if (ob) {
+        currentBid = ob.bid;
+        currentAsk = ob.ask;
+        currentMid = ob.mid;
+      }
     } catch { /* keep last known */ }
 
+    // Trigger check uses mid — matches real sell monitor behaviour
     const gain = pos.side === "YES"
       ? currentMid - pos.entryPriceCents
       : pos.entryPriceCents - currentMid;
@@ -811,9 +822,15 @@ async function monitorSimPositions(): Promise<void> {
     if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) pos.lastMovedAt = now;
     pos.lastSeenPriceCents = currentMid;
 
-    if      (gain >= TP_CENTS)                  toClose.push({ pos, exitPrice: currentMid, reason: `TP +${gain}¢` });
-    else if (gain <= -SL_CENTS)                 toClose.push({ pos, exitPrice: currentMid, reason: `SL ${gain}¢` });
-    else if (now - pos.lastMovedAt >= STALE_MS) toClose.push({ pos, exitPrice: currentMid, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
+    // Exit price mirrors placeSellOrder: sell YES at bid, sell NO at ask
+    // (selling NO contracts = buying back YES, so you pay the ask to close)
+    const realisticExitPrice = pos.side === "YES"
+      ? (currentBid > 0 ? currentBid : currentMid)
+      : (currentAsk > 0 ? currentAsk : currentMid);
+
+    if      (gain >= TP_CENTS)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
+    else if (gain <= -SL_CENTS)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
+    else if (now - pos.lastMovedAt >= STALE_MS) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
   }
 
   for (const { pos, exitPrice, reason } of toClose) closeSimPosition(pos, exitPrice, reason);
