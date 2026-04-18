@@ -39,18 +39,16 @@ const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 // At 20¢ baseline: 100¢ bet → max 5 contracts → worst-case SL = -3¢ × 5 = -15¢.
 const MIN_PRICE_FOR_CONTRACTS = 20;
 
-const TICK_WINDOW_SIZE      = 5;      // track last N *directional* ticks (flat scans don't consume a slot)
-const DOMINANCE_REQUIRED    = 3;      // need 3/5 directional ticks same direction (was 2 — caused false signals)
-const DOMINANCE_REQUIRED_SIM = 3;    // sim mode: slightly looser (3+ same direction)
-const MAX_OPPOSING_MOVES    = 1;      // reject signal if opponent has > 1 counter-move
-const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
-const MIN_TOTAL_MOVE_CENTS  = 3;      // require ≥3¢ total price move (filters micro-drift noise)
-const MIN_TOTAL_MOVE_SIM    = 2;      // sim mode: ≥2¢ total move
+// Time-based fast-move detection (replaces tick-counting)
+const MOMENTUM_WINDOW_MS    = 15_000; // rolling look-back window: detect moves within last 15s
+const MIN_FAST_MOVE_CENTS   = 2;      // need ≥2¢ directional move within the window to signal
+const MAX_ENTRY_PRICE_YES   = 87;     // hard cap: never buy YES above 87¢ (insufficient upside)
+const MIN_ENTRY_PRICE_YES   = 13;     // hard cap: never buy NO when YES < 13¢ (equiv cap for NO)
+const PRICE_HISTORY_MAX_MS  = 60_000; // keep 60s of price samples per market
 const TRADE_SPREAD_MAX      = 4;      // spread required to actually execute a trade
-const TRADE_SPREAD_MAX_SIM  = 5;     // sim mode: allow up to 5¢ spread (slightly looser)
-const SPREAD_MAX_SIM        = 8;     // sim mode: scan-level spread filter (looser than 5)
-const MIN_MINUTES_REMAINING_SIM = 2; // sim mode: enter with 2 min left (vs 3)
-const MOMENTUM_EXPIRY_MS    = 120_000; // reset window only if no directional tick for 2 minutes
+const TRADE_SPREAD_MAX_SIM  = 5;      // sim mode: allow up to 5¢ spread (slightly looser)
+const SPREAD_MAX_SIM        = 8;      // sim mode: scan-level spread filter (looser than 5)
+const MIN_MINUTES_REMAINING_SIM = 2;  // sim mode: enter with 2 min left (vs 3)
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -58,11 +56,9 @@ const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 const FEE_RATE = 0.07;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
-// Per-market sliding-window state for directional dominance
+// Per-market rolling price history for time-based fast-move detection
 interface MarketMomentumState {
-  lastPrice: number | null;  // price at last real (non-flat) tick — anchor for delta
-  firstTickPrice: number | null; // price at first tick in window — for totalMove calc
-  tickWindow: Array<{ direction: "up" | "down" | "flat"; ts: number }>; // last TICK_WINDOW_SIZE ticks
+  priceHistory: Array<{ price: number; ts: number }>; // timestamped price samples (last 60s)
 }
 
 interface MomentumPosition {
@@ -83,12 +79,9 @@ interface MomentumPosition {
 interface MomentumDecision {
   action: "BUY_YES" | "BUY_NO" | "SKIP";
   reason: string;
-  upMoves: number;
-  downMoves: number;
-  range: number;
-  ticks: number[];
-  totalMove: number;   // total ¢ moved since direction run started
-  timeDiff: number;    // ms between first and last directional tick in run
+  moveCents: number;      // abs price move detected within the window (¢)
+  moveMs: number;         // time span over which the move occurred (ms)
+  centsPerSec: number;    // velocity: moveCents / (moveMs / 1000)
 }
 
 // ─── State ─────────────────────────────────────────────────────────────────
@@ -425,94 +418,85 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
   }
 }
 
-// ─── Sliding-window Directional Dominance Evaluation ───────────────────────
+// ─── Time-Based Fast-Move Detection ────────────────────────────────────────
 /**
- * Tracks the last TICK_WINDOW_SIZE price scans (including flat ticks).
- * Enters when 3+ of the last 5 ticks moved in the same direction.
- * Flat ticks are recorded but do NOT block or reset momentum.
- * Only resets the window if the market has gone completely stale (no scan for 30s).
+ * Detects directional price momentum by measuring how far the price has moved
+ * within a short rolling time window (MOMENTUM_WINDOW_MS = 15s).
+ *
+ * Signal fires when:
+ *   - Price moved ≥ MIN_FAST_MOVE_CENTS (2¢) within the last 15 seconds
+ *   - Current price is within hard entry caps (13–87¢) for the relevant direction
+ *
+ * This approach catches fast moves EARLY — at the start of momentum rather than
+ * after 3-5 confirmation ticks have already pushed price near the ceiling.
  */
 export function evaluateMomentum(marketId: string, currentPriceCents: number): MomentumDecision {
   const now = Date.now();
 
   if (!marketMomentum.has(marketId)) {
-    marketMomentum.set(marketId, { lastPrice: null, firstTickPrice: null, tickWindow: [] });
+    marketMomentum.set(marketId, { priceHistory: [] });
   }
   const ms = marketMomentum.get(marketId)!;
 
-  // First ever tick — establish baseline, no signal yet
-  if (ms.lastPrice === null) {
-    ms.lastPrice = currentPriceCents;
-    ms.firstTickPrice = currentPriceCents;
-    console.log(`[MOMENTUM] ${marketId} | Price: ${currentPriceCents}¢ first-tick`);
-    return { action: "SKIP", reason: "First tick — establishing baseline", upMoves: 0, downMoves: 0, range: 0, ticks: [], totalMove: 0, timeDiff: 0 };
-  }
+  // Record current sample
+  ms.priceHistory.push({ price: currentPriceCents, ts: now });
 
-  // Stale check — if last recorded tick was > MOMENTUM_EXPIRY_MS ago, reset window
-  if (ms.tickWindow.length > 0) {
-    const lastTs = ms.tickWindow[ms.tickWindow.length - 1].ts;
-    if (now - lastTs > MOMENTUM_EXPIRY_MS) {
-      console.log(`[MOMENTUM EXPIRED] ${marketId} — stale for ${Math.round((now - lastTs) / 1000)}s, window reset`);
-      ms.tickWindow = [];
-      ms.firstTickPrice = currentPriceCents;
-    }
-  }
+  // Trim history to last PRICE_HISTORY_MAX_MS (60s)
+  const cutoff = now - PRICE_HISTORY_MAX_MS;
+  ms.priceHistory = ms.priceHistory.filter(p => p.ts >= cutoff);
 
-  // Classify this tick vs last REAL (non-flat) anchor price
-  const delta = currentPriceCents - ms.lastPrice;
-  let direction: "up" | "down" | "flat";
-  if (delta >= MIN_TICK_DELTA)       direction = "up";
-  else if (delta <= -MIN_TICK_DELTA) direction = "down";
-  else                               direction = "flat";
-
-  // Advance anchor price on directional ticks only
-  if (direction !== "flat") {
-    ms.lastPrice = currentPriceCents;
-    if (ms.firstTickPrice === null) ms.firstTickPrice = currentPriceCents;
-  }
-
-  // Only push DIRECTIONAL ticks into the window — flat scans don't consume a slot.
-  // This means a real move stays in the window until the NEXT real move, not until
-  // 5 flat scans wash it away (which was causing signals to disappear on stable markets).
-  if (direction !== "flat") {
-    ms.tickWindow.push({ direction, ts: now });
-    if (ms.tickWindow.length > TICK_WINDOW_SIZE) ms.tickWindow.shift();
-  }
-
-  // Count directions in directional-only window
-  const upMoves   = ms.tickWindow.filter(t => t.direction === "up").length;
-  const downMoves = ms.tickWindow.filter(t => t.direction === "down").length;
-  const dirMoves  = upMoves + downMoves;
-
-  const totalMove = ms.firstTickPrice !== null ? Math.abs(currentPriceCents - ms.firstTickPrice) : 0;
-  const timeDiff  = ms.tickWindow.length >= 2 ? ms.tickWindow[ms.tickWindow.length - 1].ts - ms.tickWindow[0].ts : 0;
-
-  console.log(`[MOMENTUM] ${marketId} | ${currentPriceCents}¢ dir:${direction} | dirWindow up:${upMoves} dn:${downMoves} (${ms.tickWindow.length}/${TICK_WINDOW_SIZE}) | totalMove:${totalMove}¢`);
-
-  const decide = (action: "BUY_YES" | "BUY_NO" | "SKIP", reason: string): MomentumDecision => ({
-    action, reason, upMoves, downMoves,
-    range: Math.abs(delta), ticks: [], totalMove, timeDiff,
+  const skip = (reason: string): MomentumDecision => ({
+    action: "SKIP", reason, moveCents: 0, moveMs: 0, centsPerSec: 0,
   });
 
-  // No directional ticks yet — market hasn't moved
-  if (dirMoves === 0) {
-    return decide("SKIP", `No directional ticks yet — waiting for first ¢ move`);
+  // Need at least 2 samples to measure movement
+  if (ms.priceHistory.length < 2) {
+    return skip("First sample — establishing baseline");
   }
 
-  // Directional dominance — need N directional ticks in same direction (flat ignored)
-  // In sim mode: only 2+ needed (looser)
-  const dominanceThreshold = state.simulatorMode ? DOMINANCE_REQUIRED_SIM : DOMINANCE_REQUIRED;
-  if (upMoves >= dominanceThreshold && downMoves <= MAX_OPPOSING_MOVES) {
-    console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} in ${ms.tickWindow.length} dir-ticks${state.simulatorMode ? " [SIM]" : ""}`);
-    return decide("BUY_YES", `Bullish: ${upMoves}/${ms.tickWindow.length} UP, ${downMoves} opposing`);
-  }
-  if (downMoves >= dominanceThreshold && upMoves <= MAX_OPPOSING_MOVES) {
-    console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} in ${ms.tickWindow.length} dir-ticks${state.simulatorMode ? " [SIM]" : ""}`);
-    return decide("BUY_NO", `Bearish: ${downMoves}/${ms.tickWindow.length} DOWN, ${upMoves} opposing`);
+  // Find all samples within the rolling momentum window
+  const windowStart = now - MOMENTUM_WINDOW_MS;
+  const windowSamples = ms.priceHistory.filter(p => p.ts >= windowStart);
+
+  if (windowSamples.length < 2) {
+    return skip(`Watching — waiting for 2+ samples within ${MOMENTUM_WINDOW_MS / 1000}s window`);
   }
 
-  // Mixed or accumulating
-  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} (need ${dominanceThreshold}+ same-dir, ≤${MAX_OPPOSING_MOVES} opposing, have ${ms.tickWindow.length} total)`);
+  // Measure move from oldest sample in window to current price
+  const oldest     = windowSamples[0];
+  const rawMove    = currentPriceCents - oldest.price;
+  const moveMs     = Math.max(now - oldest.ts, 1);
+  const absMv      = Math.abs(rawMove);
+  const centsPerSec = absMv / (moveMs / 1000);
+
+  console.log(`[MOMENTUM] ${marketId} | ${currentPriceCents}¢ | move:${rawMove > 0 ? "+" : ""}${rawMove}¢ in ${Math.round(moveMs / 1000)}s (${centsPerSec.toFixed(2)}¢/s) | history:${ms.priceHistory.length} samples`);
+
+  // Not enough movement yet
+  if (absMv < MIN_FAST_MOVE_CENTS) {
+    return skip(`Flat — ${absMv}¢ move in ${Math.round(moveMs / 1000)}s (need ≥${MIN_FAST_MOVE_CENTS}¢ within ${MOMENTUM_WINDOW_MS / 1000}s)`);
+  }
+
+  if (rawMove > 0) {
+    // Price surging UP → buy YES (bet price continues up)
+    if (currentPriceCents > MAX_ENTRY_PRICE_YES) {
+      return skip(`BUY_YES blocked — ${currentPriceCents}¢ > hard cap ${MAX_ENTRY_PRICE_YES}¢ (insufficient upside)`);
+    }
+    return {
+      action: "BUY_YES",
+      reason: `Fast momentum ▲ +${rawMove}¢ in ${Math.round(moveMs / 1000)}s (${centsPerSec.toFixed(2)}¢/s)`,
+      moveCents: absMv, moveMs, centsPerSec,
+    };
+  } else {
+    // Price dropping DOWN → buy NO (bet price continues down)
+    if (currentPriceCents < MIN_ENTRY_PRICE_YES) {
+      return skip(`BUY_NO blocked — ${currentPriceCents}¢ < hard cap ${MIN_ENTRY_PRICE_YES}¢ (insufficient upside)`);
+    }
+    return {
+      action: "BUY_NO",
+      reason: `Fast momentum ▼ ${rawMove}¢ in ${Math.round(moveMs / 1000)}s (${centsPerSec.toFixed(2)}¢/s)`,
+      moveCents: absMv, moveMs, centsPerSec,
+    };
+  }
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
@@ -1182,7 +1166,7 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     log(
       `[MOMENTUM CHECK] ${coinLabel(market.ticker)} | price:${mid}¢ spread:${spread}¢ | ${decision.action} — ${decision.reason}`,
-      { upMoves: decision.upMoves, downMoves: decision.downMoves, range: decision.range, decision: decision.action },
+      { moveCents: decision.moveCents, moveMs: decision.moveMs, centsPerSec: decision.centsPerSec, decision: decision.action },
     );
 
     if (decision.action === "SKIP") {
@@ -1201,14 +1185,6 @@ export async function scanMomentumMarkets(): Promise<void> {
       filtered = true;
     }
 
-    // Filter 2: Minimum total price movement
-    // Sim mode: only 1¢ needed (vs 2¢ live)
-    const totalMoveLimit = state.simulatorMode ? MIN_TOTAL_MOVE_SIM : MIN_TOTAL_MOVE_CENTS;
-    if (!filtered && decision.totalMove < totalMoveLimit) {
-      console.log(`[FILTER:MOVE] ${coinLabel(market.ticker)} REJECTED — totalMove ${decision.totalMove}¢ < ${totalMoveLimit}¢ minimum${state.simulatorMode ? " [SIM]" : ""}`);
-      filtered = true;
-    }
-
     if (filtered) continue;
 
     // Entry-time price guard: even if momentum pushed price into the buffer zone,
@@ -1224,7 +1200,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       continue;
     }
 
-    console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.totalMove}¢ timeDiff:${decision.timeDiff}ms — all filters passed`);
+    console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.moveCents}¢ in ${Math.round(decision.moveMs / 1000)}s (${decision.centsPerSec.toFixed(2)}¢/s) — all filters passed`);
 
     const side = decision.action === "BUY_YES" ? "YES" : "NO";
     if (activePositions.some(p => p.side === side && p.marketId === market.ticker)) continue;
@@ -1233,10 +1209,10 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Scalping mode: score only on momentum strength, spread, and time — NOT payout ratio.
     // We're targeting 3-5¢ price movement, not holding to expiration.
 
-    // Momentum strength (primary driver)
-    const momentumScore  = (decision.upMoves + decision.downMoves) * 15;
-    // Bonus for fast signals (strong conviction)
-    const signalBonus    = decision.reason.includes("Fast momentum") ? 10 : 0;
+    // Momentum strength: velocity (¢/s) is the primary driver — faster moves = stronger signal
+    const momentumScore  = Math.min(decision.centsPerSec * 25, 60); // cap at 60 pts
+    // Bonus for larger absolute moves (≥3¢ = high conviction)
+    const signalBonus    = decision.moveCents >= 4 ? 15 : decision.moveCents >= 3 ? 10 : 5;
     // Tighter spread = cheaper round-trip
     const spreadScore    = (SPREAD_MAX - spread) * 3;
     // More time left = more room to TP before expiry
@@ -1273,14 +1249,13 @@ export async function scanMomentumMarkets(): Promise<void> {
     const { market, ob, side, decision } = candidate;
 
     // ── Signal-strength variable sizing ──────────────────────────────────────
-    // Pure signal (0 counter-moves) = full bet; 1 counter-move = 70%; health gates on top
-    const opposingMoves = side === "YES" ? decision.downMoves : decision.upMoves;
-    const signalMult    = opposingMoves === 0 ? 1.0 : 0.70;
+    // Velocity-based sizing: fast moves (≥0.2¢/s) = full bet; slower = 70%; health gates on top
+    const signalMult    = decision.centsPerSec >= 0.20 ? 1.0 : 0.70;
     const health        = state.healthScore?.label;
     const healthMult    = health === "Fragile" ? 0.70 : 1.0;
     let effectiveBet = Math.round(state.betCostCents * signalMult * healthMult);
     effectiveBet = Math.max(1, effectiveBet);
-    console.log(`[SIZING] ${coinLabel(market.ticker)} ${side} | base:${state.betCostCents}¢ opposing:${opposingMoves} signalMult:${signalMult} health:${health ?? "Pending"} → bet:${effectiveBet}¢`);
+    console.log(`[SIZING] ${coinLabel(market.ticker)} ${side} | base:${state.betCostCents}¢ velocity:${decision.centsPerSec.toFixed(2)}¢/s signalMult:${signalMult} health:${health ?? "Pending"} → bet:${effectiveBet}¢`);
 
     // Health gate: if Broken, skip real trades entirely — paper only
     if (health === "Broken" && !state.simulatorMode) {
