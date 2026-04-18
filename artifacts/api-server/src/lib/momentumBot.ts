@@ -932,7 +932,7 @@ function enterSimPosition(
   state.simOpenTradeCount = simPositions.length;
   state.status = "IN_TRADE";
 
-  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢ | contracts:${contractCount.toFixed(3)} cost:${state.betCostCents}¢`);
+  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢ | contracts:${contractCount.toFixed(3)} cost:${budget}¢`);
   dbLog("info", `[SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢`);
 }
 

@@ -209,8 +209,9 @@ export function MomentumBot() {
   const [betCostCents, setBetCostCents]       = useState("30");
   const [priceMin, setPriceMin]               = useState("20");
   const [priceMax, setPriceMax]               = useState("80");
-  const [tpCents, setTpCents]                 = useState("3");
-  const [slCents, setSlCents]                 = useState("3");
+  const [tpCents, setTpCents]                 = useState("5");
+  const [slCents, setSlCents]                 = useState("2");
+  const [staleMs, setStaleMs]                 = useState("65");
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
   const [simModeSynced, setSimModeSynced]     = useState(false);
@@ -224,15 +225,16 @@ export function MomentumBot() {
     }
   }, [data?.simulatorMode, simModeSynced]);
 
-  // Sync TP/SL from server on first load
+  // Sync TP/SL/stale from server on first load
   const [exitThresholdsSynced, setExitThresholdsSynced] = useState(false);
   useEffect(() => {
     if (!exitThresholdsSynced && data?.tpCents !== undefined && data?.slCents !== undefined) {
       setTpCents(String(data.tpCents));
       setSlCents(String(data.slCents));
+      if (data.staleMs !== undefined) setStaleMs(String(Math.round(data.staleMs / 1000)));
       setExitThresholdsSynced(true);
     }
-  }, [data?.tpCents, data?.slCents, exitThresholdsSynced]);
+  }, [data?.tpCents, data?.slCents, data?.staleMs, exitThresholdsSynced]);
 
   const enabled  = data?.enabled ?? false;
   const status   = data?.status;
@@ -254,8 +256,9 @@ export function MomentumBot() {
       simulatorMode:        overrides.simulatorMode        ?? simulatorMode,
       priceMin:             Math.min(pMin, pMax - 1),
       priceMax:             Math.max(pMax, pMin + 1),
-      tpCents:              Math.max(1, parseInt(tpCents || "3", 10)),
-      slCents:              Math.max(1, parseInt(slCents || "3", 10)),
+      tpCents:              Math.max(1, parseInt(tpCents || "5", 10)),
+      slCents:              Math.max(1, parseInt(slCents || "2", 10)),
+      staleMs:              Math.max(10000, parseInt(staleMs || "65", 10) * 1000),
     };
   }
 
@@ -989,9 +992,27 @@ export function MomentumBot() {
                       </div>
                     </div>
                     <p className="text-[9px] text-slate-600 mt-0.5">
-                      Exit when price moves +TP or −SL cents from entry. Default: <strong className="text-slate-500">3 / 3</strong>
+                      Exit when price moves +TP or −SL cents from entry. Default: <strong className="text-slate-500">5 / 2</strong>
                     </p>
                   </div>
+
+                  {/* Stale exit timer */}
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Stale exit timer (seconds)</span>
+                    <input
+                      type="number"
+                      min="10"
+                      max="300"
+                      step="5"
+                      value={staleMs}
+                      onChange={e => setStaleMs(e.target.value)}
+                      placeholder="65"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      Exit if price hasn't moved in this many seconds. Default: <strong className="text-slate-500">65s</strong>. Use longer with wider TP.
+                    </p>
+                  </label>
 
                   {/* Risk guards */}
                   <label className="block">
