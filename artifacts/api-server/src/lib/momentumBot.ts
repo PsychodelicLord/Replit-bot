@@ -199,9 +199,14 @@ const simPositions: MomentumPosition[] = [];
 const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expiry ms
 
 // Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
-// Prevents back-to-back trade spam across different markets after a loss.
-const POST_TRADE_COOLDOWN_MS = 60_000; // 60s quiet period after any close
+// Prevents back-to-back trade spam across different markets.
+const POST_WIN_COOLDOWN_MS  = 60_000;  // 60s after a TP/STALE exit
+const POST_LOSS_COOLDOWN_MS = 120_000; // 120s after an SL exit (losses need more breathing room)
 let globalCooldownUntilMs = 0;
+
+// Hardcoded minimum balance — always enforced even if user hasn't set a floor.
+// Bot will stop itself if available cash drops below this regardless of floor setting.
+const MIN_BALANCE_HARD_FLOOR_CENTS = 200; // $2 absolute minimum to keep trading
 
 // Scan / sell timers
 let scanTimer: NodeJS.Timeout | null = null;
@@ -748,11 +753,13 @@ async function placeSellOrder(
     // Per-market cooldown
     marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
 
-    // Global cooldown — blocks all markets for 60s after any close (prevents spam)
-    globalCooldownUntilMs = Date.now() + POST_TRADE_COOLDOWN_MS;
-
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPrice, netPnl);
+
+    // Global cooldown — longer after a loss so bot doesn't immediately revenge-trade
+    const cooldownMs = netPnl < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
+    globalCooldownUntilMs = Date.now() + cooldownMs;
+    console.log(`[COOLDOWN] ${netPnl < 0 ? "LOSS" : "WIN"} — global cooldown set: ${cooldownMs / 1000}s`);
 
     // ── Health score tracking ──
     const liveGain = exitPrice - pos.entryPriceCents;
@@ -1296,25 +1303,31 @@ export async function scanMomentumMarkets(): Promise<void> {
       enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
-      // Balance floor check — fail-safe: if we can't verify balance, block the trade
-      if (state.balanceFloorCents > 0) {
+      // Balance guard — always runs, even if no floor is configured.
+      // Uses the higher of: user-set floor, $2 hard minimum, or (bet + 50¢ buffer).
+      {
+        const effectiveFloor = Math.max(
+          state.balanceFloorCents,
+          MIN_BALANCE_HARD_FLOOR_CENTS,
+          effectiveBet + 50,
+        );
         let balanceOk = false;
         try {
           await refreshBalance();
           const balance = getBotState().balanceCents;
-          console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${state.balanceFloorCents}¢`);
-          if (balance > 0 && balance >= state.balanceFloorCents) {
+          console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${effectiveFloor}¢ (user:${state.balanceFloorCents}¢ hard:${MIN_BALANCE_HARD_FLOOR_CENTS}¢ bet+50:${effectiveBet + 50}¢)`);
+          if (balance > 0 && balance >= effectiveFloor) {
             balanceOk = true;
-          } else if (balance > 0 && balance < state.balanceFloorCents) {
-            stopMomentumBot(`Balance floor hit: ${balance}¢ < ${state.balanceFloorCents}¢ floor`);
+          } else if (balance > 0 && balance < effectiveFloor) {
+            stopMomentumBot(`Balance too low: ${balance}¢ < ${effectiveFloor}¢ floor — stopping bot`);
             return;
           } else {
             // balance came back as 0 — API problem, block trade as precaution
-            console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${state.balanceFloorCents}¢)`);
+            console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${effectiveFloor}¢)`);
           }
         } catch (err) {
           // fetch failed — block trade rather than risk breaching floor
-          console.error(`[BALANCE CHECK] Failed to fetch balance — skipping trade as precaution: ${String(err)}`);
+          console.error(`[BALANCE CHECK] Failed to fetch balance — skipping trade: ${String(err)}`);
         }
         if (!balanceOk) return;
       }
