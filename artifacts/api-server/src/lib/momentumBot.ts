@@ -22,8 +22,8 @@ import { db, tradesTable, botLogsTable, momentumSettingsTable } from "@workspace
 import { eq } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
-const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB", "HYPE"];
-const ALLOWED_TICKER_PREFIXES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXDOGE15M", "KXXRP15M", "KXBNB15M", "KXHYPE15M"];
+const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
+const ALLOWED_TICKER_PREFIXES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXDOGE15M", "KXXRP15M", "KXBNB15M"];
 
 const PRICE_MIN  = 20;   // start tracking a market when price is in this range
 const PRICE_MAX  = 80;
@@ -197,6 +197,11 @@ const simPositions: MomentumPosition[] = [];
 
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expiry ms
+
+// Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
+// Prevents back-to-back trade spam across different markets after a loss.
+const POST_TRADE_COOLDOWN_MS = 60_000; // 60s quiet period after any close
+let globalCooldownUntilMs = 0;
 
 // Scan / sell timers
 let scanTimer: NodeJS.Timeout | null = null;
@@ -743,6 +748,9 @@ async function placeSellOrder(
     // Per-market cooldown
     marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
 
+    // Global cooldown — blocks all markets for 60s after any close (prevents spam)
+    globalCooldownUntilMs = Date.now() + POST_TRADE_COOLDOWN_MS;
+
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPrice, netPnl);
 
@@ -852,6 +860,11 @@ export async function executeMomentumTrade(
     }
   }).catch(err => warn(`DB insert failed: ${String(err)}`));
 
+  // lastSeenPriceCents must be in YES-space (sell monitor always compares against currentMid=YES).
+  // For YES: fill price IS the YES price.
+  // For NO:  fill price is the NO price; convert to YES-equivalent (100 - noPrice).
+  const entryYesEquiv = side === "YES" ? result.fillPrice : 100 - result.fillPrice;
+
   const pos: MomentumPosition = {
     tradeId,
     marketId: ticker,
@@ -861,7 +874,7 @@ export async function executeMomentumTrade(
     entrySlippageCents: Math.abs(result.fillPrice - limitCents), // actual vs expected
     contractCount: result.contractCount,
     enteredAt: Date.now(),
-    lastSeenPriceCents: result.fillPrice,
+    lastSeenPriceCents: entryYesEquiv,  // YES-space so stale-tracker comparisons are valid
     lastMovedAt: Date.now(),
     buyOrderId: result.orderId,
     closeTs,
@@ -1013,10 +1026,17 @@ async function runSellMonitor(): Promise<void> {
 
     if (currentBid <= 0 && currentAsk <= 0) continue;
     const currentMid = currentAsk > 0 ? Math.round((currentBid + currentAsk) / 2) : currentBid;
-    const gain = currentMid - pos.entryPriceCents;
     const now  = Date.now();
 
-    // Update last-moved tracker
+    // For YES: profit when YES mid rises above entry.
+    // For NO:  entryPriceCents is the NO fill price (e.g. 35¢ when YES=65¢).
+    //          Convert to YES-equivalent so gain math works in a consistent space.
+    //          gain > 0 when YES mid drops (NO value rises) = winning NO trade.
+    const gain = pos.side === "YES"
+      ? currentMid - pos.entryPriceCents
+      : (100 - pos.entryPriceCents) - currentMid;
+
+    // Update last-moved tracker — always compared in YES-space (currentMid)
     if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) {
       pos.lastMovedAt = now;
     }
@@ -1088,6 +1108,13 @@ export async function scanMomentumMarkets(): Promise<void> {
   }
 
   state.status = activePositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
+
+  // Global post-trade cooldown — blocks ALL new entries for 60s after any close
+  if (Date.now() < globalCooldownUntilMs) {
+    const secsLeft = Math.ceil((globalCooldownUntilMs - Date.now()) / 1000);
+    console.log(`[SCAN] Global cooldown active — ${secsLeft}s remaining (post-trade spam guard)`);
+    return;
+  }
 
   const markets = await fetchActiveMarkets();
   if (markets.length === 0) {
