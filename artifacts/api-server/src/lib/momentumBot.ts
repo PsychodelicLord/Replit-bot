@@ -32,8 +32,7 @@ const SPREAD_MAX = 5;
 const MIN_MINUTES_REMAINING = 5;
 const MAX_POSITIONS = 2;
 
-// TP_CENTS / SL_CENTS are now configurable via state.tpCents / state.slCents (default 3/3)
-const STALE_MS    = 45_000;  // exit if price hasn't moved ≥1¢ in 45s
+// TP_CENTS / SL_CENTS and STALE_MS are now configurable via state (default 5/2/65s)
 const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 // Contract count cap: treat price as ≥ MIN_PRICE_FOR_CONTRACTS when sizing.
 // Prevents outsized losses at extreme prices (e.g. 5¢ entry → 20 contracts → -60¢ SL hit).
@@ -41,11 +40,12 @@ const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 const MIN_PRICE_FOR_CONTRACTS = 20;
 
 const TICK_WINDOW_SIZE      = 5;      // track last N *directional* ticks (flat scans don't consume a slot)
-const DOMINANCE_REQUIRED    = 2;      // need 2+ directional ticks in same direction to enter
-const DOMINANCE_REQUIRED_SIM = 2;    // sim mode: same threshold
+const DOMINANCE_REQUIRED    = 4;      // need 4/5 directional ticks same direction (was 2 — caused false signals)
+const DOMINANCE_REQUIRED_SIM = 3;    // sim mode: slightly looser (3+ same direction)
+const MAX_OPPOSING_MOVES    = 1;      // reject signal if opponent has > 1 counter-move
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
-const MIN_TOTAL_MOVE_CENTS  = 1;      // require ≥1¢ total price move before trading
-const MIN_TOTAL_MOVE_SIM    = 1;      // sim mode: same threshold
+const MIN_TOTAL_MOVE_CENTS  = 3;      // require ≥3¢ total price move (filters micro-drift noise)
+const MIN_TOTAL_MOVE_SIM    = 2;      // sim mode: ≥2¢ total move
 const TRADE_SPREAD_MAX      = 4;      // spread required to actually execute a trade
 const TRADE_SPREAD_MAX_SIM  = 5;     // sim mode: allow up to 5¢ spread (slightly looser)
 const SPREAD_MAX_SIM        = 8;     // sim mode: scan-level spread filter (looser than 5)
@@ -131,6 +131,7 @@ export interface MomentumBotState {
   // Exit thresholds (cents) — configurable from UI
   tpCents: number;   // take-profit trigger
   slCents: number;   // stop-loss trigger
+  staleMs: number;   // exit if price flat for this long (ms)
 
   // Bot Health Score — updated after every trade once buffer >= 20
   healthScore: {
@@ -171,10 +172,11 @@ const state: MomentumBotState = {
   simWins: 0,
   simLosses: 0,
   simOpenTradeCount: 0,
-  priceMin: 20,
-  priceMax: 80,
-  tpCents: 3,
-  slCents: 3,
+  priceMin: 38,
+  priceMax: 62,
+  tpCents: 5,
+  slCents: 2,
+  staleMs: 65_000,
   healthScore: null,
 };
 
@@ -184,10 +186,11 @@ export interface MomentumBotConfig {
   consecutiveLossLimit: number;  // 0 = disabled
   betCostCents: number;          // cents to spend per trade (min 1)
   simulatorMode?: boolean;       // paper trading — real data, fake money
-  priceMin?: number;             // min entry price in cents (default 20)
-  priceMax?: number;             // max entry price in cents (default 80)
-  tpCents?: number;              // take-profit threshold in cents (default 3)
-  slCents?: number;              // stop-loss threshold in cents (default 3)
+  priceMin?: number;             // min entry price in cents (default 38)
+  priceMax?: number;             // max entry price in cents (default 62)
+  tpCents?: number;              // take-profit threshold in cents (default 5)
+  slCents?: number;              // stop-loss threshold in cents (default 2)
+  staleMs?: number;              // stale-exit timer in ms (default 65000)
 }
 
 // Per-market momentum counter state
@@ -499,17 +502,17 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
   // Directional dominance — need N directional ticks in same direction (flat ignored)
   // In sim mode: only 2+ needed (looser)
   const dominanceThreshold = state.simulatorMode ? DOMINANCE_REQUIRED_SIM : DOMINANCE_REQUIRED;
-  if (upMoves >= dominanceThreshold) {
+  if (upMoves >= dominanceThreshold && downMoves <= MAX_OPPOSING_MOVES) {
     console.log(`[DOMINANCE ▲] ${marketId} | up:${upMoves} dn:${downMoves} in ${ms.tickWindow.length} dir-ticks${state.simulatorMode ? " [SIM]" : ""}`);
-    return decide("BUY_YES", `Bullish: ${upMoves}/${ms.tickWindow.length} UP moves`);
+    return decide("BUY_YES", `Bullish: ${upMoves}/${ms.tickWindow.length} UP, ${downMoves} opposing`);
   }
-  if (downMoves >= dominanceThreshold) {
+  if (downMoves >= dominanceThreshold && upMoves <= MAX_OPPOSING_MOVES) {
     console.log(`[DOMINANCE ▼] ${marketId} | up:${upMoves} dn:${downMoves} in ${ms.tickWindow.length} dir-ticks${state.simulatorMode ? " [SIM]" : ""}`);
-    return decide("BUY_NO", `Bearish: ${downMoves}/${ms.tickWindow.length} DOWN moves`);
+    return decide("BUY_NO", `Bearish: ${downMoves}/${ms.tickWindow.length} DOWN, ${upMoves} opposing`);
   }
 
   // Mixed or accumulating
-  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} (need ${dominanceThreshold} same-dir, have ${ms.tickWindow.length} total)`);
+  return decide("SKIP", `Accumulating — up:${upMoves} dn:${downMoves} (need ${dominanceThreshold}+ same-dir, ≤${MAX_OPPOSING_MOVES} opposing, have ${ms.tickWindow.length} total)`);
 }
 
 // ─── Market scanning ───────────────────────────────────────────────────────
@@ -834,11 +837,13 @@ export async function executeMomentumTrade(
   bidCents: number,
   askCents: number,
   closeTs: number = 0,
+  betCents?: number,
 ): Promise<void> {
   // Buy near bid (not ask) to avoid instant drawdown
   const limitCents = Math.min(askCents, bidCents + 1);
+  const budget = betCents ?? state.betCostCents;
 
-  const result = await placeBuyOrder(ticker, side, limitCents, state.betCostCents);
+  const result = await placeBuyOrder(ticker, side, limitCents, budget);
   if (!result) return;
 
   // Insert trade row to DB (fire-and-forget)
@@ -899,12 +904,14 @@ function enterSimPosition(
   bidCents: number,
   askCents: number,
   closeTs: number = 0,
+  betCents?: number,
 ): void {
   const limitCents    = Math.min(askCents, bidCents + 1);
+  const budget        = betCents ?? state.betCostCents;
   // Cap contract count: use at least MIN_PRICE_FOR_CONTRACTS as the divisor.
   // Without this cap, a 5¢-priced entry with 100¢ bet = 20 contracts,
   // so a -3¢ SL hit becomes -60¢ total. At 20¢ baseline, max loss = -3¢ × 5 = -15¢.
-  const contractCount = state.betCostCents / Math.max(limitCents, MIN_PRICE_FOR_CONTRACTS);
+  const contractCount = budget / Math.max(limitCents, MIN_PRICE_FOR_CONTRACTS);
   const tradeId       = -(Date.now());
 
   const pos: MomentumPosition = {
@@ -994,7 +1001,7 @@ async function monitorSimPositions(): Promise<void> {
     if      (simMinsLeft < 2)                        toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
     else if (gain >= state.tpCents)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
     else if (gain <= -state.slCents)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
-    else if (now - pos.lastMovedAt >= STALE_MS) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
+    else if (now - pos.lastMovedAt >= state.staleMs) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
   }
 
   for (const { pos, exitPrice, reason } of toClose) closeSimPosition(pos, exitPrice, reason);
@@ -1058,7 +1065,7 @@ async function runSellMonitor(): Promise<void> {
     }
 
     // Stale-position exit
-    if (now - pos.lastMovedAt >= STALE_MS) {
+    if (now - pos.lastMovedAt >= state.staleMs) {
       log(`⏳ STALE EXIT — price flat for ${Math.round((now - pos.lastMovedAt) / 1000)}s on Trade ${pos.tradeId}`);
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
       continue;
@@ -1263,12 +1270,28 @@ export async function scanMomentumMarkets(): Promise<void> {
       return;
     }
 
-    const { market, ob, side } = candidate;
+    const { market, ob, side, decision } = candidate;
+
+    // ── Signal-strength variable sizing ──────────────────────────────────────
+    // Pure signal (0 counter-moves) = full bet; 1 counter-move = 70%; health gates on top
+    const opposingMoves = side === "YES" ? decision.downMoves : decision.upMoves;
+    const signalMult    = opposingMoves === 0 ? 1.0 : 0.70;
+    const health        = state.healthScore?.label;
+    const healthMult    = health === "Fragile" ? 0.70 : 1.0;
+    let effectiveBet = Math.round(state.betCostCents * signalMult * healthMult);
+    effectiveBet = Math.max(1, effectiveBet);
+    console.log(`[SIZING] ${coinLabel(market.ticker)} ${side} | base:${state.betCostCents}¢ opposing:${opposingMoves} signalMult:${signalMult} health:${health ?? "Pending"} → bet:${effectiveBet}¢`);
+
+    // Health gate: if Broken, skip real trades entirely — paper only
+    if (health === "Broken" && !state.simulatorMode) {
+      console.log(`[HEALTH GATE] Skipping live trade — bot health is Broken. Switch to sim or wait for recovery.`);
+      continue;
+    }
 
     if (state.simulatorMode) {
       // ── Simulator: paper position, no real money ──────────────────────────
-      console.log(`[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`);
-      enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs);
+      console.log(`[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢`);
+      enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
       // Balance floor check — fail-safe: if we can't verify balance, block the trade
@@ -1299,7 +1322,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs);
+      await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
       console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length}`);
     }
   }
@@ -1578,6 +1601,7 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.priceMax !== undefined) state.priceMax = Math.max(1, Math.min(cfg.priceMax, 99));
   if (cfg.tpCents !== undefined) state.tpCents = Math.max(1, cfg.tpCents);
   if (cfg.slCents !== undefined) state.slCents = Math.max(1, cfg.slCents);
+  if (cfg.staleMs !== undefined) state.staleMs = Math.max(10_000, cfg.staleMs);
   saveMomentumConfig();
 }
 
