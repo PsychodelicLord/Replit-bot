@@ -1543,16 +1543,15 @@ export async function debugMomentumMarkets() {
   }
 
   const filtered = await fetchActiveMarkets();
-  const momentumSnap: Record<string, { lastPrice: number | null; upMoves: number; downMoves: number; flatMoves: number; windowSize: number }> = {};
+  const now2 = Date.now();
+  const momentumSnap: Record<string, { samples: number; currentPrice: number | null; oldestSampleAgeMs: number; newestSampleAgeMs: number }> = {};
   for (const [marketId, ms] of marketMomentum.entries()) {
-    const up   = ms.tickWindow.filter(t => t.direction === "up").length;
-    const down = ms.tickWindow.filter(t => t.direction === "down").length;
+    const history = ms.priceHistory;
     momentumSnap[marketId] = {
-      lastPrice: ms.lastPrice,
-      upMoves: up,
-      downMoves: down,
-      flatMoves: ms.tickWindow.length - up - down,
-      windowSize: ms.tickWindow.length,
+      samples:           history.length,
+      currentPrice:      history.length > 0 ? history[history.length - 1].price : null,
+      oldestSampleAgeMs: history.length > 0 ? now2 - history[0].ts : 0,
+      newestSampleAgeMs: history.length > 0 ? now2 - history[history.length - 1].ts : 0,
     };
   }
 
@@ -1561,7 +1560,7 @@ export async function debugMomentumMarkets() {
     rawSample,
     filteredMarkets: filtered.map(m => ({ ticker: m.ticker, minutesRemaining: m.minutesRemaining, askCents: m.askCents, bidCents: m.bidCents })),
     momentumCounters: momentumSnap,
-    config: { TICK_WINDOW_SIZE, DOMINANCE_REQUIRED, MIN_TICK_DELTA, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, ENTRY_BUFFER_CENTS, SPREAD_MAX, MIN_MINUTES_REMAINING },
+    config: { MOMENTUM_WINDOW_MS, MIN_FAST_MOVE_CENTS, MAX_ENTRY_PRICE_YES, MIN_ENTRY_PRICE_YES, SCAN_INTERVAL_MS, PRICE_MIN, PRICE_MAX, ENTRY_BUFFER_CENTS, SPREAD_MAX, MIN_MINUTES_REMAINING },
     botState: getMomentumBotState(),
   };
 }
