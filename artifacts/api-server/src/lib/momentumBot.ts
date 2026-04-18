@@ -454,14 +454,15 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     return skip("First sample — establishing baseline");
   }
 
-  // Use the oldest sample within the rolling window as the reference.
-  // If no sample is old enough, fall back to the immediately previous sample —
-  // this fires on the very next scan after baseline, preventing missed entries.
+  // Compare current price against the oldest previous sample within the window.
+  // Excludes the current sample (last element) so we never compare price to itself.
+  // Falls back to the most recent prior sample if nothing old enough is in the window.
+  const prevHistory   = ms.priceHistory.slice(0, -1); // all except current
   const windowStart   = now - MOMENTUM_WINDOW_MS;
-  const windowSamples = ms.priceHistory.filter(p => p.ts >= windowStart);
-  const reference     = windowSamples.length >= 1
-    ? windowSamples[0]
-    : ms.priceHistory[ms.priceHistory.length - 2]; // second-to-last (current is last)
+  const windowPrev    = prevHistory.filter(p => p.ts >= windowStart);
+  const reference     = windowPrev.length >= 1
+    ? windowPrev[0]                                   // oldest prior sample in window
+    : prevHistory[prevHistory.length - 1];            // most recent prior sample (fallback)
 
   const rawMove     = currentPriceCents - reference.price;
   const moveMs      = Math.max(now - reference.ts, 1);
