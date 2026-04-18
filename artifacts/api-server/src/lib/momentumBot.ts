@@ -454,19 +454,18 @@ export function evaluateMomentum(marketId: string, currentPriceCents: number): M
     return skip("First sample — establishing baseline");
   }
 
-  // Find all samples within the rolling momentum window
-  const windowStart = now - MOMENTUM_WINDOW_MS;
+  // Use the oldest sample within the rolling window as the reference.
+  // If no sample is old enough, fall back to the immediately previous sample —
+  // this fires on the very next scan after baseline, preventing missed entries.
+  const windowStart   = now - MOMENTUM_WINDOW_MS;
   const windowSamples = ms.priceHistory.filter(p => p.ts >= windowStart);
+  const reference     = windowSamples.length >= 1
+    ? windowSamples[0]
+    : ms.priceHistory[ms.priceHistory.length - 2]; // second-to-last (current is last)
 
-  if (windowSamples.length < 2) {
-    return skip(`Watching — waiting for 2+ samples within ${MOMENTUM_WINDOW_MS / 1000}s window`);
-  }
-
-  // Measure move from oldest sample in window to current price
-  const oldest     = windowSamples[0];
-  const rawMove    = currentPriceCents - oldest.price;
-  const moveMs     = Math.max(now - oldest.ts, 1);
-  const absMv      = Math.abs(rawMove);
+  const rawMove     = currentPriceCents - reference.price;
+  const moveMs      = Math.max(now - reference.ts, 1);
+  const absMv       = Math.abs(rawMove);
   const centsPerSec = absMv / (moveMs / 1000);
 
   console.log(`[MOMENTUM] ${marketId} | ${currentPriceCents}¢ | move:${rawMove > 0 ? "+" : ""}${rawMove}¢ in ${Math.round(moveMs / 1000)}s (${centsPerSec.toFixed(2)}¢/s) | history:${ms.priceHistory.length} samples`);
