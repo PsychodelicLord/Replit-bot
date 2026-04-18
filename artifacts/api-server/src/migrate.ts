@@ -84,6 +84,10 @@ export async function runMigrations(): Promise<void> {
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS total_pnl_cents INTEGER NOT NULL DEFAULT 0
     `);
+    // Balance snapshot at last reset (nullable — null means never reset)
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS starting_balance_cents INTEGER
+    `);
 
     console.log("[migrate] Tables ready.");
   } catch (err) {
