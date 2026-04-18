@@ -40,7 +40,7 @@ const COOLDOWN_MS = 75_000;  // per-market cooldown after close
 const MIN_PRICE_FOR_CONTRACTS = 20;
 
 const TICK_WINDOW_SIZE      = 5;      // track last N *directional* ticks (flat scans don't consume a slot)
-const DOMINANCE_REQUIRED    = 4;      // need 4/5 directional ticks same direction (was 2 — caused false signals)
+const DOMINANCE_REQUIRED    = 3;      // need 3/5 directional ticks same direction (was 2 — caused false signals)
 const DOMINANCE_REQUIRED_SIM = 3;    // sim mode: slightly looser (3+ same direction)
 const MAX_OPPOSING_MOVES    = 1;      // reject signal if opponent has > 1 counter-move
 const MIN_TICK_DELTA        = 1;      // min ¢ change to count as a directional move
