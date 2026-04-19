@@ -163,6 +163,15 @@ export interface MomentumBotAutoBody {
   balanceFloorCents?: number;
   maxSessionLossCents?: number;
   consecutiveLossLimit?: number;
+  betCostCents?: number;
+  simulatorMode?: boolean;
+  priceMin?: number;
+  priceMax?: number;
+  tpCents?: number;
+  slCents?: number;
+  staleMs?: number;
+  tpAbsoluteCents?: number;
+  sessionProfitTargetCents?: number;
 }
 
 export interface MomentumBotStatus {

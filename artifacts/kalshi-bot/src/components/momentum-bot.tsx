@@ -270,14 +270,22 @@ export function MomentumBot() {
       priceMax:             Math.max(pMax, pMin + 1),
       tpCents:              Math.max(1, parseInt(tpCents || "5", 10)),
       slCents:              Math.max(1, parseInt(slCents || "2", 10)),
-      staleMs:              Math.max(10000, parseInt(staleMs || "65", 10) * 1000),
+      staleMs:              Math.min(300000, Math.max(10000, parseInt(staleMs || "65", 10) * 1000)),
       tpAbsoluteCents:          Math.max(0, parseInt(tpAbsolute || "0", 10)),
       sessionProfitTargetCents: Math.max(0, parseInt(sessionProfitTarget || "0", 10)),
     };
   }
 
   function toggleAuto() {
-    setAuto.mutate({ data: buildConfig() });
+    try {
+      const cfg = buildConfig();
+      console.log("[toggleAuto] sending config:", JSON.stringify(cfg));
+      setAuto.mutate({ data: cfg });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[toggleAuto] buildConfig threw:", msg);
+      setToggleError(`Config error: ${msg}`);
+    }
   }
 
   function toggleSimMode() {
