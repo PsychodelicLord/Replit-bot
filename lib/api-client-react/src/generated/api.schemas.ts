@@ -246,6 +246,7 @@ export interface MomentumBotAutoBody {
   staleMs?: number;
   tpAbsoluteCents?: number;
   sessionProfitTargetCents?: number;
+  allowedCoins?: string[];
 }
 
 export interface MomentumBotStatus {
@@ -290,4 +291,5 @@ export interface MomentumBotStatus {
     staleScore: number;
     execScore: number;
   } | null;
+  allowedCoins?: string[];
 }

@@ -108,6 +108,10 @@ export async function runMigrations(): Promise<void> {
     `);
 
     await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS allowed_coins VARCHAR(100) NOT NULL DEFAULT 'BTC,ETH,SOL,DOGE,XRP,BNB'
+    `);
+
+    await db.execute(sql`
       CREATE TABLE IF NOT EXISTS paper_trades (
         id           SERIAL PRIMARY KEY,
         bot_type     VARCHAR(20) NOT NULL DEFAULT 'momentum',

@@ -128,6 +128,9 @@ export interface MomentumBotState {
   tpAbsoluteCents: number;          // 0 = use relative tpCents; >0 = exit when YES price hits this level
   sessionProfitTargetCents: number; // 0 = trade indefinitely; >0 = stop when session gain hits this
 
+  // Coins the bot is allowed to trade (subset of all supported coins)
+  allowedCoins: string[];
+
   // Bot Health Score — updated after every trade once buffer >= 20
   healthScore: {
     total: number;           // 0–10
@@ -174,6 +177,7 @@ const state: MomentumBotState = {
   staleMs: 65_000,
   tpAbsoluteCents: 0,
   sessionProfitTargetCents: 0,
+  allowedCoins: ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"],
   healthScore: null,
 };
 
@@ -190,6 +194,7 @@ export interface MomentumBotConfig {
   staleMs?: number;              // stale-exit timer in ms (default 65000)
   tpAbsoluteCents?: number;      // 0 = use relative; >0 = exit when YES price hits this
   sessionProfitTargetCents?: number; // 0 = unlimited; >0 = stop when session P&L hits this
+  allowedCoins?: string[];       // subset of supported coins to trade
   enabled?: boolean;
 }
 
@@ -370,7 +375,10 @@ function dbLog(level: "info" | "warn" | "error", message: string, throttleKey?: 
 
 function isMomentumMarket(ticker: string): boolean {
   const up = ticker.toUpperCase();
-  return ALLOWED_TICKER_PREFIXES.some(p => up.startsWith(p));
+  if (!ALLOWED_TICKER_PREFIXES.some(p => up.startsWith(p))) return false;
+  // Also filter by the user-configured allowed coins list
+  const coin = coinLabel(up);
+  return state.allowedCoins.includes(coin);
 }
 
 function coinLabel(ticker: string): string {
@@ -1530,6 +1538,7 @@ export function saveMomentumConfig(): void {
     staleMs:    state.staleMs,
     tpAbsoluteCents:          state.tpAbsoluteCents,
     sessionProfitTargetCents: state.sessionProfitTargetCents,
+    allowedCoins:             state.allowedCoins.join(","),
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -1567,6 +1576,7 @@ function saveConfigFieldsOnly(): void {
     staleMs:                   state.staleMs,
     tpAbsoluteCents:           state.tpAbsoluteCents,
     sessionProfitTargetCents:  state.sessionProfitTargetCents,
+    allowedCoins:              state.allowedCoins.join(","),
   };
   db.insert(momentumSettingsTable)
     .values({ id: 1, ...set })
@@ -1619,6 +1629,10 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
       state.staleMs    = r.staleMs    ?? 65_000;
       state.tpAbsoluteCents          = r.tpAbsoluteCents          ?? 0;
       state.sessionProfitTargetCents = r.sessionProfitTargetCents ?? 0;
+      // Restore coin filter — fall back to all coins if column not yet populated
+      if (r.allowedCoins && r.allowedCoins.trim().length > 0) {
+        state.allowedCoins = r.allowedCoins.split(",").map(c => c.trim()).filter(Boolean);
+      }
 
       if (r.enabled || autoStartFallback) {
         const reason = r.enabled ? "DB shows enabled=true" : "MOMENTUM_AUTO_START fallback";
@@ -1803,6 +1817,10 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.staleMs !== undefined) state.staleMs = Math.max(10_000, cfg.staleMs);
   if (cfg.tpAbsoluteCents !== undefined) state.tpAbsoluteCents = Math.max(0, cfg.tpAbsoluteCents);
   if (cfg.sessionProfitTargetCents !== undefined) state.sessionProfitTargetCents = Math.max(0, cfg.sessionProfitTargetCents);
+  if (cfg.allowedCoins !== undefined && cfg.allowedCoins.length > 0) {
+    state.allowedCoins = cfg.allowedCoins.filter(c => ALLOWED_COINS.includes(c));
+    if (state.allowedCoins.length === 0) state.allowedCoins = [...ALLOWED_COINS]; // never allow empty list
+  }
   saveConfigFieldsOnly(); // never touches simWins/simLosses — safe before loadMomentumConfig completes
 }
 

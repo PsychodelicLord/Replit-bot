@@ -1,4 +1,4 @@
-import { pgTable, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, integer, boolean, varchar } from "drizzle-orm/pg-core";
 
 export const momentumSettingsTable = pgTable("momentum_settings", {
   id:                   integer("id").primaryKey().default(1),
@@ -28,4 +28,6 @@ export const momentumSettingsTable = pgTable("momentum_settings", {
   tpAbsoluteCents: integer("tp_absolute_cents").notNull().default(0),
   // Session profit target — stop bot when session P&L reaches this (0 = disabled)
   sessionProfitTargetCents: integer("session_profit_target_cents").notNull().default(0),
+  // Comma-separated list of coins to trade (e.g. "BTC,ETH,SOL")
+  allowedCoins: varchar("allowed_coins", { length: 100 }).notNull().default("BTC,ETH,SOL,DOGE,XRP,BNB"),
 });

@@ -223,6 +223,9 @@ export function MomentumBot() {
   const [staleMs, setStaleMs]                 = useState("65");
   const [tpAbsolute, setTpAbsolute]           = useState("0");
   const [sessionProfitTarget, setSessionProfitTarget] = useState("0");
+  const ALL_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
+  const [allowedCoins, setAllowedCoins]       = useState<string[]>([...ALL_COINS]);
+  const [coinsSynced, setCoinsSynced]         = useState(false);
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
   const [simModeSynced, setSimModeSynced]     = useState(false);
@@ -235,6 +238,14 @@ export function MomentumBot() {
       setSimModeSynced(true);
     }
   }, [data?.simulatorMode, simModeSynced]);
+
+  // Sync allowedCoins from server on first load
+  useEffect(() => {
+    if (!coinsSynced && data?.allowedCoins !== undefined && data.allowedCoins.length > 0) {
+      setAllowedCoins(data.allowedCoins);
+      setCoinsSynced(true);
+    }
+  }, [data?.allowedCoins, coinsSynced]);
 
   // Sync TP/SL/stale/new fields from server on first load
   const [exitThresholdsSynced, setExitThresholdsSynced] = useState(false);
@@ -274,6 +285,7 @@ export function MomentumBot() {
       staleMs:              Math.min(300000, Math.max(10000, parseInt(staleMs || "65", 10) * 1000)),
       tpAbsoluteCents:          Math.max(0, parseInt(tpAbsolute || "0", 10)),
       sessionProfitTargetCents: Math.max(0, parseInt(sessionProfitTarget || "0", 10)),
+      allowedCoins:             allowedCoins.length > 0 ? allowedCoins : [...ALL_COINS],
     };
   }
 
@@ -1081,6 +1093,40 @@ export function MomentumBot() {
                     </div>
                     <p className="text-[9px] text-slate-600 mt-0.5">
                       Only enter when market price is in this range. e.g. <strong className="text-slate-500">30 to 70</strong> = buy YES only when it's between 30¢ and 70¢
+                    </p>
+                  </div>
+
+                  {/* Coin filter */}
+                  <div>
+                    <span className="text-[10px] text-slate-400 block mb-1.5">Active coins</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {ALL_COINS.map(coin => {
+                        const active = allowedCoins.includes(coin);
+                        return (
+                          <button
+                            key={coin}
+                            type="button"
+                            onClick={() => {
+                              if (active) {
+                                const next = allowedCoins.filter(c => c !== coin);
+                                if (next.length > 0) setAllowedCoins(next);
+                              } else {
+                                setAllowedCoins(prev => [...prev, coin]);
+                              }
+                            }}
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all ${
+                              active
+                                ? "bg-sky-500/20 border-sky-500/50 text-sky-300"
+                                : "bg-white/[0.03] border-white/10 text-slate-500"
+                            }`}
+                          >
+                            {coin}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      Only trade highlighted coins. At least one must stay active.
                     </p>
                   </div>
 

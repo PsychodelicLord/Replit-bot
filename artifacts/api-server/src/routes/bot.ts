@@ -241,7 +241,7 @@ router.post("/bot/momentum/auto", (req, res): void => {
     const parsed = MomentumBotAutoBody.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
 
-    const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents } = parsed.data;
+    const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents, allowedCoins } = parsed.data;
 
     // Real trading requires Railway deployment. Simulator mode can run anywhere.
     if (enabled && !simulatorMode && !isProductionDeployment()) {
@@ -263,6 +263,7 @@ router.post("/bot/momentum/auto", (req, res): void => {
       staleMs:              staleMs,
       tpAbsoluteCents:          tpAbsoluteCents,
       sessionProfitTargetCents: sessionProfitTargetCents,
+      allowedCoins:             allowedCoins,
     });
 
     const state = enabled ? startMomentumBot() : stopMomentumBot();
