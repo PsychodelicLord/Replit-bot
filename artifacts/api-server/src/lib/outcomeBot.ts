@@ -4,11 +4,12 @@
  * Strategy:
  *  - Watches BTC/ETH/SOL/DOGE/XRP/BNB on 15-min Kalshi markets (paper only)
  *  - Maintains a rolling 120-second price history per market (no cross-market memory)
- *  - Classifies each market every scan cycle into: TRENDING, EMERGING, or NO_TRADE
- *    - TRENDING:  ≥3¢ net directional move over 60-120s, ≤2 reversals
- *    - EMERGING:  ≥1.5¢ move over 10-20s, continuing in same direction, ≤1 reversal
- *    - NO_TRADE:  choppy, <1.5¢ net move, or repeated back-and-forth
- *  - Entry only on TRENDING or EMERGING signals outside extreme price zones (85-95¢ YES)
+ *  - Classifies each market every scan cycle into: TRENDING, BREAKOUT, EMERGING, or NO_TRADE
+ *    - TRENDING:  ≥2¢ net directional move over 60-120s, ≤3 reversals
+ *    - BREAKOUT:  ≥4¢ shift from 30-90s baseline, now holding at new level (last 15s)
+ *    - EMERGING:  ≥1¢ move over 10-20s, continuing in same direction, ≤1 reversal
+ *    - NO_TRADE:  choppy, insufficient movement, or repeated back-and-forth
+ *  - Entry only on TRENDING, BREAKOUT, or EMERGING signals outside extreme price zones (85-95¢ YES)
  *  - No fixed take-profit; once +5¢ profit → trailing stop (exit if -3¢ from peak)
  *  - Wide structure-based stop loss: 12¢ default
  *  - Late market (last 3 min): slightly relaxed entry (shorter confirmation window)
@@ -30,10 +31,11 @@ const MONITOR_INTERVAL_MS      = 3_000;   // position monitor every 3s
 const PRICE_HISTORY_MAX_MS     = 120_000; // keep 2 min of price samples per market
 
 // Market state classification thresholds
-const TREND_MIN_CENTS          = 3;       // min net move (¢) for TRENDING state
+const TREND_MIN_CENTS          = 2;       // min net move (¢) for TRENDING state
 const TREND_MIN_WINDOW_MS      = 60_000;  // need at least 60s of history to call it trending
-const TREND_MAX_REVERSALS      = 2;       // max direction changes allowed in trending state
-const EMERGING_MIN_CENTS       = 1.5;     // min net move (¢) for EMERGING state
+const TREND_MAX_REVERSALS      = 3;       // max direction changes allowed in trending state
+const BREAKOUT_MIN_CENTS       = 4;       // min shift (¢) from 30-90s baseline for BREAKOUT
+const EMERGING_MIN_CENTS       = 1;       // min net move (¢) for EMERGING state
 const EMERGING_MIN_WINDOW_MS   = 10_000;  // need at least 10s for emerging
 const EMERGING_MAX_REVERSALS   = 1;       // max direction changes in emerging state
 
@@ -55,7 +57,7 @@ const EXPIRY_BUFFER_MS         = 30_000;  // close sim position 30s before marke
 const FEE_RATE = 0.07;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-type MarketState = "TRENDING" | "EMERGING" | "NO_TRADE";
+type MarketState = "TRENDING" | "BREAKOUT" | "EMERGING" | "NO_TRADE";
 
 interface PriceSample {
   price: number; // YES price in cents
@@ -221,6 +223,23 @@ function classifyState(
           reason:    `${netMove > 0 ? "+" : ""}${netMove.toFixed(1)}¢ over ${Math.round(span / 1000)}s, ${reversals} reversals`,
         };
       }
+    }
+  }
+
+  // ── BREAKOUT check: large shift from 30-90s baseline, now holding ────────
+  const baselineSamples = samples.filter(s => t - s.ts >= 30_000 && t - s.ts <= 90_000);
+  const recentSamples15  = samples.filter(s => t - s.ts <= 15_000);
+  if (baselineSamples.length >= 3 && recentSamples15.length >= 2) {
+    const baselineAvg = baselineSamples.reduce((a, s) => a + s.price, 0) / baselineSamples.length;
+    const recentAvg   = recentSamples15.reduce((a, s) => a + s.price, 0) / recentSamples15.length;
+    const shift = recentAvg - baselineAvg;
+    if (Math.abs(shift) >= BREAKOUT_MIN_CENTS) {
+      return {
+        state:     "BREAKOUT",
+        direction: shift > 0 ? "UP" : "DOWN",
+        moveCents: Math.abs(shift),
+        reason:    `${shift > 0 ? "+" : ""}${shift.toFixed(1)}¢ shift (base:${Math.round(baselineAvg)}¢ → now:${Math.round(recentAvg)}¢)`,
+      };
     }
   }
 

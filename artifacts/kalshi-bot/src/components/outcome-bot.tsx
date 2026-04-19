@@ -34,6 +34,14 @@ function StateChip({ state, direction }: { state: string; direction?: string }) 
       </span>
     );
   }
+  if (state === "BREAKOUT") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-500/20 border border-violet-500/30 text-violet-300 text-[10px] font-semibold">
+        {direction === "UP" ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+        BREAKOUT {direction}
+      </span>
+    );
+  }
   if (state === "EMERGING") {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-semibold">
@@ -254,7 +262,7 @@ export function OutcomeBot() {
           )}
           {Object.entries(marketStates)
             .sort(([, a], [, b]) => {
-              const order = { TRENDING: 0, EMERGING: 1, NO_TRADE: 2 };
+              const order = { TRENDING: 0, BREAKOUT: 1, EMERGING: 2, NO_TRADE: 3 };
               return order[a.state] - order[b.state];
             })
             .map(([ticker, ms]) => (

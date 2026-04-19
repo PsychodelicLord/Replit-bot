@@ -174,7 +174,7 @@ export interface OutcomeBotOpenPosition {
 }
 
 export interface OutcomeBotMarketState {
-  state:       "TRENDING" | "EMERGING" | "NO_TRADE";
+  state:       "TRENDING" | "BREAKOUT" | "EMERGING" | "NO_TRADE";
   direction?:  "UP" | "DOWN";
   moveCents?:  number;
   reason:      string;

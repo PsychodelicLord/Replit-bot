@@ -370,7 +370,7 @@ export const OutcomeBotOpenPosition = zod.object({
 });
 
 export const OutcomeBotMarketState = zod.object({
-  state:       zod.enum(["TRENDING", "EMERGING", "NO_TRADE"]),
+  state:       zod.enum(["TRENDING", "BREAKOUT", "EMERGING", "NO_TRADE"]),
   direction:   zod.enum(["UP", "DOWN"]).optional(),
   moveCents:   zod.number().optional(),
   reason:      zod.string(),
