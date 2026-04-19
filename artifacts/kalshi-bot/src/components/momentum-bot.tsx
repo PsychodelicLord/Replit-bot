@@ -212,6 +212,8 @@ export function MomentumBot() {
   const [tpCents, setTpCents]                 = useState("5");
   const [slCents, setSlCents]                 = useState("2");
   const [staleMs, setStaleMs]                 = useState("65");
+  const [tpAbsolute, setTpAbsolute]           = useState("0");
+  const [sessionProfitTarget, setSessionProfitTarget] = useState("0");
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
   const [simModeSynced, setSimModeSynced]     = useState(false);
@@ -225,16 +227,18 @@ export function MomentumBot() {
     }
   }, [data?.simulatorMode, simModeSynced]);
 
-  // Sync TP/SL/stale from server on first load
+  // Sync TP/SL/stale/new fields from server on first load
   const [exitThresholdsSynced, setExitThresholdsSynced] = useState(false);
   useEffect(() => {
     if (!exitThresholdsSynced && data?.tpCents !== undefined && data?.slCents !== undefined) {
       setTpCents(String(data.tpCents));
       setSlCents(String(data.slCents));
       if (data.staleMs !== undefined) setStaleMs(String(Math.round(data.staleMs / 1000)));
+      if (data.tpAbsoluteCents !== undefined) setTpAbsolute(String(data.tpAbsoluteCents));
+      if (data.sessionProfitTargetCents !== undefined) setSessionProfitTarget(String(data.sessionProfitTargetCents));
       setExitThresholdsSynced(true);
     }
-  }, [data?.tpCents, data?.slCents, data?.staleMs, exitThresholdsSynced]);
+  }, [data?.tpCents, data?.slCents, data?.staleMs, data?.tpAbsoluteCents, data?.sessionProfitTargetCents, exitThresholdsSynced]);
 
   const enabled  = data?.enabled ?? false;
   const status   = data?.status;
@@ -259,6 +263,8 @@ export function MomentumBot() {
       tpCents:              Math.max(1, parseInt(tpCents || "5", 10)),
       slCents:              Math.max(1, parseInt(slCents || "2", 10)),
       staleMs:              Math.max(10000, parseInt(staleMs || "65", 10) * 1000),
+      tpAbsoluteCents:          Math.max(0, parseInt(tpAbsolute || "0", 10)),
+      sessionProfitTargetCents: Math.max(0, parseInt(sessionProfitTarget || "0", 10)),
     };
   }
 
@@ -1011,6 +1017,41 @@ export function MomentumBot() {
                     />
                     <p className="text-[9px] text-slate-600 mt-0.5">
                       Exit if price hasn't moved in this many seconds. Default: <strong className="text-slate-500">65s</strong>. Use longer with wider TP.
+                    </p>
+                  </label>
+
+                  {/* Absolute price TP */}
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Exit price target (¢) — close when YES price hits this</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="99"
+                      step="1"
+                      value={tpAbsolute}
+                      onChange={e => setTpAbsolute(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      Set e.g. <strong className="text-slate-500">80</strong> to exit YES trades when price reaches 80¢ (NO trades exit at 20¢). Set <strong className="text-slate-500">0</strong> to use the relative TP¢ above instead.
+                    </p>
+                  </label>
+
+                  {/* Session profit target */}
+                  <label className="block">
+                    <span className="text-[10px] text-slate-400 block mb-1">Session profit target (¢) — stop bot after making this much</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={sessionProfitTarget}
+                      onChange={e => setSessionProfitTarget(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
+                    />
+                    <p className="text-[9px] text-slate-600 mt-0.5">
+                      Bot stops automatically once session P&L reaches this value. Set <strong className="text-slate-500">0</strong> to trade indefinitely.
                     </p>
                   </label>
 

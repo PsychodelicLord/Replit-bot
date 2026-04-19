@@ -122,9 +122,11 @@ export interface MomentumBotState {
   priceMax: number;
 
   // Exit thresholds (cents) — configurable from UI
-  tpCents: number;   // take-profit trigger
-  slCents: number;   // stop-loss trigger
+  tpCents: number;   // take-profit: gain in cents above entry
+  slCents: number;   // stop-loss: loss in cents below entry
   staleMs: number;   // exit if price flat for this long (ms)
+  tpAbsoluteCents: number;          // 0 = use relative tpCents; >0 = exit when YES price hits this level
+  sessionProfitTargetCents: number; // 0 = trade indefinitely; >0 = stop when session gain hits this
 
   // Bot Health Score — updated after every trade once buffer >= 20
   healthScore: {
@@ -170,6 +172,8 @@ const state: MomentumBotState = {
   tpCents: 5,
   slCents: 2,
   staleMs: 65_000,
+  tpAbsoluteCents: 0,
+  sessionProfitTargetCents: 0,
   healthScore: null,
 };
 
@@ -184,6 +188,9 @@ export interface MomentumBotConfig {
   tpCents?: number;              // take-profit threshold in cents (default 5)
   slCents?: number;              // stop-loss threshold in cents (default 2)
   staleMs?: number;              // stale-exit timer in ms (default 65000)
+  tpAbsoluteCents?: number;      // 0 = use relative; >0 = exit when YES price hits this
+  sessionProfitTargetCents?: number; // 0 = unlimited; >0 = stop when session P&L hits this
+  enabled?: boolean;
 }
 
 // Per-market momentum counter state
@@ -425,6 +432,12 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
   // Check session loss limit — hard stop, requires re-enable from dashboard
   if (state.maxSessionLossCents > 0 && state.sessionPnlCents <= -state.maxSessionLossCents) {
     stopMomentumBot(`Session loss limit hit: ${state.sessionPnlCents}¢ ≤ -${state.maxSessionLossCents}¢`);
+    return;
+  }
+
+  // Check session profit target — stop when we've made enough for the session
+  if (state.sessionProfitTargetCents > 0 && state.sessionPnlCents >= state.sessionProfitTargetCents) {
+    stopMomentumBot(`🎯 Session profit target reached: +${state.sessionPnlCents}¢ ≥ +${state.sessionProfitTargetCents}¢ — locking in gains`);
   }
 }
 
@@ -1061,7 +1074,19 @@ async function runSellMonitor(): Promise<void> {
       }
     }
 
-    // Take-profit
+    // Absolute price TP — exit when YES price reaches a target level (e.g. 80¢)
+    if (state.tpAbsoluteCents > 0) {
+      const absHit = pos.side === "YES"
+        ? currentMid >= state.tpAbsoluteCents
+        : currentMid <= (100 - state.tpAbsoluteCents);
+      if (absHit) {
+        log(`💰 ABS-TP hit — price ${currentMid}¢ reached target ${pos.side === "YES" ? ">=" : "<="} ${pos.side === "YES" ? state.tpAbsoluteCents : 100 - state.tpAbsoluteCents}¢ on Trade ${pos.tradeId}`);
+        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+        continue;
+      }
+    }
+
+    // Relative take-profit (cents above entry)
     if (gain >= state.tpCents) {
       log(`💰 TP hit — gain ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
@@ -1377,6 +1402,12 @@ export function saveMomentumConfig(): void {
     totalLosses:          state.totalLosses,
     totalPnlCents:        state.totalPnlCents,
     startingBalanceCents: state.startingBalanceCents,
+    // Exit thresholds — persisted so restarts keep your settings
+    tpCents:    state.tpCents,
+    slCents:    state.slCents,
+    staleMs:    state.staleMs,
+    tpAbsoluteCents:          state.tpAbsoluteCents,
+    sessionProfitTargetCents: state.sessionProfitTargetCents,
   };
   db.insert(momentumSettingsTable).values(row)
     .onConflictDoUpdate({ target: momentumSettingsTable.id, set: row })
@@ -1434,6 +1465,12 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
       state.totalLosses   = r.totalLosses  ?? 0;
       state.totalPnlCents = r.totalPnlCents ?? 0;
       state.startingBalanceCents = r.startingBalanceCents ?? null;
+      // Restore exit thresholds so restarts keep the user's settings
+      state.tpCents    = r.tpCents    ?? 5;
+      state.slCents    = r.slCents    ?? 2;
+      state.staleMs    = r.staleMs    ?? 65_000;
+      state.tpAbsoluteCents          = r.tpAbsoluteCents          ?? 0;
+      state.sessionProfitTargetCents = r.sessionProfitTargetCents ?? 0;
 
       if (r.enabled || autoStartFallback) {
         const reason = r.enabled ? "DB shows enabled=true" : "MOMENTUM_AUTO_START fallback";
@@ -1616,6 +1653,8 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.tpCents !== undefined) state.tpCents = Math.max(1, cfg.tpCents);
   if (cfg.slCents !== undefined) state.slCents = Math.max(1, cfg.slCents);
   if (cfg.staleMs !== undefined) state.staleMs = Math.max(10_000, cfg.staleMs);
+  if (cfg.tpAbsoluteCents !== undefined) state.tpAbsoluteCents = Math.max(0, cfg.tpAbsoluteCents);
+  if (cfg.sessionProfitTargetCents !== undefined) state.sessionProfitTargetCents = Math.max(0, cfg.sessionProfitTargetCents);
   saveMomentumConfig();
 }
 

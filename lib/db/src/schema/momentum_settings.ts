@@ -20,4 +20,12 @@ export const momentumSettingsTable = pgTable("momentum_settings", {
   totalPnlCents:        integer("total_pnl_cents").notNull().default(0),
   // Snapshot balance captured at last reset — persists until user resets again
   startingBalanceCents: integer("starting_balance_cents"),
+  // Exit thresholds — persisted so restarts don't reset to defaults
+  tpCents:    integer("tp_cents").notNull().default(5),
+  slCents:    integer("sl_cents").notNull().default(2),
+  staleMs:    integer("stale_ms").notNull().default(65000),
+  // Absolute price TP — exit when market price hits this level (0 = disabled)
+  tpAbsoluteCents: integer("tp_absolute_cents").notNull().default(0),
+  // Session profit target — stop bot when session P&L reaches this (0 = disabled)
+  sessionProfitTargetCents: integer("session_profit_target_cents").notNull().default(0),
 });

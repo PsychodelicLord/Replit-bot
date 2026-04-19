@@ -88,6 +88,24 @@ export async function runMigrations(): Promise<void> {
     await db.execute(sql`
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS starting_balance_cents INTEGER
     `);
+    // Exit thresholds — persisted so restarts don't reset to defaults
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS tp_cents INTEGER NOT NULL DEFAULT 5
+    `);
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS sl_cents INTEGER NOT NULL DEFAULT 2
+    `);
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS stale_ms INTEGER NOT NULL DEFAULT 65000
+    `);
+    // Absolute price TP (0 = disabled, use relative tpCents)
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS tp_absolute_cents INTEGER NOT NULL DEFAULT 0
+    `);
+    // Session profit target — stop when session gain hits this (0 = disabled)
+    await db.execute(sql`
+      ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS session_profit_target_cents INTEGER NOT NULL DEFAULT 0
+    `);
 
     console.log("[migrate] Tables ready.");
   } catch (err) {
