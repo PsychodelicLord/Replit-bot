@@ -731,9 +731,13 @@ async function placeBuyOrder(
 async function placeSellOrder(
   pos: MomentumPosition,
   currentBidCents: number,
-  midAtTrigger = currentBidCents,  // mid price when TP/SL fired — for execution quality tracking
+  midAtTrigger = currentBidCents,  // YES-space mid price when TP/SL fired — for P&L and execution tracking
 ): Promise<boolean> {
-  const limitCents = Math.max(1, currentBidCents - 2);
+  // For YES sell: limit in YES-space = bid - 2
+  // For NO sell:  limit in NO-space = (100 - YESbid) - 2  (flip to NO-space first, then add slack)
+  const limitCents = pos.side === "YES"
+    ? Math.max(1, currentBidCents - 2)
+    : Math.max(1, (100 - currentBidCents) - 2);
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
     ticker: pos.marketId,
@@ -747,16 +751,18 @@ async function placeSellOrder(
   };
 
   try {
-    const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
-      order?: { order_id?: string; yes_price?: number; no_price?: number }
-    };
-    const rawPrice = pos.side === "YES"
-      ? (resp?.order?.yes_price ?? 0)
-      : (resp?.order?.no_price  ?? 0);
-    const exitPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
-    const gross     = exitPrice - pos.entryPriceCents;
-    const fee       = Math.floor(FEE_RATE * Math.max(0, gross));
-    const netPnl    = gross - fee;
+    await kalshiFetch("POST", "/portfolio/orders", payload);
+
+    // P&L is computed from market mid at trigger time (YES-space), NOT the order response
+    // price — Kalshi's order API returns the limit we submitted, not the actual fill price.
+    //   YES gain: midAtTrigger (YES exit) - entryPriceCents (YES entry)
+    //   NO gain:  (100 - midAtTrigger) (NO exit equiv) - entryPriceCents (NO entry)
+    const exitPriceForPnl = pos.side === "YES"
+      ? midAtTrigger
+      : 100 - midAtTrigger;
+    const gross  = exitPriceForPnl - pos.entryPriceCents;
+    const fee    = Math.floor(FEE_RATE * Math.max(0, gross));
+    const netPnl = gross - fee;
 
     // ── Remove from in-memory FIRST — always, regardless of DB status ──
     const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
@@ -767,7 +773,7 @@ async function placeSellOrder(
     marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
 
     // ── Record win/loss in-memory immediately — DB-independent ──
-    recordTradeResult(pos.entryPriceCents, exitPrice, netPnl);
+    recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
 
     // Global cooldown — longer after a loss so bot doesn't immediately revenge-trade
     const cooldownMs = netPnl < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
@@ -775,7 +781,7 @@ async function placeSellOrder(
     console.log(`[COOLDOWN] ${netPnl < 0 ? "LOSS" : "WIN"} — global cooldown set: ${cooldownMs / 1000}s`);
 
     // ── Health score tracking ──
-    const liveGain = exitPrice - pos.entryPriceCents;
+    const liveGain = exitPriceForPnl - pos.entryPriceCents;
     const liveReason: "TP" | "SL" | "STALE" = liveGain >= state.tpCents ? "TP" : liveGain <= -state.slCents ? "SL" : "STALE";
     recordTradeForHealth(netPnl, liveReason, pos.entrySlippageCents ?? 0);
 
@@ -789,15 +795,15 @@ async function placeSellOrder(
       entrySlippage:     pos.entrySlippageCents ?? 0,
       midAtTrigger,
       expectedExitCents: currentBidCents,
-      actualFillCents:   exitPrice,
-      exitSlippage:      exitPrice - currentBidCents,  // positive = better, negative = worse
+      actualFillCents:   exitPriceForPnl,
+      exitSlippage:      exitPriceForPnl - currentBidCents,
       pnlCents:          netPnl,
     });
 
     // ── Async DB update — fire-and-forget, never blocks ──
     const sellFields = {
       status: "closed" as const,
-      sellPriceCents: exitPrice,
+      sellPriceCents: exitPriceForPnl,
       pnlCents: netPnl,
       feeCents: fee,
       closedAt: new Date(),
