@@ -151,9 +151,17 @@ export function MomentumBot() {
   const isConnected = dataUpdatedAt > 0;
   const isReconnecting = !isConnected || (isError && data === undefined);
 
+  const [toggleError, setToggleError] = useState<string | null>(null);
   const setAuto = useSetMomentumBotAuto({
     mutation: {
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: getGetMomentumBotStatusQueryKey() }),
+      onSuccess: () => {
+        setToggleError(null);
+        queryClient.invalidateQueries({ queryKey: getGetMomentumBotStatusQueryKey() });
+      },
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        setToggleError(msg);
+      },
     },
   });
 
@@ -891,6 +899,11 @@ export function MomentumBot() {
               )}
             </div>
 
+            {toggleError && (
+              <div className="mt-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
+                <p className="text-[10px] text-red-400 leading-relaxed">⚠ {toggleError}</p>
+              </div>
+            )}
             {enabled && !isPaused && (
               <div className={`flex items-center gap-1.5 mt-2 text-[10px] ${simulatorMode ? "text-violet-400/70" : "text-sky-400/70"}`}>
                 <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
