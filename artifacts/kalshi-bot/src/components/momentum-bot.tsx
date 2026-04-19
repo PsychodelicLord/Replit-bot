@@ -987,7 +987,7 @@ export function MomentumBot() {
                         <input
                           type="number"
                           min="1"
-                          max="50"
+                          max="99"
                           step="1"
                           value={tpCents}
                           onChange={e => setTpCents(e.target.value)}
@@ -1000,7 +1000,7 @@ export function MomentumBot() {
                         <input
                           type="number"
                           min="1"
-                          max="50"
+                          max="99"
                           step="1"
                           value={slCents}
                           onChange={e => setSlCents(e.target.value)}
