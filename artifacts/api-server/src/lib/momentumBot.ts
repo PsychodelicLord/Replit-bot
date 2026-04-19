@@ -1549,6 +1549,32 @@ function saveEnabledFlag(enabled: boolean): void {
 }
 
 /**
+ * Only persist config/risk fields — does NOT touch simWins/simLosses/simPnlCents
+ * or real-trade stats. Use this in updateMomentumConfig so that toggling settings
+ * before loadMomentumConfig completes never overwrites the scoreboard with zeros.
+ */
+function saveConfigFieldsOnly(): void {
+  const set = {
+    balanceFloorCents:         state.balanceFloorCents,
+    maxSessionLossCents:       state.maxSessionLossCents,
+    consecutiveLossLimit:      state.consecutiveLossLimit,
+    betCostCents:              state.betCostCents,
+    simulatorMode:             state.simulatorMode,
+    priceMin:                  state.priceMin,
+    priceMax:                  state.priceMax,
+    tpCents:                   state.tpCents,
+    slCents:                   state.slCents,
+    staleMs:                   state.staleMs,
+    tpAbsoluteCents:           state.tpAbsoluteCents,
+    sessionProfitTargetCents:  state.sessionProfitTargetCents,
+  };
+  db.insert(momentumSettingsTable)
+    .values({ id: 1, ...set })
+    .onConflictDoUpdate({ target: momentumSettingsTable.id, set })
+    .catch(err => console.error("[momentumBot] saveConfigFieldsOnly failed:", String(err)));
+}
+
+/**
  * Load persisted config from DB and optionally auto-start the bot.
  *
  * @param autoStartFallback - when true (MOMENTUM_AUTO_START=true), the bot
@@ -1777,7 +1803,7 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   if (cfg.staleMs !== undefined) state.staleMs = Math.max(10_000, cfg.staleMs);
   if (cfg.tpAbsoluteCents !== undefined) state.tpAbsoluteCents = Math.max(0, cfg.tpAbsoluteCents);
   if (cfg.sessionProfitTargetCents !== undefined) state.sessionProfitTargetCents = Math.max(0, cfg.sessionProfitTargetCents);
-  saveMomentumConfig();
+  saveConfigFieldsOnly(); // never touches simWins/simLosses — safe before loadMomentumConfig completes
 }
 
 export function startMomentumBot(): MomentumBotState {
