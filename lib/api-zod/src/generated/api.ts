@@ -397,6 +397,36 @@ export const GetBotLogsQueryParams = zod.object({
   limit: zod.coerce.number().default(getBotLogsQueryLimitDefault),
 });
 
+export const PaperTradeRecord = zod.object({
+  id:         zod.number(),
+  coin:       zod.string(),
+  side:       zod.string(),
+  entryPrice: zod.number(),
+  exitPrice:  zod.number(),
+  pnlCents:   zod.number(),
+  exitReason: zod.string(),
+  closedAt:   zod.string(),
+});
+
+export const TimeOfDayBucket = zod.object({
+  label:    zod.string(),
+  wins:     zod.number(),
+  losses:   zod.number(),
+  pnlCents: zod.number(),
+});
+
+export const PaperStats = zod.object({
+  totalTrades:      zod.number(),
+  wins:             zod.number(),
+  losses:           zod.number(),
+  winRatePct:       zod.number(),
+  totalPnlCents:    zod.number(),
+  evPerTradeCents:  zod.number(),
+  maxDrawdownCents: zod.number(),
+  timeOfDay:        zod.array(TimeOfDayBucket),
+  recentTrades:     zod.array(PaperTradeRecord),
+});
+
 export const GetBotLogsResponse = zod.object({
   logs: zod.array(
     zod.object({

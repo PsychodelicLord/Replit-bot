@@ -197,6 +197,36 @@ export interface OutcomeBotStatus {
   marketStates?:  Record<string, OutcomeBotMarketState>;
 }
 
+export interface PaperTradeRecord {
+  id:         number;
+  coin:       string;
+  side:       string;
+  entryPrice: number;
+  exitPrice:  number;
+  pnlCents:   number;
+  exitReason: string;
+  closedAt:   string;
+}
+
+export interface TimeOfDayBucket {
+  label:    string;
+  wins:     number;
+  losses:   number;
+  pnlCents: number;
+}
+
+export interface PaperStats {
+  totalTrades:      number;
+  wins:             number;
+  losses:           number;
+  winRatePct:       number;
+  totalPnlCents:    number;
+  evPerTradeCents:  number;
+  maxDrawdownCents: number;
+  timeOfDay:        TimeOfDayBucket[];
+  recentTrades:     PaperTradeRecord[];
+}
+
 export interface OutcomeBotToggleBody {
   enabled:       boolean;
   betCostCents?: number;

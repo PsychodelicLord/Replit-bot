@@ -18,8 +18,8 @@
 
 import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook } from "./kalshi-bot";
 import { logger } from "./logger";
-import { db, tradesTable, botLogsTable, momentumSettingsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
+import { eq, asc, desc } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
@@ -985,6 +985,118 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
   log(`🎮 [SIM] Lifetime: ${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢ | W:${state.simWins} L:${state.simLosses}`);
   dbLog("info", `[SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} pnl:${pnlSign}${pnlCents}¢ | lifetime:${state.simPnlCents >= 0 ? "+" : ""}${state.simPnlCents}¢ W:${state.simWins} L:${state.simLosses}`);
   saveMomentumConfig(); // persist sim stats after every trade so restarts never lose them
+
+  // Persist individual trade record for lifetime history & advanced stats
+  db.insert(paperTradesTable).values({
+    botType:    "momentum",
+    marketId:   pos.marketId,
+    coin:       coinLabel(pos.marketId),
+    side:       pos.side,
+    entryPrice: pos.entryPriceCents,
+    exitPrice:  exitPriceCents,
+    pnlCents,
+    exitReason: reason.split(" ")[0] ?? reason,
+    enteredAt:  new Date(pos.enteredAt),
+    closedAt:   new Date(),
+  }).catch(err => console.error("[momentumBot] paperTrade insert failed:", String(err)));
+}
+
+// ─── Persistent Paper Trade Stats ─────────────────────────────────────────────
+export interface TimeOfDayBucket {
+  label: string;   // e.g. "12-16"
+  wins:  number;
+  losses: number;
+  pnlCents: number;
+}
+
+export interface PaperTradeRecord {
+  id:         number;
+  coin:       string;
+  side:       string;
+  entryPrice: number;
+  exitPrice:  number;
+  pnlCents:   number;
+  exitReason: string;
+  closedAt:   string; // ISO string
+}
+
+export interface PaperStats {
+  totalTrades:    number;
+  wins:           number;
+  losses:         number;
+  winRatePct:     number;
+  totalPnlCents:  number;
+  evPerTradeCents: number;
+  maxDrawdownCents: number;
+  timeOfDay:      TimeOfDayBucket[];
+  recentTrades:   PaperTradeRecord[];
+}
+
+export async function getPaperStats(): Promise<PaperStats> {
+  const rows = await db
+    .select()
+    .from(paperTradesTable)
+    .where(eq(paperTradesTable.botType, "momentum"))
+    .orderBy(asc(paperTradesTable.closedAt));
+
+  const totalTrades = rows.length;
+  const wins    = rows.filter(r => r.pnlCents > 0).length;
+  const losses  = rows.filter(r => r.pnlCents <= 0).length;
+  const totalPnlCents = rows.reduce((s, r) => s + r.pnlCents, 0);
+  const winRatePct = totalTrades > 0 ? Math.round((wins / totalTrades) * 1000) / 10 : 0;
+  const evPerTradeCents = totalTrades > 0 ? Math.round(totalPnlCents / totalTrades) : 0;
+
+  // Max drawdown: largest peak-to-trough decline in cumulative P&L
+  let peak = 0;
+  let runPnl = 0;
+  let maxDrawdownCents = 0;
+  for (const r of rows) {
+    runPnl += r.pnlCents;
+    if (runPnl > peak) peak = runPnl;
+    const drawdown = peak - runPnl;
+    if (drawdown > maxDrawdownCents) maxDrawdownCents = drawdown;
+  }
+
+  // Time-of-day buckets (4-hour windows, UTC)
+  const buckets: Record<string, TimeOfDayBucket> = {};
+  const bucketDefs: [string, number, number][] = [
+    ["00-06", 0, 5], ["06-12", 6, 11], ["12-18", 12, 17], ["18-24", 18, 23],
+  ];
+  for (const [label] of bucketDefs) {
+    buckets[label] = { label, wins: 0, losses: 0, pnlCents: 0 };
+  }
+  for (const r of rows) {
+    const hour = new Date(r.closedAt).getUTCHours();
+    const def  = bucketDefs.find(([, lo, hi]) => hour >= lo && hour <= hi);
+    if (!def) continue;
+    const b = buckets[def[0]]!;
+    b.pnlCents += r.pnlCents;
+    if (r.pnlCents > 0) b.wins++; else b.losses++;
+  }
+
+  // Most recent 20 trades (newest first)
+  const recentTrades: PaperTradeRecord[] = rows.slice(-20).reverse().map(r => ({
+    id:         r.id,
+    coin:       r.coin,
+    side:       r.side,
+    entryPrice: r.entryPrice,
+    exitPrice:  r.exitPrice,
+    pnlCents:   r.pnlCents,
+    exitReason: r.exitReason,
+    closedAt:   r.closedAt instanceof Date ? r.closedAt.toISOString() : String(r.closedAt),
+  }));
+
+  return {
+    totalTrades,
+    wins,
+    losses,
+    winRatePct,
+    totalPnlCents,
+    evPerTradeCents,
+    maxDrawdownCents,
+    timeOfDay: Object.values(buckets),
+    recentTrades,
+  };
 }
 
 /** Monitor open paper positions — mirrors real sell monitor exactly:
@@ -1718,6 +1830,9 @@ export function resetSimStats(): MomentumBotState {
   state.simOpenTradeCount = 0;
   log("🎮 [SIM] Scoreboard reset by user");
   saveMomentumConfig();
+  db.delete(paperTradesTable)
+    .where(eq(paperTradesTable.botType, "momentum"))
+    .catch(err => console.error("[momentumBot] paperTrades delete failed:", String(err)));
   return getMomentumBotState();
 }
 
@@ -1743,6 +1858,9 @@ export async function resetAllStats(): Promise<MomentumBotState> {
   saveMomentumConfig();
   // Wipe trades table so allTimePnlCents DB query also returns 0
   await db.delete(tradesTable).catch(err => console.error("[momentumBot] resetAllStats: trades delete failed:", String(err)));
+  await db.delete(paperTradesTable)
+    .where(eq(paperTradesTable.botType, "momentum"))
+    .catch(err => console.error("[momentumBot] resetAllStats: paperTrades delete failed:", String(err)));
   return getMomentumBotState();
 }
 

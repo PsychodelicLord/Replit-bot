@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, clearStuckPositions } from "../lib/kalshi-bot";
-import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport } from "../lib/momentumBot";
+import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport, getPaperStats } from "../lib/momentumBot";
 import { getOutcomeBotState, startOutcomeBot, stopOutcomeBot, updateOutcomeBotConfig, resetOutcomeStats, getOutcomeMarketStates, getOutcomeOpenPositions } from "../lib/outcomeBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
@@ -203,6 +203,15 @@ router.get("/bot/momentum/debug", async (_req, res): Promise<void> => {
 
 router.post("/bot/momentum/reset-sim", (_req, res): void => {
   res.json(MomentumBotStatus.parse(resetSimStats()));
+});
+
+router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
+  try {
+    const stats = await getPaperStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 router.post("/bot/momentum/reset-all", async (_req, res): Promise<void> => {

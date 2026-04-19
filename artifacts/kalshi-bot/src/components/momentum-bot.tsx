@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useGetMomentumBotStatus, useSetMomentumBotAuto, getGetMomentumBotStatusQueryKey } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
+import type { PaperStats } from "@workspace/api-client-react";
 import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Clock, RefreshCw } from "lucide-react";
 
 const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
@@ -296,6 +297,13 @@ export function MomentumBot() {
     setSimulatorMode(newSim);
     setAuto.mutate({ data: buildConfig({ enabled, simulatorMode: newSim }) });
   }
+
+  const { data: paperStats, refetch: refetchPaper } = useQuery<PaperStats>({
+    queryKey: ["paper-stats"],
+    queryFn: () => fetch(`${BASE_URL}api/bot/momentum/paper-stats`).then(r => r.json()),
+    refetchInterval: 15_000,
+    enabled: isSimMode,
+  });
 
   const sessionPnl = data?.sessionPnlCents ?? 0;
   const simPnl     = data?.simPnlCents ?? 0;
@@ -618,6 +626,76 @@ export function MomentumBot() {
                       </div>
                     );
                   })()}
+
+                  {/* ── Persistent Paper Trade History ── */}
+                  {paperStats && paperStats.totalTrades > 0 && (
+                    <div className="mt-3 rounded-lg border border-violet-500/20 bg-black/20 p-3 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-violet-400">Lifetime Paper History</span>
+                        <span className="text-[9px] text-slate-500">{paperStats.totalTrades} trades stored</span>
+                      </div>
+
+                      {/* Core stats row */}
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {[
+                          { label: "Win Rate", val: `${paperStats.winRatePct.toFixed(1)}%`, color: paperStats.winRatePct >= 50 ? "text-emerald-400" : "text-red-400" },
+                          { label: "EV/Trade", val: `${paperStats.evPerTradeCents >= 0 ? "+" : ""}${paperStats.evPerTradeCents}¢`, color: paperStats.evPerTradeCents >= 0 ? "text-emerald-400" : "text-red-400" },
+                          { label: "Total P&L", val: `${paperStats.totalPnlCents >= 0 ? "+" : ""}${(paperStats.totalPnlCents / 100).toFixed(2)}`, color: paperStats.totalPnlCents >= 0 ? "text-emerald-400" : "text-red-400" },
+                          { label: "Max DD", val: `-${(paperStats.maxDrawdownCents / 100).toFixed(2)}`, color: "text-red-400" },
+                        ].map(({ label, val, color }) => (
+                          <div key={label} className="rounded bg-white/[0.03] border border-white/5 p-1.5 text-center">
+                            <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-0.5">{label}</p>
+                            <p className={`text-[11px] font-bold font-mono ${color}`}>{val}</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Time-of-day buckets */}
+                      {paperStats.timeOfDay.some(b => b.wins + b.losses > 0) && (
+                        <div>
+                          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Performance by Time (UTC)</p>
+                          <div className="grid grid-cols-4 gap-1">
+                            {paperStats.timeOfDay.map(b => {
+                              const total = b.wins + b.losses;
+                              const wr = total > 0 ? Math.round((b.wins / total) * 100) : 0;
+                              const pnlColor = b.pnlCents >= 0 ? "text-emerald-400" : "text-red-400";
+                              return (
+                                <div key={b.label} className="rounded bg-white/[0.02] border border-white/5 p-1.5 text-center">
+                                  <p className="text-[8px] text-slate-500 mb-0.5">{b.label}</p>
+                                  <p className={`text-[10px] font-bold ${pnlColor}`}>{b.pnlCents >= 0 ? "+" : ""}{b.pnlCents}¢</p>
+                                  <p className="text-[8px] text-slate-600">{total > 0 ? `${wr}% (${total})` : "—"}</p>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Recent trades */}
+                      {paperStats.recentTrades.length > 0 && (
+                        <div>
+                          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Recent Trades</p>
+                          <div className="space-y-1 max-h-48 overflow-y-auto">
+                            {paperStats.recentTrades.map(t => (
+                              <div key={t.id} className="flex items-center justify-between rounded bg-white/[0.02] border border-white/5 px-2 py-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[8px] font-bold px-1 py-0.5 rounded ${t.side === "YES" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>{t.side}</span>
+                                  <span className="text-[9px] text-slate-300 font-medium">{t.coin}</span>
+                                  <span className="text-[8px] text-slate-500">{t.entryPrice}¢→{t.exitPrice}¢</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[8px] text-slate-600">{t.exitReason}</span>
+                                  <span className={`text-[9px] font-bold font-mono ${t.pnlCents > 0 ? "text-emerald-400" : t.pnlCents < 0 ? "text-red-400" : "text-slate-400"}`}>
+                                    {t.pnlCents >= 0 ? "+" : ""}{t.pnlCents}¢
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
