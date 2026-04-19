@@ -210,7 +210,19 @@ router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
     const stats = await getPaperStats();
     res.json(stats);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    // Return empty stats so the UI never crashes (e.g. table not yet migrated)
+    console.error("[paper-stats] DB error, returning empty stats:", String(err));
+    res.json({
+      totalTrades: 0, wins: 0, losses: 0, winRatePct: 0,
+      totalPnlCents: 0, evPerTradeCents: 0, maxDrawdownCents: 0,
+      timeOfDay: [
+        { label: "00-06", wins: 0, losses: 0, pnlCents: 0 },
+        { label: "06-12", wins: 0, losses: 0, pnlCents: 0 },
+        { label: "12-18", wins: 0, losses: 0, pnlCents: 0 },
+        { label: "18-24", wins: 0, losses: 0, pnlCents: 0 },
+      ],
+      recentTrades: [],
+    });
   }
 });
 

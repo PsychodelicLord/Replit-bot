@@ -107,6 +107,22 @@ export async function runMigrations(): Promise<void> {
       ALTER TABLE momentum_settings ADD COLUMN IF NOT EXISTS session_profit_target_cents INTEGER NOT NULL DEFAULT 0
     `);
 
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS paper_trades (
+        id           SERIAL PRIMARY KEY,
+        bot_type     VARCHAR(20) NOT NULL DEFAULT 'momentum',
+        market_id    VARCHAR(120) NOT NULL,
+        coin         VARCHAR(10)  NOT NULL DEFAULT '',
+        side         VARCHAR(5)   NOT NULL,
+        entry_price  INTEGER      NOT NULL,
+        exit_price   INTEGER      NOT NULL,
+        pnl_cents    INTEGER      NOT NULL,
+        exit_reason  VARCHAR(80)  NOT NULL,
+        entered_at   TIMESTAMPTZ  NOT NULL,
+        closed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+
     console.log("[migrate] Tables ready.");
   } catch (err) {
     console.error("[migrate] Migration error (server will still start):", err);
