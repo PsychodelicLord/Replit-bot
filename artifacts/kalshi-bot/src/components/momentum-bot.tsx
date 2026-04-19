@@ -881,9 +881,11 @@ export function MomentumBot() {
                 <p className="text-[10px] mt-0.5 text-slate-600">
                   {isReconnecting
                     ? "⟳ Reconnecting to server..."
-                    : enabled
-                      ? isSimMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
-                      : "Tap to start momentum trading"}
+                    : setAuto.isPending
+                      ? "⟳ Saving..."
+                      : enabled
+                        ? isSimMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
+                        : "Tap to start momentum trading"}
                 </p>
               </div>
               {isReconnecting ? (
@@ -911,6 +913,17 @@ export function MomentumBot() {
               <div className="mt-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
                 <p className="text-[10px] text-red-400 leading-relaxed">⚠ {toggleError}</p>
               </div>
+            )}
+            {enabled && !setAuto.isPending && (
+              <button
+                onClick={() => {
+                  setToggleError(null);
+                  setAuto.mutate({ data: { enabled: false } });
+                }}
+                className="mt-2 w-full text-[10px] text-red-400/70 hover:text-red-400 border border-red-500/20 hover:border-red-500/40 rounded-lg py-1.5 transition-colors"
+              >
+                Force Stop Bot
+              </button>
             )}
             {enabled && !isPaused && (
               <div className={`flex items-center gap-1.5 mt-2 text-[10px] ${simulatorMode ? "text-violet-400/70" : "text-sky-400/70"}`}>
