@@ -17,6 +17,7 @@
  */
 
 import { kalshiFetch } from "./kalshi-bot";
+import { fetchActiveMarkets } from "./momentumBot";
 import { logger } from "./logger";
 import { db, botLogsTable, outcomeSettingsTable } from "@workspace/db";
 
@@ -426,84 +427,52 @@ async function fetchOrderbook(ticker: string): Promise<OrderbookSnap | null> {
   }
 }
 
-// ─── Market List Cache ────────────────────────────────────────────────────────
-interface RawOutcomeMarket {
-  ticker?: string;
-  title?: string;
-  close_time?: string;
-  status?: string;
-  yes_ask_dollars?: number;
-  yes_bid_dollars?: number;
-}
-
-interface CachedMarket {
-  ticker:        string;
-  title:         string;
-  closeTs:       number;
-  askCents:      number;
-  bidCents:      number;
-}
-
-let _marketCache: { markets: CachedMarket[]; cachedAt: number } | null = null;
-const MARKET_CACHE_TTL_MS = 90_000; // refresh market list every 90s
-
-async function fetchActiveOutcomeMarkets(): Promise<CachedMarket[]> {
-  const t = now();
-  if (_marketCache && t - _marketCache.cachedAt < MARKET_CACHE_TTL_MS) {
-    return _marketCache.markets;
-  }
-
-  const all: RawOutcomeMarket[] = [];
-  for (const prefix of ALLOWED_TICKER_PREFIXES) {
-    try {
-      const resp = await kalshiFetch("GET", `/markets?series_ticker=${prefix}&status=open&limit=5`) as { markets?: RawOutcomeMarket[] };
-      const raw = resp?.markets ?? [];
-      if (raw.length > 0) all.push(...raw);
-    } catch (err) {
-      warn(`Market list error for ${prefix}: ${String(err)}`);
-    }
-    await new Promise(r => setTimeout(r, 300)); // rate-limit buffer
-  }
-
-  const markets: CachedMarket[] = all
-    .filter(m => m.ticker && isOutcomeMarket(m.ticker ?? ""))
-    .map(m => {
-      const closeTs  = m.close_time ? new Date(m.close_time).getTime() : 0;
-      const askCents = m.yes_ask_dollars != null ? Math.round(m.yes_ask_dollars * 100) : 0;
-      const bidCents = m.yes_bid_dollars != null ? Math.round(m.yes_bid_dollars * 100) : 0;
-      return { ticker: m.ticker!, title: m.title ?? m.ticker!, closeTs, askCents, bidCents };
-    });
-
-  _marketCache = { markets, cachedAt: t };
-  return markets;
-}
-
 // ─── Scan Markets ─────────────────────────────────────────────────────────────
+// Uses the same shared fetchActiveMarkets() cache as the momentum bot —
+// no duplicate API calls, no separate rate-limit concerns.
 async function scanMarkets(): Promise<void> {
   if (!state.enabled) return;
 
-  let marketsData: CachedMarket[] = [];
+  let marketsData: Array<{ ticker: string; title: string; minutesRemaining: number; closeTs: number; askCents: number; bidCents: number }> = [];
   try {
-    marketsData = await fetchActiveOutcomeMarkets();
+    const all = await fetchActiveMarkets();
+    // Filter to only the coins this bot cares about
+    marketsData = all.filter(m => isOutcomeMarket(m.ticker));
   } catch (err) {
     warn(`Failed to fetch market list: ${String(err)}`);
     return;
   }
 
+  if (marketsData.length === 0) {
+    log(`[SCAN] No eligible 15-min markets found — waiting for new cycle`);
+    return;
+  }
+
+  log(`[SCAN] ${marketsData.length} markets: ${marketsData.map(m => `${coin(m.ticker)} ${m.minutesRemaining.toFixed(1)}min @${m.askCents}¢`).join(", ")}`);
+
   const t = now();
 
   for (const market of marketsData) {
     try {
-      const msRemaining = market.closeTs > 0 ? market.closeTs - t : 999_999_999;
-      const minRemaining = msRemaining / 60_000;
-      const isLateMarket = msRemaining <= LATE_MARKET_WINDOW_MS && msRemaining > 0;
-      const minRequired = isLateMarket ? MIN_MINUTES_LATE : MIN_MINUTES_REMAINING;
+      const msRemaining   = market.closeTs > 0 ? market.closeTs - t : market.minutesRemaining * 60_000;
+      const minRemaining  = msRemaining / 60_000;
+      const isLateMarket  = msRemaining <= LATE_MARKET_WINDOW_MS && msRemaining > 0;
+      const minRequired   = isLateMarket ? MIN_MINUTES_LATE : MIN_MINUTES_REMAINING;
 
+      // Always record price sample first (so market shows in state panel)
+      const midCents = (market.askCents > 0 && market.bidCents > 0)
+        ? Math.round((market.askCents + market.bidCents) / 2)
+        : 0;
+      if (midCents > 0 && midCents < 100) {
+        recordPrice(market.ticker, midCents);
+      }
+
+      // Market ending soon — log "no edge" if we never traded it, then skip
       if (minRemaining < minRequired) {
         const hist = priceHistories.get(market.ticker);
         if (hist && !hist.tradedThisMarket && hist.samples.length > 5) {
-          log(`📊 NO EDGE | ${coin(market.ticker)} — market ending, no valid setup found`);
-          dbLog("info", `[OUTCOME] NO_EDGE ${coin(market.ticker)} — no setup this market`);
+          log(`📊 NO EDGE | ${coin(market.ticker)} — ${minRemaining.toFixed(1)}min left, no valid setup found`);
+          dbLog("info", `[OUTCOME] NO_EDGE ${coin(market.ticker)}`);
           state.noEdgeCount++;
           hist.tradedThisMarket = true;
         }
@@ -511,40 +480,27 @@ async function scanMarkets(): Promise<void> {
         continue;
       }
 
-      const hasPosition = simPositions.some(p => p.marketId === market.ticker);
-      if (hasPosition) continue;
+      // Only one sim position per market
+      if (simPositions.some(p => p.marketId === market.ticker)) continue;
 
-      // Derive current price from market list (mid of bid/ask)
-      let yesPrice: number;
-      if (market.askCents > 0 && market.bidCents > 0) {
-        yesPrice = Math.round((market.askCents + market.bidCents) / 2);
-      } else {
-        const ob = await fetchOrderbook(market.ticker);
-        if (!ob) continue;
-        yesPrice = ob.mid;
-      }
-
-      if (yesPrice <= 0 || yesPrice >= 100) continue;
-
-      // Record price in rolling history
-      recordPrice(market.ticker, yesPrice);
+      if (midCents <= 0 || midCents >= 100) continue;
 
       const hist = priceHistories.get(market.ticker)!;
       const classification = classifyState(hist.samples, isLateMarket);
 
       if (classification.state !== "NO_TRADE") {
-        log(`[${classification.state}] ${coin(market.ticker)} @${yesPrice}¢ | ${classification.reason} | ${minRemaining.toFixed(1)}min left`);
+        log(`[${classification.state}] ${coin(market.ticker)} @${midCents}¢ | ${classification.reason} | ${minRemaining.toFixed(1)}min left`);
       }
 
       if (classification.state === "NO_TRADE" || !classification.direction) continue;
 
       // Avoid extreme price zones
-      if (yesPrice > EXTREME_ZONE_HIGH || yesPrice < EXTREME_ZONE_LOW) {
-        log(`[ZONE FILTER] ${coin(market.ticker)} @${yesPrice}¢ — extreme zone, skipping`);
+      if (midCents > EXTREME_ZONE_HIGH || midCents < EXTREME_ZONE_LOW) {
+        log(`[ZONE FILTER] ${coin(market.ticker)} @${midCents}¢ — extreme zone, skipping`);
         continue;
       }
 
-      // Fetch precise orderbook for spread check
+      // Fetch precise orderbook for spread check before entry
       const ob = await fetchOrderbook(market.ticker);
       if (!ob) continue;
       if (ob.spread > SPREAD_MAX) {
@@ -553,8 +509,8 @@ async function scanMarkets(): Promise<void> {
       }
 
       const side: "YES" | "NO" = classification.direction === "UP" ? "YES" : "NO";
-      state.lastDecision = `${coin(market.ticker)}: ${side} [${classification.state}] ${classification.reason}`;
-      state.lastDecisionAt = new Date().toISOString();
+      state.lastDecision    = `${coin(market.ticker)}: ${side} [${classification.state}] ${classification.reason}`;
+      state.lastDecisionAt  = new Date().toISOString();
 
       enterSimPosition(market.ticker, market.title, side, ob.mid, market.closeTs, state.betCostCents);
       hist.tradedThisMarket = true;

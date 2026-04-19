@@ -624,7 +624,7 @@ let _marketCache: {
 } | null = null;
 const MARKET_CACHE_TTL_MS = 2 * 60_000; // re-fetch market list every 2 minutes
 
-async function fetchActiveMarkets(): Promise<Array<{
+export async function fetchActiveMarkets(): Promise<Array<{
   ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number;
 }>> {
   const now = Date.now();
