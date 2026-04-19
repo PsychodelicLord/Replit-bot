@@ -347,6 +347,52 @@ export const MomentumBotStatus = zod.object({
  */
 export const getBotLogsQueryLimitDefault = 50;
 
+// ─── Outcome Bot ────────────────────────────────────────────────────────────
+
+export const OutcomeBotToggleBody = zod.object({
+  enabled:      zod.boolean(),
+  betCostCents: zod.number().int().min(1).optional(),
+});
+
+export const OutcomeBotOpenPosition = zod.object({
+  posId:           zod.string(),
+  marketId:        zod.string(),
+  marketTitle:     zod.string(),
+  side:            zod.enum(["YES", "NO"]),
+  entryPriceCents: zod.number(),
+  entryYesPrice:   zod.number(),
+  contractCount:   zod.number(),
+  peakPnlCents:    zod.number(),
+  trailingActive:  zod.boolean(),
+  lastYesPrice:    zod.number(),
+  msRemaining:     zod.number(),
+  enteredAt:       zod.number(),
+});
+
+export const OutcomeBotMarketState = zod.object({
+  state:       zod.enum(["TRENDING", "EMERGING", "NO_TRADE"]),
+  direction:   zod.enum(["UP", "DOWN"]).optional(),
+  moveCents:   zod.number().optional(),
+  reason:      zod.string(),
+  samples:     zod.number(),
+  latestPrice: zod.number().optional(),
+});
+
+export const OutcomeBotStatus = zod.object({
+  enabled:        zod.boolean(),
+  status:         zod.enum(["DISABLED", "SCANNING", "IN_TRADE"]),
+  lastDecision:   zod.string().nullable(),
+  lastDecisionAt: zod.string().nullable(),
+  openTradeCount: zod.number(),
+  simWins:        zod.number(),
+  simLosses:      zod.number(),
+  simPnlCents:    zod.number(),
+  noEdgeCount:    zod.number(),
+  betCostCents:   zod.number(),
+  openPositions:  zod.array(OutcomeBotOpenPosition).optional(),
+  marketStates:   zod.record(zod.string(), OutcomeBotMarketState).optional(),
+});
+
 export const GetBotLogsQueryParams = zod.object({
   limit: zod.coerce.number().default(getBotLogsQueryLimitDefault),
 });

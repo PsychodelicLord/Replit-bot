@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport } from "../lib/momentumBot";
+import { getOutcomeBotState, startOutcomeBot, stopOutcomeBot, updateOutcomeBotConfig, resetOutcomeStats, getOutcomeMarketStates, getOutcomeOpenPositions } from "../lib/outcomeBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
 import {
@@ -19,6 +20,8 @@ import {
   ManualTradeResponse,
   MomentumBotAutoBody,
   MomentumBotStatus,
+  OutcomeBotToggleBody,
+  OutcomeBotStatus,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -247,6 +250,47 @@ router.post("/bot/momentum/auto", (req, res): void => {
     console.error("[momentum/auto] unexpected error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
   }
+});
+
+// ─── Outcome Bot routes ──────────────────────────────────────────────────────
+
+router.get("/bot/outcome/status", (_req, res): void => {
+  const s = getOutcomeBotState();
+  const positions   = getOutcomeOpenPositions();
+  const mktStates   = getOutcomeMarketStates();
+  try {
+    res.json(OutcomeBotStatus.parse({ ...s, openPositions: positions, marketStates: mktStates }));
+  } catch {
+    res.json({ ...s, openPositions: positions, marketStates: mktStates });
+  }
+});
+
+router.post("/bot/outcome/toggle", (req, res): void => {
+  try {
+    const parsed = OutcomeBotToggleBody.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+
+    const { enabled, betCostCents } = parsed.data;
+    if (betCostCents !== undefined) updateOutcomeBotConfig({ betCostCents });
+
+    const s = enabled ? startOutcomeBot() : stopOutcomeBot();
+    res.json(OutcomeBotStatus.parse({ ...s, openPositions: getOutcomeOpenPositions(), marketStates: getOutcomeMarketStates() }));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
+  }
+});
+
+router.post("/bot/outcome/reset", (_req, res): void => {
+  res.json(resetOutcomeStats());
+});
+
+router.get("/bot/outcome/emergency-stop", (req, res): void => {
+  if (req.query.confirm !== "yes") {
+    res.status(400).json({ error: "Add ?confirm=yes to confirm", hint: "/api/bot/outcome/emergency-stop?confirm=yes" });
+    return;
+  }
+  const s = stopOutcomeBot("Emergency stop via URL");
+  res.json({ ok: true, enabled: s.enabled, status: s.status });
 });
 
 // Emergency stop — requires ?confirm=yes to prevent accidental triggers from browser history/refresh
