@@ -628,13 +628,17 @@ export function MomentumBot() {
                   })()}
 
                   {/* ── Persistent Paper Trade History ── */}
-                  {paperStats && paperStats.totalTrades > 0 && (
+                  {paperStats && (
                     <div className="mt-3 rounded-lg border border-violet-500/20 bg-black/20 p-3 space-y-3">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-bold uppercase tracking-widest text-violet-400">Lifetime Paper History</span>
                         <span className="text-[9px] text-slate-500">{paperStats.totalTrades} trades stored</span>
                       </div>
 
+                      {paperStats.totalTrades === 0 ? (
+                        <p className="text-[10px] text-slate-500 text-center py-2">No trades logged yet — run the bot in sim mode to start tracking</p>
+                      ) : (
+                      <>
                       {/* Core stats row */}
                       <div className="grid grid-cols-4 gap-1.5">
                         {[
@@ -674,8 +678,8 @@ export function MomentumBot() {
                       {/* Recent trades */}
                       {paperStats.recentTrades.length > 0 && (
                         <div>
-                          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Recent Trades</p>
-                          <div className="space-y-1 max-h-48 overflow-y-auto">
+                          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Recent Trades ({paperStats.totalTrades} lifetime)</p>
+                          <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
                             {paperStats.recentTrades.map(t => (
                               <div key={t.id} className="flex items-center justify-between rounded bg-white/[0.02] border border-white/5 px-2 py-1">
                                 <div className="flex items-center gap-1.5">
@@ -693,6 +697,8 @@ export function MomentumBot() {
                             ))}
                           </div>
                         </div>
+                      )}
+                      </>
                       )}
                     </div>
                   )}
