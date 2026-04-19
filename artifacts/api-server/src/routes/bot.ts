@@ -249,8 +249,12 @@ router.post("/bot/momentum/auto", (req, res): void => {
   }
 });
 
-// Emergency stop — visit this URL in a browser to force-stop the bot immediately
-router.get("/bot/momentum/emergency-stop", (_req, res): void => {
+// Emergency stop — requires ?confirm=yes to prevent accidental triggers from browser history/refresh
+router.get("/bot/momentum/emergency-stop", (req, res): void => {
+  if (req.query.confirm !== "yes") {
+    res.status(400).json({ error: "Add ?confirm=yes to the URL to confirm emergency stop", hint: "e.g. /api/bot/momentum/emergency-stop?confirm=yes" });
+    return;
+  }
   try {
     const state = stopMomentumBot("Emergency stop via URL");
     res.json({ ok: true, enabled: state.enabled, status: state.status });
