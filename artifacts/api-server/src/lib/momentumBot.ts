@@ -693,8 +693,12 @@ async function placeBuyOrder(
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
   // Kalshi uses count-based ordering (number of contracts), not cost-based.
   // count = how many contracts to buy. Each YES contract costs limitCents.
-  // Use at least 1 contract; if budget < price we still place 1 (user accepted risk).
-  const contractCount = Math.max(1, Math.floor(betCostCents / limitCents));
+  // If budget < price, we can't afford even 1 contract — skip the trade rather than overspend.
+  const contractCount = Math.floor(betCostCents / limitCents);
+  if (contractCount < 1) {
+    console.log(`[ORDER SKIP] budget:${betCostCents}¢ < price:${limitCents}¢ — can't afford 1 contract, skipping entry`);
+    return null;
+  }
   const estimatedCost = contractCount * limitCents;
   console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${limitCents}¢ → count:${contractCount} estimatedCost:${estimatedCost}¢`);
 

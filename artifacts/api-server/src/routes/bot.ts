@@ -213,35 +213,50 @@ router.get("/bot/momentum/live-performance", (_req, res): void => {
 });
 
 router.post("/bot/momentum/auto", (req, res): void => {
-  const parsed = MomentumBotAutoBody.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  try {
+    const parsed = MomentumBotAutoBody.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
 
-  const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents } = parsed.data;
+    const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents } = parsed.data;
 
-  // Real trading requires Railway deployment. Simulator mode can run anywhere.
-  if (enabled && !simulatorMode && !isProductionDeployment()) {
-    res.status(403).json({ error: "Live trading is disabled on the dev server — use Railway or enable Simulator mode." });
-    return;
+    // Real trading requires Railway deployment. Simulator mode can run anywhere.
+    if (enabled && !simulatorMode && !isProductionDeployment()) {
+      res.status(403).json({ error: "Live trading is disabled on the dev server — use Railway or enable Simulator mode." });
+      return;
+    }
+
+    // Update risk config if provided
+    updateMomentumConfig({
+      balanceFloorCents:    balanceFloorCents    ?? 0,
+      maxSessionLossCents:  maxSessionLossCents  ?? 0,
+      consecutiveLossLimit: consecutiveLossLimit ?? 0,
+      betCostCents:         betCostCents         ?? 30,
+      simulatorMode:        simulatorMode        ?? false,
+      priceMin:             priceMin             ?? 20,
+      priceMax:             priceMax             ?? 80,
+      tpCents:              tpCents,
+      slCents:              slCents,
+      staleMs:              staleMs,
+      tpAbsoluteCents:          tpAbsoluteCents,
+      sessionProfitTargetCents: sessionProfitTargetCents,
+    });
+
+    const state = enabled ? startMomentumBot() : stopMomentumBot();
+    res.json(MomentumBotStatus.parse(state));
+  } catch (err) {
+    console.error("[momentum/auto] unexpected error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
   }
+});
 
-  // Update risk config if provided
-  updateMomentumConfig({
-    balanceFloorCents:    balanceFloorCents    ?? 0,
-    maxSessionLossCents:  maxSessionLossCents  ?? 0,
-    consecutiveLossLimit: consecutiveLossLimit ?? 0,
-    betCostCents:         betCostCents         ?? 30,
-    simulatorMode:        simulatorMode        ?? false,
-    priceMin:             priceMin             ?? 20,
-    priceMax:             priceMax             ?? 80,
-    tpCents:              tpCents,
-    slCents:              slCents,
-    staleMs:              staleMs,
-    tpAbsoluteCents:          tpAbsoluteCents,
-    sessionProfitTargetCents: sessionProfitTargetCents,
-  });
-
-  const state = enabled ? startMomentumBot() : stopMomentumBot();
-  res.json(MomentumBotStatus.parse(state));
+// Emergency stop — visit this URL in a browser to force-stop the bot immediately
+router.get("/bot/momentum/emergency-stop", (_req, res): void => {
+  try {
+    const state = stopMomentumBot("Emergency stop via URL");
+    res.json({ ok: true, enabled: state.enabled, status: state.status });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
+  }
 });
 
 export default router;
