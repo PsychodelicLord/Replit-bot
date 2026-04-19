@@ -1261,6 +1261,23 @@ export function MomentumBot() {
                   </label>
                 </div>
 
+                {/* Save settings button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    try {
+                      setAuto.mutate({ data: buildConfig({ enabled }) });
+                    } catch (err) {
+                      const msg = err instanceof Error ? err.message : String(err);
+                      setToggleError(`Config error: ${msg}`);
+                    }
+                  }}
+                  disabled={setAuto.isPending}
+                  className="w-full py-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-300 text-xs font-semibold hover:bg-sky-500/30 transition-all disabled:opacity-50"
+                >
+                  {setAuto.isPending ? "Saving…" : "Save Settings"}
+                </button>
+
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
                   <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Current active settings:</span></p>
                   <p>· Spend: {data?.betCostCents ?? 30}¢ per trade</p>
@@ -1268,6 +1285,7 @@ export function MomentumBot() {
                   <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Losses in a row: {data?.consecutiveLossLimit || "OFF"}</p>
+                  <p>· Active coins: {data?.allowedCoins?.join(", ") ?? "All"}</p>
                 </div>
               </div>
             )}
