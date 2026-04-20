@@ -33,7 +33,8 @@ const MIN_MINUTES_REMAINING = 5;
 const MAX_POSITIONS = 2;
 
 // TP_CENTS / SL_CENTS and STALE_MS are now configurable via state (default 5/2/65s)
-const COOLDOWN_MS = 75_000;  // per-market cooldown after close
+const COOLDOWN_MS      = 75_000;       // per-market cooldown after close
+const COIN_COOLDOWN_MS = 16 * 60_000; // per-COIN cooldown — prevents re-entering same coin within a 15-min window
 // Contract count cap: treat price as ≥ MIN_PRICE_FOR_CONTRACTS when sizing.
 // Prevents outsized losses at extreme prices (e.g. 5¢ entry → 20 contracts → -60¢ SL hit).
 // At 20¢ baseline: 100¢ bet → max 5 contracts → worst-case SL = -3¢ × 5 = -15¢.
@@ -209,6 +210,9 @@ const simPositions: MomentumPosition[] = [];
 
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expiry ms
+
+// Per-coin cooldowns — prevents re-entering the same coin within a 15-min window
+const coinCooldowns = new Map<string, number>(); // coin (e.g. "BTC") → cooldown-expiry ms
 
 // Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
 // Prevents back-to-back trade spam across different markets.
@@ -749,11 +753,11 @@ async function placeSellOrder(
   currentBidCents: number,
   midAtTrigger = currentBidCents,  // YES-space mid price when TP/SL fired — for P&L and execution tracking
 ): Promise<boolean> {
-  // For YES sell: limit in YES-space = bid - 2
-  // For NO sell:  limit in NO-space = (100 - YESbid) - 2  (flip to NO-space first, then add slack)
+  // For YES sell: limit in YES-space = bid - 5  (5¢ below bid = aggressive fill, avoids resting orders)
+  // For NO sell:  limit in NO-space = (100 - YESbid) - 5  (NO-space conversion, same aggression)
   const limitCents = pos.side === "YES"
-    ? Math.max(1, currentBidCents - 2)
-    : Math.max(1, (100 - currentBidCents) - 2);
+    ? Math.max(1, currentBidCents - 5)
+    : Math.max(1, (100 - currentBidCents) - 5);
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
     ticker: pos.marketId,
@@ -787,6 +791,8 @@ async function placeSellOrder(
 
     // Per-market cooldown
     marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+    // Per-coin cooldown — prevents re-entering same coin within a 15-min window
+    coinCooldowns.set(coinLabel(pos.marketId), Date.now() + COIN_COOLDOWN_MS);
 
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
@@ -995,6 +1001,7 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
 
   recordTradeForHealth(pnlCents, parseExitReason(reason), 0); // slippage always 0 in sim
   marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+  coinCooldowns.set(coinLabel(pos.marketId), Date.now() + COIN_COOLDOWN_MS);
 
   const pnlSign = pnlCents >= 0 ? "+" : "";
   log(`🎮 [SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} | entry:${pos.entryPriceCents}¢ exit:${exitPriceCents}¢ pnl:${pnlSign}${pnlCents}¢ | ${reason}`);
@@ -1319,6 +1326,20 @@ export async function scanMomentumMarkets(): Promise<void> {
     const marketCoin = coinLabel(market.ticker);
     if (!state.allowedCoins.includes(marketCoin)) {
       console.log(`[SCAN] ${marketCoin} — not in allowedCoins [${state.allowedCoins.join(",")}], skipping`);
+      continue;
+    }
+
+    // ── Per-coin open position guard — no double-dipping on same coin ─────────
+    if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
+      console.log(`[SCAN] ${marketCoin} — already holding a position on this coin, skipping`);
+      continue;
+    }
+
+    // ── Per-coin cooldown — prevents re-entering same coin within one 15-min window ─
+    const coinCooldownExpiry = coinCooldowns.get(marketCoin);
+    if (coinCooldownExpiry && Date.now() < coinCooldownExpiry) {
+      const secsLeft = Math.ceil((coinCooldownExpiry - Date.now()) / 1000);
+      console.log(`[SCAN] ${marketCoin} — coin cooldown active, ${secsLeft}s remaining`);
       continue;
     }
 
@@ -1931,6 +1952,27 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
 
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
+
+  // Record any orphaned real positions as losses so the W/L counter stays honest.
+  // We can't fetch live prices synchronously, so we count each abandoned position
+  // as a loss equal to the SL amount — better than silently dropping it from the ledger.
+  if (openPositions.length > 0) {
+    console.log(`🛑 BOT STOP — ${openPositions.length} open position(s) abandoned, recording as losses`);
+    for (const pos of [...openPositions]) {
+      const abandonedLoss = -state.slCents * pos.contractCount;
+      recordTradeResult(pos.entryPriceCents, pos.entryPriceCents - state.slCents, abandonedLoss);
+      console.log(`🛑 ABANDONED: Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — recorded as ~${abandonedLoss}¢ loss`);
+      dbLog("warn", `[MOMENTUM] ABANDONED position ${pos.tradeId} (${coinLabel(pos.marketId)}) on stop — counted as loss`);
+      // Mark as abandoned in DB
+      if (pos.tradeId > 0) {
+        db.update(tradesTable).set({ status: "closed", pnlCents: abandonedLoss, closedAt: new Date() })
+          .where(eq(tradesTable.id, pos.tradeId))
+          .catch(err => console.error(`[STOP] DB abandoned update failed: ${String(err)}`));
+      }
+    }
+    openPositions.length = 0;
+    state.openTradeCount = 0;
+  }
 
   // Capture call stack so Railway logs show exactly which line triggered the stop
   const stack = new Error().stack?.split("\n").slice(1, 5).join(" | ") ?? "no stack";
