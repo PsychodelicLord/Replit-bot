@@ -1307,6 +1307,13 @@ export async function scanMomentumMarkets(): Promise<void> {
     const cooldown = marketCooldowns.get(market.ticker);
     if (cooldown && Date.now() < cooldown) continue;
 
+    // ── Coin allow-list filter ────────────────────────────────────────────────
+    const marketCoin = coinLabel(market.ticker);
+    if (!state.allowedCoins.includes(marketCoin)) {
+      console.log(`[SCAN] ${marketCoin} — not in allowedCoins [${state.allowedCoins.join(",")}], skipping`);
+      continue;
+    }
+
     // ── Real-time time guard — recomputed NOW, not from stale cache ──────────
     // Cache can be up to 2 min old; without this check the bot enters markets
     // with only 1–2 min left when the cache still says "6 min remaining".
