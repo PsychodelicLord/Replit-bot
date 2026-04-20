@@ -1878,6 +1878,42 @@ export function startMomentumBot(): MomentumBotState {
     }, SELL_INTERVAL_MS);
   }
 
+  // ── Recover open real positions from DB so sell monitor manages them after restart ──
+  // This fixes the gap where a buy order filled but the server restarted before the
+  // sell monitor could close the position — without this the position sits orphaned on Kalshi.
+  if (!state.simulatorMode) {
+    db.select().from(tradesTable).where(eq(tradesTable.status, "open"))
+      .then(openTrades => {
+        let recovered = 0;
+        for (const t of openTrades) {
+          if (openPositions.some(p => p.tradeId === t.id)) continue; // already tracked
+          const entryYesEquiv = t.side === "YES" ? t.buyPriceCents : 100 - t.buyPriceCents;
+          openPositions.push({
+            tradeId:            t.id,
+            marketId:           t.marketId,
+            marketTitle:        t.marketTitle ?? t.marketId,
+            side:               t.side as "YES" | "NO",
+            entryPriceCents:    t.buyPriceCents,
+            entrySlippageCents: 0,
+            contractCount:      t.contractCount,
+            enteredAt:          t.createdAt.getTime(),
+            lastSeenPriceCents: entryYesEquiv,
+            lastMovedAt:        Date.now(),
+            buyOrderId:         t.kalshiBuyOrderId ?? null,
+            closeTs:            0,
+          });
+          recovered++;
+        }
+        if (recovered > 0) {
+          state.openTradeCount = openPositions.length;
+          state.status = "IN_TRADE";
+          log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
+          dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
+        }
+      })
+      .catch(err => warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)}`));
+  }
+
   // Kick off scan loop
   if (!scanTimer) {
     scanTimer = setInterval(() => {
