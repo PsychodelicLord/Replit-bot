@@ -1198,6 +1198,21 @@ async function runSellMonitor(): Promise<void> {
   if (openPositions.length === 0) return;
 
   for (const pos of [...openPositions]) {
+    const now = Date.now();
+
+    // ── Hard max-hold backstop — exit ANY position open longer than 10 min ────
+    // Prevents full-bet expiry losses even if order book is unreachable.
+    const holdMins = (now - pos.enteredAt) / 60_000;
+    if (holdMins >= 10) {
+      console.warn(`[MAX-HOLD] ${coinLabel(pos.marketId)} ${pos.side} open ${holdMins.toFixed(1)}min — force-exiting`);
+      dbLog("warn", `[MOMENTUM] MAX-HOLD EXIT: ${coinLabel(pos.marketId)} open ${holdMins.toFixed(1)}min — force-closing to prevent expiry`);
+      const fallbackBid = pos.lastSeenPriceCents > 0
+        ? (pos.side === "YES" ? pos.lastSeenPriceCents : 100 - pos.lastSeenPriceCents)
+        : 1;
+      await placeSellOrder(pos, fallbackBid, pos.lastSeenPriceCents || fallbackBid);
+      continue;
+    }
+
     // Fetch current price
     let currentBid = 0;
     let currentAsk = 0;
@@ -1208,12 +1223,28 @@ async function runSellMonitor(): Promise<void> {
         currentAsk = ob.ask;
       }
     } catch {
+      // Order book fetch failed — fall through to last-known-price fallback below
+    }
+
+    // If order book is unavailable, fall back to last known price so SL/TP can still fire.
+    // Never let a fetch failure silently block position management.
+    if (currentBid <= 0 && currentAsk <= 0) {
+      if (pos.lastSeenPriceCents > 0) {
+        const fallbackMid = pos.lastSeenPriceCents;
+        const fallbackBid = pos.side === "YES" ? Math.max(1, fallbackMid - 1) : Math.max(1, fallbackMid - 1);
+        console.warn(`[SELL-MONITOR] ${coinLabel(pos.marketId)} — order book unavailable, using last known price ${fallbackMid}¢`);
+        const gain = pos.side === "YES"
+          ? fallbackMid - pos.entryPriceCents
+          : (100 - pos.entryPriceCents) - fallbackMid;
+        if (gain <= -state.slCents) {
+          console.warn(`[SELL-MONITOR] SL via fallback price: gain ${gain}¢ — force-closing ${pos.marketId}`);
+          await placeSellOrder(pos, fallbackBid, fallbackMid);
+        }
+      }
       continue;
     }
 
-    if (currentBid <= 0 && currentAsk <= 0) continue;
     const currentMid = currentAsk > 0 ? Math.round((currentBid + currentAsk) / 2) : currentBid;
-    const now  = Date.now();
 
     // For YES: profit when YES mid rises above entry.
     // For NO:  entryPriceCents is the NO fill price (e.g. 35¢ when YES=65¢).
