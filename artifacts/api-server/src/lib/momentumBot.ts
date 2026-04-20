@@ -38,10 +38,6 @@ const COOLDOWN_MS = 75_000; // per-market cooldown after close
 // Prevents outsized losses at extreme prices (e.g. 5¢ entry → 20 contracts → -60¢ SL hit).
 // At 20¢ baseline: 100¢ bet → max 5 contracts → worst-case SL = -3¢ × 5 = -15¢.
 const MIN_PRICE_FOR_CONTRACTS = 20;
-// Hard bet-size ceiling — no single trade may exceed this regardless of config.
-// Protects against accidental misconfiguration (e.g. user types 500¢ instead of 50¢).
-const MAX_BET_CENTS = 150; // $1.50 absolute maximum per trade
-
 // Time-based fast-move detection (replaces tick-counting)
 const MOMENTUM_WINDOW_MS    = 15_000; // rolling look-back window: detect moves within last 15s
 const MIN_FAST_MOVE_CENTS   = 2;      // need ≥2¢ directional move within the window to signal
@@ -1569,14 +1565,6 @@ export async function scanMomentumMarkets(): Promise<void> {
     const healthMult    = health === "Fragile" ? 0.70 : 1.0;
     let effectiveBet = Math.round(state.betCostCents * signalMult * healthMult);
     effectiveBet = Math.max(1, effectiveBet);
-
-    // ── Hard safety cap — enforced even if config is misconfigured ───────────
-    // Absolute ceiling: never bet more than $1.50 regardless of settings.
-    // Protects against accidental large values (e.g. user types 500¢ instead of 50¢).
-    if (effectiveBet > MAX_BET_CENTS) {
-      console.warn(`[SIZE CAP] bet ${effectiveBet}¢ exceeds MAX_BET_CENTS ${MAX_BET_CENTS}¢ — capping`);
-      effectiveBet = MAX_BET_CENTS;
-    }
 
     console.log(`[SIZING] ${coinLabel(market.ticker)} ${side} | base:${state.betCostCents}¢ velocity:${decision.centsPerSec.toFixed(2)}¢/s signalMult:${signalMult} health:${health ?? "Pending"} → bet:${effectiveBet}¢`);
 
