@@ -511,7 +511,10 @@ async function scanMarkets(): Promise<void> {
         log(`[${classification.state}] ${coin(market.ticker)} @${midCents}¢ | ${classification.reason} | ${minRemaining.toFixed(1)}min left`);
       }
 
-      if (classification.state === "NO_TRADE" || !classification.direction) continue;
+      if (classification.state === "NO_TRADE" || !classification.direction) {
+        log(`[SKIP] ${coin(market.ticker)} — ${classification.reason} (${hist.samples.length} samples, ${minRemaining.toFixed(1)}min left)`);
+        continue;
+      }
 
       // Avoid extreme price zones
       if (midCents > EXTREME_ZONE_HIGH || midCents < EXTREME_ZONE_LOW) {
@@ -521,7 +524,10 @@ async function scanMarkets(): Promise<void> {
 
       // Fetch precise orderbook for spread check before entry
       const ob = await fetchOrderbook(market.ticker);
-      if (!ob) continue;
+      if (!ob) {
+        log(`[ORDERBOOK FAIL] ${coin(market.ticker)} — could not fetch orderbook, skipping`);
+        continue;
+      }
       if (ob.spread > SPREAD_MAX) {
         log(`[SPREAD FILTER] ${coin(market.ticker)} spread:${ob.spread}¢ > max:${SPREAD_MAX}¢, skipping`);
         continue;
@@ -654,22 +660,29 @@ export function getOutcomeOpenPositions(): Array<{
 }
 
 // ─── Auto-restore on server start ─────────────────────────────────────────────
-export async function loadOutcomeConfig(): Promise<void> {
+export async function loadOutcomeConfig(forceStart = false): Promise<void> {
   try {
     const [row] = await db.select().from(outcomeSettingsTable).limit(1);
-    if (!row) return;
+    if (row) {
+      state.simWins      = row.simWins;
+      state.simLosses    = row.simLosses;
+      state.simPnlCents  = row.simPnlCents;
+      state.noEdgeCount  = row.noEdgeCount;
+      state.betCostCents = row.betCostCents;
+    }
 
-    state.simWins     = row.simWins;
-    state.simLosses   = row.simLosses;
-    state.simPnlCents = row.simPnlCents;
-    state.noEdgeCount = row.noEdgeCount;
-    state.betCostCents = row.betCostCents;
-
-    if (row.enabled) {
-      log("Auto-starting from saved config (was enabled before restart)");
+    const shouldStart = forceStart || row?.enabled;
+    if (shouldStart) {
+      log(`Auto-starting — ${forceStart ? "OUTCOME_AUTO_START env forced" : "was enabled before restart"}`);
       startOutcomeBot();
+    } else {
+      log("Not auto-starting — was disabled before restart (set OUTCOME_AUTO_START=true to force)");
     }
   } catch (err) {
     warn(`Failed to load saved config: ${String(err)}`);
+    if (forceStart) {
+      log("DB load failed but OUTCOME_AUTO_START=true — starting with defaults");
+      startOutcomeBot();
+    }
   }
 }
