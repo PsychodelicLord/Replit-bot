@@ -1493,16 +1493,26 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     if (filtered) continue;
 
-    // Entry-time price guard: even if momentum pushed price into the buffer zone,
-    // don't enter if the contract we'd buy has no room to profit.
-    // BUY_NO when mid < pMin → NO contract already near 100¢, TP impossible
-    // BUY_YES when mid > pMax → YES contract already near 100¢, TP impossible
-    if (decision.action === "BUY_NO" && mid < pMin) {
-      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_NO at ${mid}¢ < priceMin ${pMin}¢ (NO contract already maxed out)`);
+    // Entry-time price guard — SYMMETRIC: reject any trade where the contract we'd
+    // buy falls outside the user's configured range.  Four cases:
+    //   BUY_YES at mid < pMin → YES is too cheap (longshot); we'd need a huge move
+    //   BUY_YES at mid > pMax → YES already expensive; TP room is gone
+    //   BUY_NO  at mid > pMax → NO is too cheap (longshot); we'd need a huge reverse
+    //   BUY_NO  at mid < pMin → NO already expensive; TP room is gone
+    if (decision.action === "BUY_YES" && mid < pMin) {
+      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_YES at ${mid}¢ < priceMin ${pMin}¢ (YES longshot, outside entry range)`);
       continue;
     }
     if (decision.action === "BUY_YES" && mid > pMax) {
-      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_YES at ${mid}¢ > priceMax ${pMax}¢ (YES contract already maxed out)`);
+      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_YES at ${mid}¢ > priceMax ${pMax}¢ (YES already maxed, no TP room)`);
+      continue;
+    }
+    if (decision.action === "BUY_NO" && mid > pMax) {
+      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_NO at ${mid}¢ > priceMax ${pMax}¢ (NO longshot, outside entry range)`);
+      continue;
+    }
+    if (decision.action === "BUY_NO" && mid < pMin) {
+      console.log(`[FILTER:ENTRY_PRICE] ${coinLabel(market.ticker)} REJECTED — BUY_NO at ${mid}¢ < priceMin ${pMin}¢ (NO already maxed, no TP room)`);
       continue;
     }
 
@@ -1613,6 +1623,8 @@ export async function scanMomentumMarkets(): Promise<void> {
         if (!balanceOk) return;
       }
 
+      // Log full active config snapshot so Railway logs always show exactly what was in effect
+      console.log(`[CONFIG SNAPSHOT] betCostCents:${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}) priceRange:${state.priceMin}-${state.priceMax}¢ floor:${state.balanceFloorCents}¢ sim:${state.simulatorMode}`);
       console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length}`);
       log(
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
