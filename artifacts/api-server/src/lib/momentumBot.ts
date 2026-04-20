@@ -1547,6 +1547,10 @@ export async function scanMomentumMarkets(): Promise<void> {
   }
 
   // ── Phase 3: Execute top-ranked signals up to MAX_POSITIONS ──────────────
+  // Track capital committed THIS scan cycle so the balance floor check stays accurate
+  // even if Kalshi's API hasn't updated the balance yet after the first trade.
+  let reservedBetCents = 0;
+
   for (const candidate of candidates) {
     if (activePositions.length >= MAX_POSITIONS) break;
 
@@ -1599,8 +1603,12 @@ export async function scanMomentumMarkets(): Promise<void> {
         let balanceOk = false;
         try {
           await refreshBalance();
-          const balance = getBotState().balanceCents;
-          console.log(`[BALANCE CHECK] fetched:${balance}¢ floor:${effectiveFloor}¢ (user:${state.balanceFloorCents}¢ hard:${MIN_BALANCE_HARD_FLOOR_CENTS}¢ bet+50:${effectiveBet + 50}¢)`);
+          const rawBalance = getBotState().balanceCents;
+          // Subtract capital already committed this scan cycle — Kalshi's API may
+          // not reflect the deduction yet, so we track it locally to avoid
+          // the floor check passing on stale data when placing a second trade.
+          const balance = rawBalance - reservedBetCents;
+          console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:${reservedBetCents}¢ available:${balance}¢ floor:${effectiveFloor}¢ (user:${state.balanceFloorCents}¢ hard:${MIN_BALANCE_HARD_FLOOR_CENTS}¢ bet+50:${effectiveBet + 50}¢)`);
           if (balance > 0 && balance >= effectiveFloor) {
             balanceOk = true;
           } else if (balance > 0 && balance < effectiveFloor) {
@@ -1623,7 +1631,10 @@ export async function scanMomentumMarkets(): Promise<void> {
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
       await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
-      console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length}`);
+      // Reserve this bet so the next candidate's balance check sees the correct available balance,
+      // even if Kalshi's API hasn't updated yet.
+      reservedBetCents += effectiveBet;
+      console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
     }
   }
 
