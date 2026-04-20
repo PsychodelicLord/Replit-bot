@@ -74,6 +74,8 @@ interface MomentumPosition {
   lastMovedAt: number;      // ms — last time price moved ≥1¢
   buyOrderId: string | null;
   closeTs: number;          // contract expiry epoch ms — 0 if unknown
+  sellRetries?: number;     // how many times a sell limit order was placed but rested unfilled
+  pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
 }
 
 interface MomentumDecision {
@@ -755,12 +757,30 @@ async function placeSellOrder(
   pos: MomentumPosition,
   currentBidCents: number,
   midAtTrigger = currentBidCents,  // YES-space mid price when TP/SL fired — for P&L and execution tracking
+  currentAskCents = currentBidCents + 2, // YES ask — used for correct NO sell pricing
 ): Promise<boolean> {
-  // For YES sell: limit in YES-space = bid - 2
-  // For NO sell:  limit in NO-space = (100 - YESbid) - 2  (flip to NO-space first, then add slack)
+  // Cancel any previously resting sell order for this position before placing a new one
+  if (pos.pendingSellOrderId) {
+    await kalshiFetch("DELETE", `/portfolio/orders/${pos.pendingSellOrderId}`)
+      .catch(e => console.warn(`[SELL] cancel resting order ${pos.pendingSellOrderId} failed: ${e}`));
+    pos.pendingSellOrderId = undefined;
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  const retries = pos.sellRetries ?? 0;
+  // Escalate aggressiveness: bid-2 → bid-1 → bid → at-bid (guaranteed fill)
+  const slack = retries === 0 ? 2 : retries === 1 ? 1 : 0;
+  // For YES sell: limit in YES-space   = YES bid - slack
+  // For NO sell:  limit in NO-space    = NO bid - slack = (100 - YES ask) - slack
+  //   IMPORTANT: Must use YES ask (not YES bid) to compute NO bid.
+  //   Using YES bid gives a limit ABOVE the actual NO bid → order rests unfilled.
   const limitCents = pos.side === "YES"
-    ? Math.max(1, currentBidCents - 2)
-    : Math.max(1, (100 - currentBidCents) - 2);
+    ? Math.max(1, currentBidCents - slack)
+    : Math.max(1, (100 - currentAskCents) - slack);
+
+  if (retries > 0) {
+    console.warn(`[SELL-RETRY #${retries}] ${pos.marketId} ${pos.side} — using limit ${limitCents}¢ (slack=${slack})`);
+  }
 
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
@@ -775,7 +795,22 @@ async function placeSellOrder(
   };
 
   try {
-    await kalshiFetch("POST", "/portfolio/orders", payload);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as any;
+
+    // ── Check if the sell actually filled ──────────────────────────────────
+    // Kalshi returns count=0 when a limit order is resting (unfilled).
+    // If unfilled, cancel the resting order, keep the position alive, and return false.
+    // The sell monitor will retry next tick with a more aggressive price.
+    const fillCount: number = resp?.order?.count ?? resp?.order?.filled_count ?? 0;
+    const sellOrderId: string | undefined = resp?.order?.order_id;
+    if (fillCount === 0) {
+      pos.pendingSellOrderId = sellOrderId;
+      pos.sellRetries = retries + 1;
+      console.warn(`[SELL] ${pos.marketId} ${pos.side} limit ${limitCents}¢ resting unfilled (retry ${pos.sellRetries}) — keeping position alive`);
+      dbLog("warn", `[MOMENTUM] SELL UNFILLED: ${pos.marketId} limit ${limitCents}¢ resting — retry #${pos.sellRetries}`);
+      return false; // position stays in openPositions; sell monitor will retry
+    }
 
     // P&L is computed from market mid at trigger time (YES-space), NOT the order response
     // price — Kalshi's order API returns the limit we submitted, not the actual fill price.
@@ -855,14 +890,22 @@ async function placeSellOrder(
 
     return true;
   } catch (err) {
-    warn(`placeSellOrder failed: ${String(err)}`, { tradeId: pos.tradeId, market: pos.marketId });
+    warn(`placeSellOrder API error: ${String(err)}`, { tradeId: pos.tradeId, market: pos.marketId });
 
-    // Even if Kalshi rejected the sell, still remove from in-memory so we don't loop forever
-    const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-    if (idx >= 0) {
-      warn(`Removing position ${pos.tradeId} from memory after failed sell attempt`);
-      openPositions.splice(idx, 1);
-      state.openTradeCount = openPositions.length;
+    // Keep the position alive in memory so the sell monitor retries next tick.
+    // Do NOT remove from openPositions on a transient API error — the max-hold backstop
+    // (10 min) acts as the final safety net if retries never succeed.
+    pos.sellRetries = (pos.sellRetries ?? 0) + 1;
+
+    // Safety valve: if we've failed >15 times (30+ seconds of retries), remove to prevent
+    // infinite loops on genuinely broken positions.
+    if ((pos.sellRetries ?? 0) > 15) {
+      warn(`placeSellOrder giving up after ${pos.sellRetries} failures — removing position`, { tradeId: pos.tradeId });
+      const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+      if (idx >= 0) {
+        openPositions.splice(idx, 1);
+        state.openTradeCount = openPositions.length;
+      }
       marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
     }
 
@@ -1267,7 +1310,7 @@ async function runSellMonitor(): Promise<void> {
       if (minsLeft < 2) {
         log(`⚠️ EXPIRY EXIT — ${minsLeft.toFixed(1)}min left on Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — force-closing`);
         dbLog("warn", `[MOMENTUM] EXPIRY EXIT: ${coinLabel(pos.marketId)} — ${minsLeft.toFixed(1)}min left, gain:${gain}¢`);
-        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
         continue;
       }
     }
@@ -1279,7 +1322,7 @@ async function runSellMonitor(): Promise<void> {
         : currentMid <= (100 - state.tpAbsoluteCents);
       if (absHit) {
         log(`💰 ABS-TP hit — price ${currentMid}¢ reached target ${pos.side === "YES" ? ">=" : "<="} ${pos.side === "YES" ? state.tpAbsoluteCents : 100 - state.tpAbsoluteCents}¢ on Trade ${pos.tradeId}`);
-        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
         continue;
       }
     }
@@ -1287,21 +1330,21 @@ async function runSellMonitor(): Promise<void> {
     // Relative take-profit (cents above entry)
     if (gain >= state.tpCents) {
       log(`💰 TP hit — gain ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
 
     // Stop-loss
     if (gain <= -state.slCents) {
       log(`🛑 SL hit — loss ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
 
     // Stale-position exit
     if (now - pos.lastMovedAt >= state.staleMs) {
       log(`⏳ STALE EXIT — price flat for ${Math.round((now - pos.lastMovedAt) / 1000)}s on Trade ${pos.tradeId}`);
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid);
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
   }
