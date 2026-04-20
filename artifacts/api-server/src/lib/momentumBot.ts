@@ -1002,6 +1002,9 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
   recordTradeForHealth(pnlCents, parseExitReason(reason), 0); // slippage always 0 in sim
   marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
   coinCooldowns.set(coinLabel(pos.marketId), Date.now() + COIN_COOLDOWN_MS);
+  // Mirror real-mode post-trade cooldown so sim and live behave identically
+  const simCooldownMs = pnlCents < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
+  globalCooldownUntilMs = Date.now() + simCooldownMs;
 
   const pnlSign = pnlCents >= 0 ? "+" : "";
   log(`🎮 [SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} | entry:${pos.entryPriceCents}¢ exit:${exitPriceCents}¢ pnl:${pnlSign}${pnlCents}¢ | ${reason}`);
