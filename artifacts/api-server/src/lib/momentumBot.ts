@@ -75,6 +75,7 @@ interface MomentumPosition {
   lastMovedAt: number;      // ms — last time price moved ≥1¢
   buyOrderId: string | null;
   closeTs: number;          // contract expiry epoch ms — 0 if unknown
+  sellInFlight?: boolean;   // true while the sell API call is in-flight — scan skips new entries
 }
 
 interface MomentumDecision {
@@ -758,10 +759,10 @@ async function placeSellOrder(
   const limitCents = pos.side === "YES"
     ? Math.max(1, currentBidCents - 5)
     : Math.max(1, (100 - currentBidCents) - 5);
-  // ── Eagerly set cooldown BEFORE the await so the scan loop can't slip in
-  // during the Kalshi API round-trip. We use POST_WIN_COOLDOWN_MS as the
-  // conservative default; it gets updated to the correct value once P&L is known.
-  globalCooldownUntilMs = Math.max(globalCooldownUntilMs, Date.now() + POST_WIN_COOLDOWN_MS);
+  // ── Mark this position as "sell in flight" so the scan loop skips new entries
+  // while the Kalshi API round-trip is in progress (avoids a race where scan
+  // fires during the await window and enters a new trade on a free slot).
+  pos.sellInFlight = true;
 
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
@@ -870,6 +871,7 @@ async function placeSellOrder(
       marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
     }
 
+    pos.sellInFlight = false;
     return false;
   }
 }
@@ -1289,6 +1291,12 @@ export async function scanMomentumMarkets(): Promise<void> {
   const activePositions = state.simulatorMode ? simPositions : openPositions;
   if (activePositions.length >= MAX_POSITIONS) {
     state.status = "IN_TRADE";
+    return;
+  }
+
+  // Block new entries while any position has a sell order in flight (API round-trip guard)
+  if (!state.simulatorMode && openPositions.some(p => p.sellInFlight)) {
+    console.log("[SCAN] Sell in flight — holding off new entries until sell completes");
     return;
   }
 
