@@ -1132,9 +1132,12 @@ export function MomentumBot() {
 
                   {/* Spend per trade */}
                   <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">
-                      Spend per trade (¢)
-                    </span>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-slate-400">Spend per trade (¢)</span>
+                      <span className="text-[11px] font-semibold text-emerald-400">
+                        = ${(parseInt(betCostCents) / 100).toFixed(2)} per trade
+                      </span>
+                    </div>
                     <input
                       type="number"
                       min="1"
@@ -1145,7 +1148,7 @@ export function MomentumBot() {
                       className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
                     />
                     <p className="text-[9px] text-slate-600 mt-0.5">
-                      e.g. <strong className="text-slate-500">100</strong> = spend $1.00, <strong className="text-slate-500">1000</strong> = spend $10.00
+                      100¢ = $1.00 · 500¢ = $5.00 · 1000¢ = $10.00
                     </p>
                   </label>
 
@@ -1364,7 +1367,7 @@ export function MomentumBot() {
 
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
                   <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Current active settings:</span></p>
-                  <p>· Spend: {data?.betCostCents ?? 30}¢ per trade</p>
+                  <p>· Spend: {data?.betCostCents ?? 30}¢ (${((data?.betCostCents ?? 30) / 100).toFixed(2)}) per trade</p>
                   <p>· Entry range: {data?.priceMin ?? 20}¢ – {data?.priceMax ?? 80}¢</p>
                   <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
