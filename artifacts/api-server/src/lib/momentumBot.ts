@@ -1933,6 +1933,24 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
 
+  // Record any open real positions as losses so the W/L counter stays honest
+  if (openPositions.length > 0) {
+    console.log(`🛑 BOT STOP — ${openPositions.length} open position(s) abandoned, recording as losses`);
+    for (const pos of [...openPositions]) {
+      const abandonedLoss = -state.slCents * pos.contractCount;
+      recordTradeResult(pos.entryPriceCents, pos.entryPriceCents - state.slCents, abandonedLoss);
+      console.log(`🛑 ABANDONED: Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — recorded as ~${abandonedLoss}¢ loss`);
+      dbLog("warn", `[MOMENTUM] ABANDONED position ${pos.tradeId} (${coinLabel(pos.marketId)}) on stop — counted as loss`);
+      if (pos.tradeId > 0) {
+        db.update(tradesTable).set({ status: "closed", pnlCents: abandonedLoss, closedAt: new Date() })
+          .where(eq(tradesTable.id, pos.tradeId))
+          .catch(err => console.error(`[STOP] DB update failed: ${String(err)}`));
+      }
+    }
+    openPositions.length = 0;
+    state.openTradeCount = 0;
+  }
+
   // Capture call stack so Railway logs show exactly which line triggered the stop
   const stack = new Error().stack?.split("\n").slice(1, 5).join(" | ") ?? "no stack";
   console.log(`🛑 BOT STOPPED — reason: ${reason}`);
