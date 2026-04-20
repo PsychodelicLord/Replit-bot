@@ -887,6 +887,16 @@ export async function executeMomentumTrade(
   const result = await placeBuyOrder(ticker, side, limitCents, budget);
   if (!result) return;
 
+  // If the limit order didn't fill immediately (resting order), contractCount comes back as 0.
+  // A 0-contract position can never be sold — it becomes a silent ghost that blocks the slot
+  // and never records a loss. Cancel it immediately and bail out.
+  if (result.contractCount === 0) {
+    console.warn(`[ORDER UNFILLED] ${coinLabel(ticker)} ${side} — order resting on book (count:0), cancelling`);
+    dbLog("warn", `[MOMENTUM] ORDER UNFILLED: ${coinLabel(ticker)} ${side} @${result.fillPrice}¢ — resting order, cancelled`);
+    kalshiFetch("DELETE", `/portfolio/orders/${result.orderId}`).catch(() => {});
+    return;
+  }
+
   // Insert trade row to DB (fire-and-forget)
   let tradeId = -(Date.now()); // provisional negative ID
   db.insert(tradesTable).values({
@@ -1173,6 +1183,18 @@ async function monitorSimPositions(): Promise<void> {
 
 // ─── Sell Monitor ───────────────────────────────────────────────────────────
 async function runSellMonitor(): Promise<void> {
+  if (openPositions.length === 0) return;
+
+  // Purge any ghost positions with 0 contracts — these can never be sold and block slots
+  for (const pos of [...openPositions]) {
+    if (pos.contractCount === 0) {
+      const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+      if (idx >= 0) openPositions.splice(idx, 1);
+      state.openTradeCount = openPositions.length;
+      console.warn(`[GHOST PURGE] Removed 0-contract ghost position: ${pos.marketId} ${pos.side} tradeId:${pos.tradeId}`);
+      dbLog("warn", `[MOMENTUM] GHOST PURGE: removed 0-contract position ${pos.marketId} (${pos.side}) — no loss recorded (order never filled)`);
+    }
+  }
   if (openPositions.length === 0) return;
 
   for (const pos of [...openPositions]) {
