@@ -33,8 +33,7 @@ const MIN_MINUTES_REMAINING = 5;
 const MAX_POSITIONS = 2;
 
 // TP_CENTS / SL_CENTS and STALE_MS are now configurable via state (default 5/2/65s)
-const COOLDOWN_MS      = 75_000;       // per-market cooldown after close
-const COIN_COOLDOWN_MS = 16 * 60_000; // per-COIN cooldown — prevents re-entering same coin within a 15-min window
+const COOLDOWN_MS = 75_000; // per-market cooldown after close
 // Contract count cap: treat price as ≥ MIN_PRICE_FOR_CONTRACTS when sizing.
 // Prevents outsized losses at extreme prices (e.g. 5¢ entry → 20 contracts → -60¢ SL hit).
 // At 20¢ baseline: 100¢ bet → max 5 contracts → worst-case SL = -3¢ × 5 = -15¢.
@@ -212,8 +211,6 @@ const simPositions: MomentumPosition[] = [];
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expiry ms
 
-// Per-coin cooldowns — prevents re-entering the same coin within a 15-min window
-const coinCooldowns = new Map<string, number>(); // coin (e.g. "BTC") → cooldown-expiry ms
 
 // Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
 // Prevents back-to-back trade spam across different markets.
@@ -797,9 +794,6 @@ async function placeSellOrder(
 
     // Per-market cooldown
     marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
-    // Per-coin cooldown — prevents re-entering same coin within a 15-min window
-    coinCooldowns.set(coinLabel(pos.marketId), Date.now() + COIN_COOLDOWN_MS);
-
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
 
@@ -1008,7 +1002,6 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
 
   recordTradeForHealth(pnlCents, parseExitReason(reason), 0); // slippage always 0 in sim
   marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
-  coinCooldowns.set(coinLabel(pos.marketId), Date.now() + COIN_COOLDOWN_MS);
   // Mirror real-mode post-trade cooldown so sim and live behave identically
   const simCooldownMs = pnlCents < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
   globalCooldownUntilMs = Date.now() + simCooldownMs;
@@ -1348,14 +1341,6 @@ export async function scanMomentumMarkets(): Promise<void> {
     // ── Per-coin open position guard — no double-dipping on same coin ─────────
     if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
       console.log(`[SCAN] ${marketCoin} — already holding a position on this coin, skipping`);
-      continue;
-    }
-
-    // ── Per-coin cooldown — prevents re-entering same coin within one 15-min window ─
-    const coinCooldownExpiry = coinCooldowns.get(marketCoin);
-    if (coinCooldownExpiry && Date.now() < coinCooldownExpiry) {
-      const secsLeft = Math.ceil((coinCooldownExpiry - Date.now()) / 1000);
-      console.log(`[SCAN] ${marketCoin} — coin cooldown active, ${secsLeft}s remaining`);
       continue;
     }
 
