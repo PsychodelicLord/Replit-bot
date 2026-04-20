@@ -230,6 +230,24 @@ export function MomentumBot() {
   const [simulatorMode, setSimulatorMode]     = useState(false);
   const [simModeSynced, setSimModeSynced]     = useState(false);
 
+  // Track whether the main settings block has been synced from server
+  const [settingsSynced, setSettingsSynced] = useState(false);
+
+  // Sync ALL settings from server on first load so the form always shows what Railway actually has.
+  // Without this, betCostCents/priceMin/priceMax/etc show hardcoded defaults — and clicking Save
+  // would overwrite Railway's real values with those defaults.
+  useEffect(() => {
+    if (!settingsSynced && data !== undefined) {
+      if (data.betCostCents !== undefined)       setBetCostCents(String(data.betCostCents));
+      if (data.priceMin !== undefined)           setPriceMin(String(data.priceMin));
+      if (data.priceMax !== undefined)           setPriceMax(String(data.priceMax));
+      if (data.balanceFloorCents !== undefined)  setBalanceFloor(String((data.balanceFloorCents / 100).toFixed(2)));
+      if (data.maxSessionLossCents !== undefined) setMaxSessionLoss(String((data.maxSessionLossCents / 100).toFixed(2)));
+      if (data.consecutiveLossLimit !== undefined) setConsecutiveLossLimit(String(data.consecutiveLossLimit));
+      setSettingsSynced(true);
+    }
+  }, [data, settingsSynced]);
+
   // Sync local simulatorMode from server on first load — prevents accidentally
   // sending simulatorMode:false when toggling Auto Mode while server is in sim mode.
   useEffect(() => {
