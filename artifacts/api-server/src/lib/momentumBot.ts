@@ -700,15 +700,19 @@ async function placeBuyOrder(
 ): Promise<{ orderId: string; fillPrice: number; contractCount: number } | null> {
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
   // Kalshi uses count-based ordering (number of contracts), not cost-based.
-  // count = how many contracts to buy. Each YES contract costs limitCents.
-  // If budget < price, we can't afford even 1 contract — skip the trade rather than overspend.
-  const contractCount = Math.floor(betCostCents / limitCents);
+  // limitCents is always passed in YES-space.
+  // For NO orders: actual NO cost per contract = 100 − limitCents (NO-space conversion).
+  const noPriceCents      = 100 - limitCents;
+  const pricePerContract  = side === "NO" ? noPriceCents : limitCents;
+
+  // If budget < price, we can't afford even 1 contract — skip rather than overspend.
+  const contractCount = Math.floor(betCostCents / pricePerContract);
   if (contractCount < 1) {
-    console.log(`[ORDER SKIP] budget:${betCostCents}¢ < price:${limitCents}¢ — can't afford 1 contract, skipping entry`);
+    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
     return null;
   }
-  const estimatedCost = contractCount * limitCents;
-  console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${limitCents}¢ → count:${contractCount} estimatedCost:${estimatedCost}¢`);
+  const estimatedCost = contractCount * pricePerContract;
+  console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) → count:${contractCount} estimatedCost:${estimatedCost}¢`);
 
   const payload: Record<string, unknown> = {
     ticker,
@@ -717,8 +721,8 @@ async function placeBuyOrder(
     action: "buy",
     side:   side.toLowerCase(),
     count:  contractCount,
-    yes_price: side === "YES" ? limitCents : undefined,
-    no_price:  side === "NO"  ? limitCents : undefined,
+    yes_price: side === "YES" ? limitCents    : undefined,
+    no_price:  side === "NO"  ? noPriceCents  : undefined,  // must be in NO-space, not YES-space
   };
 
   console.log(`[ORDER PAYLOAD] ${JSON.stringify(payload)}`);
@@ -729,7 +733,7 @@ async function placeBuyOrder(
     console.log(`[ORDER RESPONSE] ${JSON.stringify(resp)}`);
     const orderId   = resp?.order?.order_id ?? clientOrderId;
     const rawPrice  = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
-    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : limitCents;
+    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pricePerContract; // fallback uses NO-space price for NO
     const filled    = resp?.order?.count ?? contractCount;
     console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filled} cost:${betCostCents}¢`);
     return { orderId, fillPrice, contractCount: filled };
@@ -903,13 +907,17 @@ export async function executeMomentumTrade(
   // For NO:  fill price is the NO price; convert to YES-equivalent (100 - noPrice).
   const entryYesEquiv = side === "YES" ? result.fillPrice : 100 - result.fillPrice;
 
+  // Expected entry price in the same space as fillPrice:
+  // YES: limitCents (YES-space). NO: 100 - limitCents (NO-space).
+  const expectedEntryPrice = side === "NO" ? (100 - limitCents) : limitCents;
+
   const pos: MomentumPosition = {
     tradeId,
     marketId: ticker,
     marketTitle: title,
     side,
     entryPriceCents:   result.fillPrice,
-    entrySlippageCents: Math.abs(result.fillPrice - limitCents), // actual vs expected
+    entrySlippageCents: Math.abs(result.fillPrice - expectedEntryPrice), // actual vs expected (correct space)
     contractCount: result.contractCount,
     enteredAt: Date.now(),
     lastSeenPriceCents: entryYesEquiv,  // YES-space so stale-tracker comparisons are valid
