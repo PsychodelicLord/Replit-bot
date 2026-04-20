@@ -332,10 +332,10 @@ export function MomentumBot() {
         className="rounded-2xl border p-5 space-y-4 relative overflow-hidden transition-colors"
         style={{
           background: signalFlash
-            ? "linear-gradient(135deg, rgba(139,92,246,0.08) 0%, rgba(59,130,246,0.06) 50%, rgba(255,255,255,0.03) 100%)"
-            : "rgba(255,255,255,0.03)",
+            ? "linear-gradient(135deg, rgba(139,92,246,0.15) 0%, rgba(109,40,217,0.10) 50%, rgba(139,92,246,0.06) 100%)"
+            : "linear-gradient(135deg, rgba(139,92,246,0.07) 0%, rgba(109,40,217,0.04) 100%)",
           animation: signalFlash ? "aura-pulse 2.6s ease-out forwards, border-flash 2.6s ease-out forwards" : "none",
-          borderColor: signalFlash ? undefined : "rgba(255,255,255,0.1)",
+          borderColor: signalFlash ? undefined : "rgba(139,92,246,0.35)",
         }}
       >
         {/* ── Lightning bolts overlay ─────────────────────────────────────── */}
@@ -455,39 +455,39 @@ export function MomentumBot() {
 
           {/* Stats row — session */}
           <div className="grid grid-cols-4 gap-2 mt-4">
-            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Open</p>
-              <p className="text-lg font-bold text-white mt-0.5">{data?.openTradeCount ?? 0}</p>
-              <p className="text-[9px] text-slate-600">max 2</p>
+            <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-2.5 text-center">
+              <p className="text-[10px] text-violet-400/80 uppercase tracking-widest">Open</p>
+              <p className="text-lg font-bold text-violet-100 mt-0.5">{data?.openTradeCount ?? 0}</p>
+              <p className="text-[9px] text-violet-400/50">max 2</p>
             </div>
-            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">W / L</p>
+            <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-2.5 text-center">
+              <p className="text-[10px] text-violet-400/80 uppercase tracking-widest">W / L</p>
               <div className="flex items-baseline justify-center gap-1 mt-0.5">
                 <span className="text-base font-bold text-emerald-400">{data?.sessionWins ?? 0}</span>
-                <span className="text-slate-600 text-xs">/</span>
+                <span className="text-violet-400/50 text-xs">/</span>
                 <span className="text-base font-bold text-red-400">{data?.sessionLosses ?? 0}</span>
               </div>
-              <p className="text-[9px] text-slate-600">this session</p>
+              <p className="text-[9px] text-violet-400/50">this session</p>
             </div>
-            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">P&L</p>
-              <p className={`text-base font-bold mt-0.5 ${sessionPnl > 0 ? "text-emerald-400" : sessionPnl < 0 ? "text-red-400" : "text-slate-400"}`}>
+            <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-2.5 text-center">
+              <p className="text-[10px] text-violet-400/80 uppercase tracking-widest">P&L</p>
+              <p className={`text-base font-bold mt-0.5 ${sessionPnl > 0 ? "text-emerald-400" : sessionPnl < 0 ? "text-red-400" : "text-violet-300"}`}>
                 {sessionPnl >= 0 ? "+" : ""}{(sessionPnl / 100).toFixed(2)}¢
               </p>
-              <p className="text-[9px] text-slate-600">session</p>
+              <p className="text-[9px] text-violet-400/50">session</p>
             </div>
-            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Streak</p>
-              <p className={`text-lg font-bold mt-0.5 ${(data?.consecutiveLosses ?? 0) >= 2 ? "text-red-400" : "text-slate-300"}`}>
+            <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-2.5 text-center">
+              <p className="text-[10px] text-violet-400/80 uppercase tracking-widest">Streak</p>
+              <p className={`text-lg font-bold mt-0.5 ${(data?.consecutiveLosses ?? 0) >= 2 ? "text-red-400" : "text-violet-200"}`}>
                 {data?.consecutiveLosses ?? 0}
               </p>
-              <p className="text-[9px] text-slate-600">losses/row</p>
+              <p className="text-[9px] text-violet-400/50">losses/row</p>
             </div>
           </div>
 
           {/* Starting Balance Snapshot */}
           {data?.startingBalanceCents != null && (
-            <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between gap-3">
+            <div className="mt-3 rounded-lg border border-violet-500/25 bg-violet-500/[0.07] px-3 py-2 flex items-center justify-between gap-3">
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Started at</span>
                 <span className="text-xs font-bold text-slate-300">
@@ -721,7 +721,7 @@ export function MomentumBot() {
 
           {/* All-time stats from DB */}
           {!isSimMode && ((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
-            <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 flex items-center justify-between mt-4">
+            <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] px-3 py-2 flex items-center justify-between mt-4">
               <p className="text-[10px] text-slate-500 uppercase tracking-widest">All-Time</p>
               <div className="flex items-center gap-3 text-xs">
                 <span>
@@ -747,9 +747,92 @@ export function MomentumBot() {
             Reset All Winnings
           </button>
 
+          {/* Bot Health — live mode */}
+          {!isSimMode && (
+            <div className="mt-4">
+              {(() => {
+                const hs = data?.healthScore;
+                const bufferCount = hs?.tradesInBuffer ?? 0;
+                const needed = Math.max(0, 20 - bufferCount);
+
+                if (!hs) {
+                  return (
+                    <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-base">🏥</span>
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-violet-300">Bot Health</span>
+                      </div>
+                      <div className="w-full bg-violet-500/10 rounded-full h-1.5 mb-1.5">
+                        <div
+                          className="bg-violet-500 h-1.5 rounded-full transition-all"
+                          style={{ width: `${Math.min(100, (bufferCount / 20) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-[9px] text-violet-400/60 text-center">
+                        {needed > 0 ? `${needed} more trades to unlock health report` : "Calculating..."}
+                      </p>
+                    </div>
+                  );
+                }
+
+                const color = hs.label === "Healthy"
+                  ? { dot: "bg-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/5", text: "text-emerald-400" }
+                  : hs.label === "Fragile"
+                  ? { dot: "bg-yellow-400", border: "border-yellow-500/30", bg: "bg-yellow-500/5", text: "text-yellow-400" }
+                  : { dot: "bg-red-500", border: "border-red-500/30", bg: "bg-red-500/5", text: "text-red-400" };
+
+                const advice = hs.label === "Healthy"
+                  ? "Strategy is working — safe to scale up bet size"
+                  : hs.label === "Fragile"
+                  ? "Borderline — watch closely before increasing stakes"
+                  : "Edge is weak — lower bet size or tighten filters";
+
+                return (
+                  <div className={`rounded-lg border ${color.border} ${color.bg} p-3`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2.5 h-2.5 rounded-full ${color.dot}`} />
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-violet-300">Bot Health</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-sm font-bold ${color.text}`}>{hs.total}/10</span>
+                        <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${color.text} border ${color.border}`}>{hs.label}</span>
+                      </div>
+                    </div>
+                    <p className={`text-[9px] ${color.text} mb-2.5`}>{advice}</p>
+                    <div className="grid grid-cols-5 gap-1 mb-2">
+                      {[
+                        { label: "EV", val: hs.evScore },
+                        { label: "Stab", val: hs.stabilityScore },
+                        { label: "W/L", val: hs.ratioScore },
+                        { label: "Stale", val: hs.staleScore },
+                        { label: "Exec", val: hs.execScore },
+                      ].map(({ label, val }) => (
+                        <div key={label} className="text-center">
+                          <div className="flex justify-center gap-0.5 mb-0.5">
+                            {[0,1].map(i => (
+                              <div key={i} className={`w-1.5 h-1.5 rounded-sm ${i < val ? color.dot : "bg-white/10"}`} />
+                            ))}
+                          </div>
+                          <span className="text-[8px] text-slate-500">{label}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex justify-between text-[9px] text-slate-500">
+                      <span>WR {(hs.winRate * 100).toFixed(0)}%</span>
+                      <span>EV {hs.netEV >= 0 ? "+" : ""}{hs.netEV.toFixed(1)}¢</span>
+                      <span>Stale {(hs.staleRate * 100).toFixed(0)}%</span>
+                      <span>{hs.tradesInBuffer} trades</span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
           {/* Live Execution Performance Card — real money mode only */}
           {!isSimMode && (
-            <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] p-3">
+            <div className="mt-4 rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-3">
               <div className="flex items-center justify-between mb-2.5">
                 <div className="flex items-center gap-2">
                   <Activity className="w-3.5 h-3.5 text-sky-400" />
