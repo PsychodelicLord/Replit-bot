@@ -98,6 +98,8 @@ export interface MomentumBotState {
   totalLosses: number;
   totalPnlCents: number;
   sessionPnlCents: number;
+  sessionWins: number;
+  sessionLosses: number;
   consecutiveLosses: number;
 
   // Risk management
@@ -156,6 +158,8 @@ const state: MomentumBotState = {
   totalLosses: 0,
   totalPnlCents: 0,
   sessionPnlCents: 0,
+  sessionWins: 0,
+  sessionLosses: 0,
   consecutiveLosses: 0,
   pausedUntilMs: null,
   pauseReason: null,
@@ -414,9 +418,11 @@ function recordTradeResult(entryPriceCents: number, exitPriceCents: number, pnlC
 
   if (pnlCents > 0) {
     state.totalWins++;
+    state.sessionWins++;
     state.consecutiveLosses = 0;
   } else if (pnlCents < 0) {
     state.totalLosses++;
+    state.sessionLosses++;
     state.consecutiveLosses++;
   }
   state.totalPnlCents = (state.totalPnlCents ?? 0) + pnlCents;
@@ -1547,6 +1553,8 @@ export function saveMomentumConfig(): void {
     totalWins:            state.totalWins,
     totalLosses:          state.totalLosses,
     totalPnlCents:        state.totalPnlCents,
+    sessionWins:          state.sessionWins,
+    sessionLosses:        state.sessionLosses,
     startingBalanceCents: state.startingBalanceCents,
     // Exit thresholds — persisted so restarts keep your settings
     tpCents:    state.tpCents,
@@ -1850,6 +1858,8 @@ export function startMomentumBot(): MomentumBotState {
   // Wire up real-trade W/L counter (hook avoids circular import)
   setTradeClosedHook(recordTradeResult);
   state.sessionPnlCents = 0;
+  state.sessionWins = 0;
+  state.sessionLosses = 0;
   state.consecutiveLosses = 0;
   state.pausedUntilMs = null;
   state.pauseReason = null;

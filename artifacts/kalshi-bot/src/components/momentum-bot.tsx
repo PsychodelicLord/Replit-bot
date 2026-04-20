@@ -463,9 +463,9 @@ export function MomentumBot() {
             <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 text-center">
               <p className="text-[10px] text-slate-500 uppercase tracking-widest">W / L</p>
               <div className="flex items-baseline justify-center gap-1 mt-0.5">
-                <span className="text-base font-bold text-emerald-400">{data?.totalWins ?? 0}</span>
+                <span className="text-base font-bold text-emerald-400">{data?.sessionWins ?? 0}</span>
                 <span className="text-slate-600 text-xs">/</span>
-                <span className="text-base font-bold text-red-400">{data?.totalLosses ?? 0}</span>
+                <span className="text-base font-bold text-red-400">{data?.sessionLosses ?? 0}</span>
               </div>
               <p className="text-[9px] text-slate-600">this session</p>
             </div>
