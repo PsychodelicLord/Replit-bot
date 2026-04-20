@@ -758,6 +758,11 @@ async function placeSellOrder(
   const limitCents = pos.side === "YES"
     ? Math.max(1, currentBidCents - 5)
     : Math.max(1, (100 - currentBidCents) - 5);
+  // ── Eagerly set cooldown BEFORE the await so the scan loop can't slip in
+  // during the Kalshi API round-trip. We use POST_WIN_COOLDOWN_MS as the
+  // conservative default; it gets updated to the correct value once P&L is known.
+  globalCooldownUntilMs = Math.max(globalCooldownUntilMs, Date.now() + POST_WIN_COOLDOWN_MS);
+
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
     ticker: pos.marketId,
