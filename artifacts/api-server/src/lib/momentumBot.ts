@@ -74,7 +74,6 @@ interface MomentumPosition {
   lastMovedAt: number;      // ms — last time price moved ≥1¢
   buyOrderId: string | null;
   closeTs: number;          // contract expiry epoch ms — 0 if unknown
-  sellInFlight?: boolean;   // true while the sell API call is in-flight — scan skips new entries
 }
 
 interface MomentumDecision {
@@ -707,12 +706,12 @@ async function placeBuyOrder(
   const noPriceCents      = 100 - limitCents;
   const pricePerContract  = side === "NO" ? noPriceCents : limitCents;
 
-  // Round to nearest whole contract count so actual spend matches the target budget as closely as possible.
-  // Contracts are always whole units — can't buy 1.7 contracts.
-  // Math.round picks the closest count: e.g. 30¢ budget @ 18¢ → round(1.67) = 2 contracts = 36¢.
-  // Always at least 1 contract — the budget is a target, not a hard cap.
-  // If 1 contract costs more than the budget (e.g. 30¢ budget, 60¢ price), we still buy 1 contract.
-  const contractCount = Math.max(1, Math.round(betCostCents / pricePerContract));
+  // If budget < price, we can't afford even 1 contract — skip rather than overspend.
+  const contractCount = Math.floor(betCostCents / pricePerContract);
+  if (contractCount < 1) {
+    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
+    return null;
+  }
   const estimatedCost = contractCount * pricePerContract;
   console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) → count:${contractCount} estimatedCost:${estimatedCost}¢`);
 
@@ -751,15 +750,11 @@ async function placeSellOrder(
   currentBidCents: number,
   midAtTrigger = currentBidCents,  // YES-space mid price when TP/SL fired — for P&L and execution tracking
 ): Promise<boolean> {
-  // For YES sell: limit in YES-space = bid - 5  (5¢ below bid = aggressive fill, avoids resting orders)
-  // For NO sell:  limit in NO-space = (100 - YESbid) - 5  (NO-space conversion, same aggression)
+  // For YES sell: limit in YES-space = bid - 2
+  // For NO sell:  limit in NO-space = (100 - YESbid) - 2  (flip to NO-space first, then add slack)
   const limitCents = pos.side === "YES"
-    ? Math.max(1, currentBidCents - 5)
-    : Math.max(1, (100 - currentBidCents) - 5);
-  // ── Mark this position as "sell in flight" so the scan loop skips new entries
-  // while the Kalshi API round-trip is in progress (avoids a race where scan
-  // fires during the await window and enters a new trade on a free slot).
-  pos.sellInFlight = true;
+    ? Math.max(1, currentBidCents - 2)
+    : Math.max(1, (100 - currentBidCents) - 2);
 
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
   const payload = {
@@ -865,7 +860,6 @@ async function placeSellOrder(
       marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
     }
 
-    pos.sellInFlight = false;
     return false;
   }
 }
@@ -1002,9 +996,6 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
 
   recordTradeForHealth(pnlCents, parseExitReason(reason), 0); // slippage always 0 in sim
   marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
-  // Mirror real-mode post-trade cooldown so sim and live behave identically
-  const simCooldownMs = pnlCents < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
-  globalCooldownUntilMs = Date.now() + simCooldownMs;
 
   const pnlSign = pnlCents >= 0 ? "+" : "";
   log(`🎮 [SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} | entry:${pos.entryPriceCents}¢ exit:${exitPriceCents}¢ pnl:${pnlSign}${pnlCents}¢ | ${reason}`);
@@ -1287,12 +1278,6 @@ export async function scanMomentumMarkets(): Promise<void> {
     return;
   }
 
-  // Block new entries while any position has a sell order in flight (API round-trip guard)
-  if (!state.simulatorMode && openPositions.some(p => p.sellInFlight)) {
-    console.log("[SCAN] Sell in flight — holding off new entries until sell completes");
-    return;
-  }
-
   state.status = activePositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
 
   // Global post-trade cooldown — blocks ALL new entries for 60s after any close
@@ -1335,12 +1320,6 @@ export async function scanMomentumMarkets(): Promise<void> {
     const marketCoin = coinLabel(market.ticker);
     if (!state.allowedCoins.includes(marketCoin)) {
       console.log(`[SCAN] ${marketCoin} — not in allowedCoins [${state.allowedCoins.join(",")}], skipping`);
-      continue;
-    }
-
-    // ── Per-coin open position guard — no double-dipping on same coin ─────────
-    if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
-      console.log(`[SCAN] ${marketCoin} — already holding a position on this coin, skipping`);
       continue;
     }
 
@@ -1953,27 +1932,6 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
 
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
-
-  // Record any orphaned real positions as losses so the W/L counter stays honest.
-  // We can't fetch live prices synchronously, so we count each abandoned position
-  // as a loss equal to the SL amount — better than silently dropping it from the ledger.
-  if (openPositions.length > 0) {
-    console.log(`🛑 BOT STOP — ${openPositions.length} open position(s) abandoned, recording as losses`);
-    for (const pos of [...openPositions]) {
-      const abandonedLoss = -state.slCents * pos.contractCount;
-      recordTradeResult(pos.entryPriceCents, pos.entryPriceCents - state.slCents, abandonedLoss);
-      console.log(`🛑 ABANDONED: Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — recorded as ~${abandonedLoss}¢ loss`);
-      dbLog("warn", `[MOMENTUM] ABANDONED position ${pos.tradeId} (${coinLabel(pos.marketId)}) on stop — counted as loss`);
-      // Mark as abandoned in DB
-      if (pos.tradeId > 0) {
-        db.update(tradesTable).set({ status: "closed", pnlCents: abandonedLoss, closedAt: new Date() })
-          .where(eq(tradesTable.id, pos.tradeId))
-          .catch(err => console.error(`[STOP] DB abandoned update failed: ${String(err)}`));
-      }
-    }
-    openPositions.length = 0;
-    state.openTradeCount = 0;
-  }
 
   // Capture call stack so Railway logs show exactly which line triggered the stop
   const stack = new Error().stack?.split("\n").slice(1, 5).join(" | ") ?? "no stack";
