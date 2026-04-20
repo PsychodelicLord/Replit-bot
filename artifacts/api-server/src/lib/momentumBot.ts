@@ -709,13 +709,17 @@ async function placeBuyOrder(
   const noPriceCents      = 100 - limitCents;
   const pricePerContract  = side === "NO" ? noPriceCents : limitCents;
 
-  // If budget < price, we can't afford even 1 contract — skip rather than overspend.
-  const contractCount = Math.floor(betCostCents / pricePerContract);
-  if (contractCount < 1) {
-    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
+  // Round to nearest whole contract count so actual spend matches budget as closely as possible.
+  // Math.floor would always underspend (e.g. 30¢ budget @ 18¢ → 1 contract = 18¢ spent).
+  // Math.round picks the closest count (e.g. 30/18 = 1.67 → 2 contracts = 36¢ — much closer).
+  // Minimum 1 contract; cap to ensure we never exceed budget by more than 1 contract.
+  const contractCount = Math.max(1, Math.round(betCostCents / pricePerContract));
+  const estimatedCost = contractCount * pricePerContract;
+  // Safety guard: if rounding up would cost more than 2× the budget, fall back to 1 contract
+  if (estimatedCost > betCostCents * 2) {
+    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — 1 contract costs ${pricePerContract}¢ which is >2× budget, skipping entry`);
     return null;
   }
-  const estimatedCost = contractCount * pricePerContract;
   console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) → count:${contractCount} estimatedCost:${estimatedCost}¢`);
 
   const payload: Record<string, unknown> = {
