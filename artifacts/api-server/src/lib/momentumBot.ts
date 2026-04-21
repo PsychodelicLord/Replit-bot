@@ -213,7 +213,7 @@ const openPositions: MomentumPosition[] = [];
 const simPositions: MomentumPosition[] = [];
 
 // Per-market cooldowns
-const marketCooldowns = new Map<string, number>(); // marketId → cooldown-expiry ms
+const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") → cooldown-expiry ms
 
 
 // Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
@@ -849,8 +849,8 @@ async function placeSellOrder(
     if (idx >= 0) openPositions.splice(idx, 1);
     state.openTradeCount = openPositions.length;
 
-    // Per-market cooldown
-    marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+    // Per-coin cooldown — keyed by coin name so it survives window rollovers
+    marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
 
@@ -927,7 +927,7 @@ async function placeSellOrder(
         openPositions.splice(idx, 1);
         state.openTradeCount = openPositions.length;
       }
-      marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+      marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
     }
 
     return false;
@@ -1075,7 +1075,7 @@ function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason:
   if (pnlCents > 0) state.simWins++; else state.simLosses++;
 
   recordTradeForHealth(pnlCents, parseExitReason(reason), 0); // slippage always 0 in sim
-  marketCooldowns.set(pos.marketId, Date.now() + COOLDOWN_MS);
+  marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
 
   const pnlSign = pnlCents >= 0 ? "+" : "";
   log(`🎮 [SIM] CLOSE ${pos.side} ${coinLabel(pos.marketId)} | entry:${pos.entryPriceCents}¢ exit:${exitPriceCents}¢ pnl:${pnlSign}${pnlCents}¢ | ${reason}`);
@@ -1447,8 +1447,11 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   for (const market of markets) {
     if (activePositions.some(p => p.marketId === market.ticker)) continue;
-    const cooldown = marketCooldowns.get(market.ticker);
-    if (cooldown && Date.now() < cooldown) continue;
+    const cooldown = marketCooldowns.get(coinLabel(market.ticker));
+    if (cooldown && Date.now() < cooldown) {
+      console.log(`[SCAN] ${coinLabel(market.ticker)} — coin cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s left), skipping`);
+      continue;
+    }
 
     // ── Coin allow-list filter ────────────────────────────────────────────────
     const marketCoin = coinLabel(market.ticker);
