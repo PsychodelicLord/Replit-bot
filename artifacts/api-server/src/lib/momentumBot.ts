@@ -220,6 +220,8 @@ const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid 
 const exchangeOpenAssets = new Set<string>(); // exchange-truth open position assets
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
 let lastExchangeSyncMs = 0;
+let lastExchangeSyncOkAt = 0;
+let lastExchangeSyncError: string | null = null;
 
 // Hardcoded minimum balance — always enforced even if user hasn't set a floor.
 // Bot will stop itself if available cash drops below this regardless of floor setting.
@@ -412,10 +414,18 @@ function setLastTradeNow(asset: string): void {
   lastTradeTimeByAssetMs.set(asset, Date.now());
 }
 
-async function refreshLiveOpenPositionsFromExchange(force = false): Promise<void> {
-  if (state.simulatorMode) return;
+function hasFreshExchangePositionSnapshot(): boolean {
+  if (lastExchangeSyncOkAt <= 0) return false;
+  // Allow a brief grace window beyond sync cadence for transient API jitter.
+  return Date.now() - lastExchangeSyncOkAt <= EXCHANGE_POSITION_SYNC_MS * 3;
+}
+
+async function refreshLiveOpenPositionsFromExchange(force = false): Promise<boolean> {
+  if (state.simulatorMode) return true;
   const now = Date.now();
-  if (!force && now - lastExchangeSyncMs < EXCHANGE_POSITION_SYNC_MS) return;
+  if (!force && now - lastExchangeSyncMs < EXCHANGE_POSITION_SYNC_MS) {
+    return hasFreshExchangePositionSnapshot();
+  }
   lastExchangeSyncMs = now;
 
   try {
@@ -429,8 +439,13 @@ async function refreshLiveOpenPositionsFromExchange(force = false): Promise<void
       if (!ticker || qty <= 0) continue;
       exchangeOpenAssets.add(coinLabel(ticker));
     }
+    lastExchangeSyncOkAt = Date.now();
+    lastExchangeSyncError = null;
+    return true;
   } catch (err) {
-    warn(`[ENTRY CHECK] Exchange position sync failed: ${String(err)}`);
+    lastExchangeSyncError = String(err);
+    warn(`[ENTRY CHECK] Exchange position sync failed: ${lastExchangeSyncError}`);
+    return false;
   }
 }
 
@@ -1687,7 +1702,12 @@ export async function scanMomentumMarkets(): Promise<void> {
     // - hasPosition: true if local OR exchange state says this asset is already open
     // - dedupCooldownActive: true if we just attempted/opened this asset recently
     if (!state.simulatorMode) {
-      await refreshLiveOpenPositionsFromExchange();
+      const exchangeSyncOk = await refreshLiveOpenPositionsFromExchange();
+      if (!exchangeSyncOk) {
+        console.log(`[ENTRY CHECK] asset=${marketCoin}, exchangeSync=stale_or_failed, lastError=${lastExchangeSyncError ?? "unknown"}`);
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — exchange_sync_unavailable`);
+        continue;
+      }
       const hasPosition = hasOpenPosition(marketCoin) || exchangeOpenAssets.has(marketCoin);
       const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
       const dedupCooldownActive = lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS;
@@ -2215,7 +2235,10 @@ export function startMomentumBot(): MomentumBotState {
           log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
           dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
         }
-        await refreshLiveOpenPositionsFromExchange(true);
+        const exchangeSyncOk = await refreshLiveOpenPositionsFromExchange(true);
+        if (!exchangeSyncOk) {
+          throw new Error(`initial exchange position sync failed: ${lastExchangeSyncError ?? "unknown"}`);
+        }
         recoveryReady = true;
         console.log(`[RECOVERY] Ready — DB recovery complete, live entries unlocked (restored:${recovered})`);
     };
