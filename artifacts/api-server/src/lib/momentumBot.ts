@@ -1754,7 +1754,7 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
         if (autoStartFallback) {
           state.simulatorMode = true; // always paper mode when no DB record
           console.log("[momentumBot] ⚠️  No DB record — starting in PAPER mode as safe default");
-          startMomentumBot(true);
+          startMomentumBot();
         }
         return;
       }
@@ -1789,7 +1789,7 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
       if (r.enabled || autoStartFallback) {
         const reason = r.enabled ? "DB shows enabled=true" : "MOMENTUM_AUTO_START fallback";
         console.log(`[momentumBot] 🔄 Auto-starting bot (${reason}) | sim:${state.simulatorMode} | betCostCents:${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}/trade) | attempt ${attempt}`);
-        startMomentumBot(true);
+        startMomentumBot();
       } else {
         console.log(`[momentumBot] Saved config loaded (attempt ${attempt}) — bot was stopped, staying disabled`);
       }
@@ -1804,7 +1804,7 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
         if (autoStartFallback) {
           state.simulatorMode = true; // paper mode — never risk real money without DB
           console.log("[momentumBot] ⚠️  Neon unreachable — starting in PAPER mode as safe fallback");
-          startMomentumBot(true);
+          startMomentumBot();
         }
       }
     }
@@ -1976,7 +1976,7 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
   saveConfigFieldsOnly(); // never touches simWins/simLosses — safe before loadMomentumConfig completes
 }
 
-export function startMomentumBot(fromAutoStart = false): MomentumBotState {
+export function startMomentumBot(): MomentumBotState {
   if (state.enabled) return getMomentumBotState();
 
   state.enabled = true;
@@ -2042,26 +2042,16 @@ export function startMomentumBot(fromAutoStart = false): MomentumBotState {
       .catch(err => warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)}`));
   }
 
-  // Kick off scan loop — delay first scan on auto-restart so stale config can be corrected
+  // Kick off scan loop with a brief startup pause
   if (!scanTimer) {
-    const delay = fromAutoStart ? AUTOSTART_SCAN_DELAY_MS : 5_000;
-    if (fromAutoStart) {
-      console.log(`\n${"=".repeat(60)}`);
-      console.log(`[STARTUP SAFE MODE] Bot auto-started from DB.`);
-      console.log(`[STARTUP SAFE MODE] Bet size loaded from DB: ${state.betCostCents}¢ = $${(state.betCostCents/100).toFixed(2)} per trade`);
-      console.log(`[STARTUP SAFE MODE] First scan in ${delay/1000}s — verify settings in dashboard now.`);
-      console.log(`${"=".repeat(60)}\n`);
-      dbLog("warn", `[STARTUP] Auto-started with betCostCents=${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}/trade) — first scan in ${delay/1000}s`);
-    }
     setTimeout(() => {
-      if (!state.enabled) return; // bot was stopped during the safety window
+      if (!state.enabled) return;
       if (!scanTimer) {
         scanTimer = setInterval(() => {
           scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
         }, SCAN_INTERVAL_MS);
-        if (fromAutoStart) console.log(`[STARTUP SAFE MODE] Safety delay complete — scan loop now active. betCostCents=${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}/trade)`);
       }
-    }, delay);
+    }, 5_000);
   }
 
   log(`▶️  Momentum Bot STARTED | bet=$${(state.betCostCents/100).toFixed(2)}/trade | range:${state.priceMin}-${state.priceMax}¢ | floor:$${(state.balanceFloorCents/100).toFixed(2)} | sim:${state.simulatorMode}`);
