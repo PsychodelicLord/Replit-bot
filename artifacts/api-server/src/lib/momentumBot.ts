@@ -1541,7 +1541,9 @@ export async function scanMomentumMarkets(): Promise<void> {
     console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.moveCents}¢ in ${Math.round(decision.moveMs / 1000)}s (${decision.centsPerSec.toFixed(2)}¢/s) — all filters passed`);
 
     const side = decision.action === "BUY_YES" ? "YES" : "NO";
-    if (activePositions.some(p => p.side === side && p.marketId === market.ticker)) continue;
+    // Guard by COIN, not just exact ticker — each 15-min window has a different ticker ID
+    // so without this fix the bot could stack multiple BTC positions across consecutive windows.
+    if (activePositions.some(p => coinLabel(p.marketId) === coinLabel(market.ticker))) continue;
 
     // ── Signal scoring: higher = better setup ─────────────────────────────
     // Scalping mode: score only on momentum strength, spread, and time — NOT payout ratio.
