@@ -704,12 +704,16 @@ export async function fetchActiveMarkets(): Promise<Array<{
 }
 
 // ─── Order placement ────────────────────────────────────────────────────────
+type BuyOrderResult =
+  | { ok: true; orderId: string; fillPrice: number; contractCount: number }
+  | { ok: false; reason: "budget_too_small" | "order_failed"; message: string };
+
 async function placeBuyOrder(
   ticker: string,
   side: "YES" | "NO",
   limitCents: number,
   betCostCents: number,
-): Promise<{ orderId: string; fillPrice: number; contractCount: number } | null> {
+): Promise<BuyOrderResult> {
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
   // Kalshi uses count-based ordering (number of contracts), not cost-based.
   // limitCents is always passed in YES-space.
@@ -721,7 +725,11 @@ async function placeBuyOrder(
   const contractCount = Math.floor(betCostCents / pricePerContract);
   if (contractCount < 1) {
     console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
-    return null;
+    return {
+      ok: false,
+      reason: "budget_too_small",
+      message: `budget ${betCostCents}¢ < single-contract price ${pricePerContract}¢`,
+    };
   }
 
   // ── Hard cap: absolute maximum is the budget itself (betCostCents). ────────
@@ -770,11 +778,16 @@ async function placeBuyOrder(
     const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pricePerContract; // fallback uses NO-space price for NO
     const filled    = resp?.order?.count ?? contractCount;
     console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filled} cost:${betCostCents}¢`);
-    return { orderId, fillPrice, contractCount: filled };
+    return { ok: true, orderId, fillPrice, contractCount: filled };
   } catch (err) {
-    console.error(`[ORDER FAILED] ${String(err)}`);
-    warn(`placeBuyOrder failed: ${String(err)}`, { ticker, side, limitCents });
-    return null;
+    const message = String(err);
+    console.error(`[ORDER FAILED] ${message}`);
+    warn(`placeBuyOrder failed: ${message}`, { ticker, side, limitCents });
+    return {
+      ok: false,
+      reason: "order_failed",
+      message,
+    };
   }
 }
 
@@ -947,13 +960,18 @@ export async function executeMomentumTrade(
   askCents: number,
   closeTs: number = 0,
   betCents?: number,
-): Promise<void> {
+): Promise<{ status: "trade_opened" | "order_skipped" | "order_unfilled_cancelled"; reason: string }> {
   // Buy near bid (not ask) to avoid instant drawdown
   const limitCents = Math.min(askCents, bidCents + 1);
   const budget = betCents ?? state.betCostCents;
 
   const result = await placeBuyOrder(ticker, side, limitCents, budget);
-  if (!result) return;
+  if (!result.ok) {
+    return {
+      status: "order_skipped",
+      reason: `${result.reason}: ${result.message}`,
+    };
+  }
 
   // If the limit order didn't fill immediately (resting order), contractCount comes back as 0.
   // A 0-contract position can never be sold — it becomes a silent ghost that blocks the slot
@@ -962,7 +980,10 @@ export async function executeMomentumTrade(
     console.warn(`[ORDER UNFILLED] ${coinLabel(ticker)} ${side} — order resting on book (count:0), cancelling`);
     dbLog("warn", `[MOMENTUM] ORDER UNFILLED: ${coinLabel(ticker)} ${side} @${result.fillPrice}¢ — resting order, cancelled`);
     kalshiFetch("DELETE", `/portfolio/orders/${result.orderId}`).catch(() => {});
-    return;
+    return {
+      status: "order_unfilled_cancelled",
+      reason: `order ${result.orderId} returned contractCount=0 and was cancelled`,
+    };
   }
 
   // Insert trade row to DB (fire-and-forget)
@@ -1021,6 +1042,10 @@ export async function executeMomentumTrade(
   );
 
   dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
+  return {
+    status: "trade_opened",
+    reason: `trade opened with ${result.contractCount} contract(s) at ${result.fillPrice}¢`,
+  };
 }
 
 // ─── Simulator (Paper Trading) ───────────────────────────────────────────────
@@ -1681,7 +1706,12 @@ export async function scanMomentumMarkets(): Promise<void> {
           // fetch failed — block trade rather than risk breaching floor
           console.error(`[BALANCE CHECK] Failed to fetch balance — skipping trade: ${String(err)}`);
         }
-        if (!balanceOk) return;
+        if (!balanceOk) {
+          const blockedReason = `balance_guard_failed floor:${effectiveFloor}¢ reserved:${reservedBetCents}¢`;
+          console.warn(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
+          log(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
+          return;
+        }
       }
 
       // Log full active config snapshot so Railway logs always show exactly what was in effect
@@ -1691,7 +1721,21 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      await executeMomentumTrade(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
+      const executeResult = await executeMomentumTrade(
+        market.ticker,
+        market.title,
+        side,
+        ob.bid,
+        ob.ask,
+        market.closeTs,
+        effectiveBet,
+      );
+      console.log(
+        `[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+      );
+      log(
+        `[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+      );
       // Reserve this bet so the next candidate's balance check sees the correct available balance,
       // even if Kalshi's API hasn't updated yet.
       reservedBetCents += effectiveBet;
