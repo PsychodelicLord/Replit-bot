@@ -1248,10 +1248,14 @@ async function monitorSimPositions(): Promise<void> {
       }
     } catch { /* keep last known */ }
 
-    // Trigger check uses mid — matches real sell monitor behaviour
+    // Trigger checks must use executable prices (same side as real sell path),
+    // not midpoint snapshots, otherwise SL can be missed in wide spreads.
+    const executableExitPrice = pos.side === "YES"
+      ? (currentBid > 0 ? currentBid : currentMid)
+      : (currentAsk > 0 ? currentAsk : currentMid);
     const gain = pos.side === "YES"
-      ? currentMid - pos.entryPriceCents
-      : pos.entryPriceCents - currentMid;
+      ? executableExitPrice - pos.entryPriceCents
+      : pos.entryPriceCents - executableExitPrice;
 
     if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) pos.lastMovedAt = now;
     pos.lastSeenPriceCents = currentMid;
@@ -1350,13 +1354,16 @@ async function runSellMonitor(): Promise<void> {
 
     const currentMid = currentAsk > 0 ? Math.round((currentBid + currentAsk) / 2) : currentBid;
 
-    // For YES: profit when YES mid rises above entry.
-    // For NO:  entryPriceCents is the NO fill price (e.g. 35¢ when YES=65¢).
-    //          Convert to YES-equivalent so gain math works in a consistent space.
-    //          gain > 0 when YES mid drops (NO value rises) = winning NO trade.
-    const gain = pos.side === "YES"
-      ? currentMid - pos.entryPriceCents
-      : (100 - pos.entryPriceCents) - currentMid;
+    // Use executable exit pricing (not midpoint) for SL/TP decisions so a wide
+    // spread cannot hide losses and delay stop-loss exits.
+    const executableGain = (() => {
+      if (pos.side === "YES") {
+        const yesExit = currentBid > 0 ? currentBid : currentMid;
+        return yesExit - pos.entryPriceCents;
+      }
+      const noExit = currentAsk > 0 ? Math.max(1, 100 - currentAsk) : Math.max(1, 100 - currentMid);
+      return noExit - pos.entryPriceCents;
+    })();
 
     // Update last-moved tracker — always compared in YES-space (currentMid)
     if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) {
@@ -1370,7 +1377,7 @@ async function runSellMonitor(): Promise<void> {
       const minsLeft = (pos.closeTs - now) / 60_000;
       if (minsLeft < 2) {
         log(`⚠️ EXPIRY EXIT — ${minsLeft.toFixed(1)}min left on Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — force-closing`);
-        dbLog("warn", `[MOMENTUM] EXPIRY EXIT: ${coinLabel(pos.marketId)} — ${minsLeft.toFixed(1)}min left, gain:${gain}¢`);
+        dbLog("warn", `[MOMENTUM] EXPIRY EXIT: ${coinLabel(pos.marketId)} — ${minsLeft.toFixed(1)}min left, gain:${executableGain}¢`);
         await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
         continue;
       }
@@ -1389,15 +1396,15 @@ async function runSellMonitor(): Promise<void> {
     }
 
     // Relative take-profit (cents above entry)
-    if (gain >= state.tpCents) {
-      log(`💰 TP hit — gain ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
+    if (executableGain >= state.tpCents) {
+      log(`💰 TP hit — gain ${executableGain}¢ on Trade ${pos.tradeId}`, { gain: executableGain, tradeId: pos.tradeId });
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
 
     // Stop-loss
-    if (gain <= -state.slCents) {
-      log(`🛑 SL hit — loss ${gain}¢ on Trade ${pos.tradeId}`, { gain, tradeId: pos.tradeId });
+    if (executableGain <= -state.slCents) {
+      log(`🛑 SL hit — loss ${executableGain}¢ on Trade ${pos.tradeId}`, { gain: executableGain, tradeId: pos.tradeId });
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
@@ -1479,6 +1486,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     score: number;
   };
   const candidates: Candidate[] = [];
+  const plannedCoins = new Set(activePositions.map(p => coinLabel(p.marketId)));
   let inRangeCount = 0;
 
   for (const market of markets) {
@@ -1591,9 +1599,10 @@ export async function scanMomentumMarkets(): Promise<void> {
     console.log(`[FILTER:PASS] ${coinLabel(market.ticker)} | spread:${spread}¢ move:${decision.moveCents}¢ in ${Math.round(decision.moveMs / 1000)}s (${decision.centsPerSec.toFixed(2)}¢/s) — all filters passed`);
 
     const side = decision.action === "BUY_YES" ? "YES" : "NO";
-    // Guard by COIN, not just exact ticker — each 15-min window has a different ticker ID
-    // so without this fix the bot could stack multiple BTC positions across consecutive windows.
-    if (activePositions.some(p => coinLabel(p.marketId) === coinLabel(market.ticker))) continue;
+    // Guard by COIN, not just exact ticker — each 15-min window has a different ticker ID.
+    // Also include coins already queued in this scan so we cannot stack same-coin entries
+    // within one pass before openPositions updates.
+    if (plannedCoins.has(marketCoin)) continue;
 
     // ── Signal scoring: higher = better setup ─────────────────────────────
     // Scalping mode: score only on momentum strength, spread, and time — NOT payout ratio.
@@ -1613,6 +1622,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)} | ${decision.reason}`);
     dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)}`);
     candidates.push({ market, ob, decision, side, score });
+    plannedCoins.add(marketCoin);
   }
 
   // ── Phase 2: Rank signals and log leaderboard ─────────────────────────────
@@ -1641,6 +1651,14 @@ export async function scanMomentumMarkets(): Promise<void> {
     }
 
     const { market, ob, side, decision } = candidate;
+    const marketCoin = coinLabel(market.ticker);
+
+    // Defensive re-check in execute phase: candidate ranking is built earlier in the same
+    // scan pass, so ensure we still never open a second position for the same coin.
+    if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
+      continue;
+    }
 
     // ── Signal-strength variable sizing ──────────────────────────────────────
     // Velocity-based sizing: fast moves (≥0.2¢/s) = full bet; slower = 70%; health gates on top
@@ -1731,14 +1749,16 @@ export async function scanMomentumMarkets(): Promise<void> {
         effectiveBet,
       );
       console.log(
-        `[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+        `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
       );
       log(
-        `[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+        `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
       );
       // Reserve this bet so the next candidate's balance check sees the correct available balance,
       // even if Kalshi's API hasn't updated yet.
-      reservedBetCents += effectiveBet;
+      if (executeResult.status === "trade_opened") {
+        reservedBetCents += effectiveBet;
+      }
       console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
     }
   }
