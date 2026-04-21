@@ -230,6 +230,10 @@ const MIN_BALANCE_HARD_FLOOR_CENTS = 200; // $2 absolute minimum to keep trading
 let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
 
+// Startup hold — blocks all trades for 60s after (re)start so DB recovery and
+// syncPortfolioFromKalshi can repopulate openPositions before any new entries fire.
+let startupHoldUntilMs = 0;
+
 // ─── Bot Health Score rolling buffer ────────────────────────────────────────
 interface TradeRecord {
   pnlCents:      number;
@@ -1400,6 +1404,13 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   try {
 
+  // Startup hold — wait for DB recovery / Kalshi sync to repopulate openPositions
+  if (Date.now() < startupHoldUntilMs) {
+    const secsLeft = Math.ceil((startupHoldUntilMs - Date.now()) / 1000);
+    console.log(`[SCAN] Startup hold active — ${secsLeft}s remaining (recovering open positions before trading)`);
+    return;
+  }
+
   // Risk checks
   if (checkRiskPause()) {
     state.status = "PAUSED";
@@ -1647,15 +1658,24 @@ export async function scanMomentumMarkets(): Promise<void> {
           // not reflect the deduction yet, so we track it locally to avoid
           // the floor check passing on stale data when placing a second trade.
           const balance = rawBalance - reservedBetCents;
-          console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:${reservedBetCents}¢ available:${balance}¢ floor:${effectiveFloor}¢ (user:${state.balanceFloorCents}¢ bet:${effectiveBet}¢)`);
-          if (balance > 0 && balance >= effectiveFloor) {
+          // Hard bet-size cap: never risk more than 33% of available balance on a single trade.
+          // This prevents a stale large betCostCents in the DB from wiping the account in one shot.
+          const maxBetFromBalance = Math.max(1, Math.floor(balance * 0.33));
+          if (effectiveBet > maxBetFromBalance) {
+            console.warn(`[BET CAP] ${coinLabel(market.ticker)} — effectiveBet ${effectiveBet}¢ reduced to ${maxBetFromBalance}¢ (33% of ${balance}¢ available)`);
+            effectiveBet = maxBetFromBalance;
+          }
+          // Recalculate floor after possible cap reduction
+          const cappedFloor = Math.max(state.balanceFloorCents, effectiveBet);
+          console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:${reservedBetCents}¢ available:${balance}¢ floor:${cappedFloor}¢ bet:${effectiveBet}¢`);
+          if (balance > 0 && balance >= cappedFloor) {
             balanceOk = true;
-          } else if (balance > 0 && balance < effectiveFloor) {
-            stopMomentumBot(`Balance too low: ${balance}¢ < ${effectiveFloor}¢ floor — stopping bot`);
+          } else if (balance > 0 && balance < cappedFloor) {
+            stopMomentumBot(`Balance too low: ${balance}¢ < ${cappedFloor}¢ floor — stopping bot`);
             return;
           } else {
             // balance came back as 0 — API problem, block trade as precaution
-            console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${effectiveFloor}¢)`);
+            console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${cappedFloor}¢)`);
           }
         } catch (err) {
           // fetch failed — block trade rather than risk breaching floor
@@ -2031,6 +2051,12 @@ export function startMomentumBot(): MomentumBotState {
   state.consecutiveLosses = 0;
   state.pausedUntilMs = null;
   state.pauseReason = null;
+
+  // Block all new trades for 60s so DB recovery + Kalshi portfolio sync have time
+  // to repopulate openPositions before any new entries fire. Prevents the restart
+  // race condition where the bot re-enters coins it was already holding.
+  startupHoldUntilMs = Date.now() + 60_000;
+  console.log(`[STARTUP HOLD] No new trades for 60s — recovering open positions from DB and Kalshi`);
 
   if (state.simulatorMode) {
     simPositions.length = 0;
