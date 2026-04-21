@@ -1762,7 +1762,15 @@ export async function loadMomentumConfig(autoStartFallback = false): Promise<voi
       state.balanceFloorCents    = r.balanceFloorCents;
       state.maxSessionLossCents  = r.maxSessionLossCents;
       state.consecutiveLossLimit = r.consecutiveLossLimit;
-      state.betCostCents         = r.betCostCents ?? 30;
+      // Hard clamp: never load a betCostCents > $20 (2000¢) from DB.
+      // If DB has a stale high value, this prevents oversized bets until the user saves their correct setting.
+      const rawBetCostCents = r.betCostCents ?? 100;
+      if (rawBetCostCents > 2000) {
+        console.error(`[momentumBot] ⚠️  DB betCostCents=${rawBetCostCents}¢ ($${(rawBetCostCents/100).toFixed(2)}) exceeds $20 hard cap — clamping to 100¢ ($1.00). Open dashboard and press Save to update.`);
+        state.betCostCents = 100;
+      } else {
+        state.betCostCents = rawBetCostCents;
+      }
       state.simulatorMode        = r.simulatorMode ?? true;  // default to paper if null
       state.priceMin             = r.priceMin ?? 20;
       state.priceMax             = r.priceMax ?? 80;
