@@ -51,6 +51,8 @@ const MIN_MINUTES_REMAINING_SIM = 2;  // sim mode: enter with 2 min left (vs 3)
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
+const ENTRY_CHECK_COOLDOWN_MS = 10_000; // short per-asset duplicate-entry cooldown
+const EXCHANGE_POSITION_SYNC_MS = 5_000; // refresh exchange open positions frequently
 
 const FEE_RATE = 0.07;
 
@@ -214,13 +216,10 @@ const simPositions: MomentumPosition[] = [];
 
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") → cooldown-expiry ms
-
-
-// Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
-// Prevents back-to-back trade spam across different markets.
-const POST_WIN_COOLDOWN_MS  = 60_000;  // 60s after a TP/STALE exit
-const POST_LOSS_COOLDOWN_MS = 120_000; // 120s after an SL exit (losses need more breathing room)
-let globalCooldownUntilMs = 0;
+const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
+const exchangeOpenAssets = new Set<string>(); // exchange-truth open position assets
+const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
+let lastExchangeSyncMs = 0;
 
 // Hardcoded minimum balance — always enforced even if user hasn't set a floor.
 // Bot will stop itself if available cash drops below this regardless of floor setting.
@@ -230,12 +229,10 @@ const MIN_BALANCE_HARD_FLOOR_CENTS = 200; // $2 absolute minimum to keep trading
 let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
 
-// Startup hold — blocks all trades for 60s after (re)start so DB recovery and
-// syncPortfolioFromKalshi can repopulate openPositions before any new entries fire.
-let startupHoldUntilMs = 0;
-// Recovery latch — live mode cannot open new trades until DB recovery for open
-// positions has completed at least once after start/restart.
+// Recovery latch — live mode cannot open new trades until exchange-backed position
+// sync has completed at least once after start/restart.
 let recoveryReady = false;
+let recoveryRetryTimer: NodeJS.Timeout | null = null;
 
 // ─── Bot Health Score rolling buffer ────────────────────────────────────────
 interface TradeRecord {
@@ -399,6 +396,42 @@ function coinLabel(ticker: string): string {
     if (ticker.toUpperCase().includes(coin)) return coin;
   }
   return ticker;
+}
+
+function hasOpenPosition(asset: string): boolean {
+  return openPositions.some(p => coinLabel(p.marketId) === asset);
+}
+
+function getLastTradeAgoMs(asset: string): number | null {
+  const last = lastTradeTimeByAssetMs.get(asset);
+  if (!last) return null;
+  return Date.now() - last;
+}
+
+function setLastTradeNow(asset: string): void {
+  lastTradeTimeByAssetMs.set(asset, Date.now());
+}
+
+async function refreshLiveOpenPositionsFromExchange(force = false): Promise<void> {
+  if (state.simulatorMode) return;
+  const now = Date.now();
+  if (!force && now - lastExchangeSyncMs < EXCHANGE_POSITION_SYNC_MS) return;
+  lastExchangeSyncMs = now;
+
+  try {
+    const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
+      positions?: Array<{ ticker_name?: string; position?: number }>
+    };
+    exchangeOpenAssets.clear();
+    for (const p of posResp.positions ?? []) {
+      const qty = p.position ?? 0;
+      const ticker = p.ticker_name ?? "";
+      if (!ticker || qty <= 0) continue;
+      exchangeOpenAssets.add(coinLabel(ticker));
+    }
+  } catch (err) {
+    warn(`[ENTRY CHECK] Exchange position sync failed: ${String(err)}`);
+  }
 }
 
 // ─── Risk Management ───────────────────────────────────────────────────────
@@ -870,14 +903,15 @@ async function placeSellOrder(
     state.openTradeCount = openPositions.length;
 
     // Per-coin cooldown — keyed by coin name so it survives window rollovers
-    marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
+    const asset = coinLabel(pos.marketId);
+    marketCooldowns.set(asset, Date.now() + COOLDOWN_MS);
+    // Also arm short duplicate-entry cooldown from close time.
+    assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
 
-    // Global cooldown — longer after a loss so bot doesn't immediately revenge-trade
-    const cooldownMs = netPnl < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
-    globalCooldownUntilMs = Date.now() + cooldownMs;
-    console.log(`[COOLDOWN] ${netPnl < 0 ? "LOSS" : "WIN"} — global cooldown set: ${cooldownMs / 1000}s`);
+    // Per-asset duplicate entry cooldown — local to this coin only.
+    lastTradeTimeByAssetMs.set(coinLabel(pos.marketId), Date.now());
 
     // ── Health score tracking ──
     const liveGain = exitPriceForPnl - pos.entryPriceCents;
@@ -1439,13 +1473,6 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   try {
 
-  // Startup hold — wait for DB recovery / Kalshi sync to repopulate openPositions
-  if (Date.now() < startupHoldUntilMs) {
-    const secsLeft = Math.ceil((startupHoldUntilMs - Date.now()) / 1000);
-    console.log(`[SCAN] Startup hold active — ${secsLeft}s remaining (recovering open positions before trading)`);
-    return;
-  }
-
   // Live mode safety: never trade before restart recovery has completed.
   // If recovery failed/unfinished, we could forget existing open positions and re-enter.
   if (!state.simulatorMode && !recoveryReady) {
@@ -1466,13 +1493,6 @@ export async function scanMomentumMarkets(): Promise<void> {
   }
 
   state.status = activePositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
-
-  // Global post-trade cooldown — blocks ALL new entries for 60s after any close
-  if (Date.now() < globalCooldownUntilMs) {
-    const secsLeft = Math.ceil((globalCooldownUntilMs - Date.now()) / 1000);
-    console.log(`[SCAN] Global cooldown active — ${secsLeft}s remaining (post-trade spam guard)`);
-    return;
-  }
 
   const markets = await fetchActiveMarkets();
   if (markets.length === 0) {
@@ -1663,11 +1683,27 @@ export async function scanMomentumMarkets(): Promise<void> {
     const { market, ob, side, decision } = candidate;
     const marketCoin = coinLabel(market.ticker);
 
-    // Defensive re-check in execute phase: candidate ranking is built earlier in the same
-    // scan pass, so ensure we still never open a second position for the same coin.
-    if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
-      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
-      continue;
+    // Exchange-first entry guard (live mode only):
+    // - hasPosition: true if local OR exchange state says this asset is already open
+    // - dedupCooldownActive: true if we just attempted/opened this asset recently
+    if (!state.simulatorMode) {
+      await refreshLiveOpenPositionsFromExchange();
+      const hasPosition = hasOpenPosition(marketCoin) || exchangeOpenAssets.has(marketCoin);
+      const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
+      const dedupCooldownActive = lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS;
+      const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
+      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, lastTradeAgo=${lastTradeAgoSec}s`);
+      if (hasPosition || dedupCooldownActive) {
+        const reason = hasPosition ? "has_open_position" : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+        continue;
+      }
+    } else {
+      // Simulator keeps existing local-memory duplicate guard.
+      if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
+        continue;
+      }
     }
 
     // ── Signal-strength variable sizing ──────────────────────────────────────
@@ -1764,6 +1800,9 @@ export async function scanMomentumMarkets(): Promise<void> {
       log(
         `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
       );
+      if (executeResult.status === "trade_opened") {
+        setLastTradeNow(marketCoin);
+      }
       // Reserve this bet so the next candidate's balance check sees the correct available balance,
       // even if Kalshi's API hasn't updated yet.
       if (executeResult.status === "trade_opened") {
@@ -2127,11 +2166,8 @@ export function startMomentumBot(): MomentumBotState {
   state.pausedUntilMs = null;
   state.pauseReason = null;
 
-  // Block all new trades for 60s so DB recovery + Kalshi portfolio sync have time
-  // to repopulate openPositions before any new entries fire. Prevents the restart
-  // race condition where the bot re-enters coins it was already holding.
-  startupHoldUntilMs = Date.now() + 60_000;
-  console.log(`[STARTUP HOLD] No new trades for 60s — recovering open positions from DB and Kalshi`);
+  // No global startup cooldown: trading resumes immediately once recoveryReady
+  // is true and entry checks pass.
 
   if (state.simulatorMode) {
     simPositions.length = 0;
@@ -2151,8 +2187,8 @@ export function startMomentumBot(): MomentumBotState {
   // This fixes the gap where a buy order filled but the server restarted before the
   // sell monitor could close the position — without this the position sits orphaned on Kalshi.
   if (!state.simulatorMode) {
-    db.select().from(tradesTable).where(eq(tradesTable.status, "open"))
-      .then(openTrades => {
+    const completeRecovery = async () => {
+      const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
         let recovered = 0;
         for (const t of openTrades) {
           if (openPositions.some(p => p.tradeId === t.id)) continue; // already tracked
@@ -2179,28 +2215,34 @@ export function startMomentumBot(): MomentumBotState {
           log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
           dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
         }
+        await refreshLiveOpenPositionsFromExchange(true);
         recoveryReady = true;
         console.log(`[RECOVERY] Ready — DB recovery complete, live entries unlocked (restored:${recovered})`);
-      })
+    };
+
+    completeRecovery()
       .catch(err => {
         // Keep recoveryReady=false so live mode cannot re-enter blindly after restart.
         warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)} — live entries remain locked`);
+        if (recoveryRetryTimer) clearTimeout(recoveryRetryTimer);
+        recoveryRetryTimer = setTimeout(() => {
+          if (!state.enabled || state.simulatorMode || recoveryReady) return;
+          console.log("[RECOVERY] Retrying startup recovery after failure...");
+          completeRecovery().catch(e => warn(`[RECOVERY] Retry failed: ${String(e)}`));
+        }, 5_000);
       });
   } else {
     // Sim mode does not rely on DB position recovery.
     recoveryReady = true;
   }
 
-  // Kick off scan loop with a brief startup pause
+  // Kick off scan loop immediately; recovery latch controls live entry readiness.
   if (!scanTimer) {
-    setTimeout(() => {
-      if (!state.enabled) return;
-      if (!scanTimer) {
-        scanTimer = setInterval(() => {
-          scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
-        }, SCAN_INTERVAL_MS);
-      }
-    }, 5_000);
+    scanTimer = setInterval(() => {
+      scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
+    }, SCAN_INTERVAL_MS);
+    // Also run once right away to avoid missing near-term scalp windows.
+    scanMomentumMarkets().catch(err => warn(`Initial scan error: ${String(err)}`));
   }
 
   log(`▶️  Momentum Bot STARTED | bet=$${(state.betCostCents/100).toFixed(2)}/trade | range:${state.priceMin}-${state.priceMax}¢ | floor:$${(state.balanceFloorCents/100).toFixed(2)} | sim:${state.simulatorMode}`);
