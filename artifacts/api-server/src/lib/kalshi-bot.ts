@@ -1484,17 +1484,27 @@ export async function manualTrade(
   limitCents: number,
   quantity: number,
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
+  let gateLocked = false;
   try {
+    const lock = await acquireTradeEntryGate(ticker, "manual_trade");
+    if (!lock.allowed) {
+      return { success: false, message: lock.reason ?? `Trade gate blocked ${ticker}` };
+    }
+    gateLocked = true;
     const balanceGate = await assertSafeToEnterTrade({
       stopBotOnFloorHit: true,
       context: `manual trade ${ticker}`,
     });
     if (!balanceGate.ok) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_balance_blocked");
       return { success: false, message: balanceGate.reason ?? "Balance safety gate blocked manual trade" };
     }
 
     const cooldownRemainingMs = getMarketReentryCooldownRemainingMs(ticker);
     if (cooldownRemainingMs > 0) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_cooldown_blocked");
       return {
         success: false,
         message: `Cooldown active for ${ticker} (${Math.ceil(cooldownRemainingMs / 1000)}s remaining)`,
@@ -1503,6 +1513,8 @@ export async function manualTrade(
 
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     if (!resp.market) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_market_not_found");
       return { success: false, message: `Market not found: ${ticker}` };
     }
     const { title, close_time } = resp.market;
@@ -1553,6 +1565,10 @@ export async function manualTrade(
     const msg = String(err);
     await botLog("error", `🎯 Manual trade failed on ${ticker}: ${msg}`);
     return { success: false, message: msg };
+  } finally {
+    if (gateLocked) {
+      releaseTradeEntryGate(ticker, "manual_trade_done");
+    }
   }
 }
 
@@ -1657,10 +1673,10 @@ export interface CoinFlipResult {
 }
 
 export async function coinFlipTrade(): Promise<CoinFlipResult> {
-  if (tradeMutex) {
-    return { success: false, message: "Another trade is in progress — coin flip blocked." };
+  const globalLock = await acquireTradeEntryGate("COINFLIP", "coin_flip_trade");
+  if (!globalLock.allowed) {
+    return { success: false, message: `Coin flip blocked — ${globalLock.reason ?? "trade_gate_blocked"}` };
   }
-  tradeMutex = true;
   try {
     // Check safety limits without stopping the main bot
     const safety = await checkSafetyLimitsPassive();
@@ -1837,7 +1853,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     await botLog("error", `🪙 Coin flip trade failed: ${msg}`);
     return { success: false, message: msg };
   } finally {
-    tradeMutex = false;
+    releaseTradeEntryGate("COINFLIP", "coin_flip_trade_done");
   }
 }
 
@@ -1859,4 +1875,195 @@ export async function clearStuckPositions(): Promise<{ cleared: number }> {
   coinFlipAuto.lastResult = null;
   if (coinFlipAuto.enabled) scheduleCoinFlip(5);
   return { cleared: openTrades.length };
+}
+
+// ─── Shared position gate (exchange-backed) for all bots ──────────────────────
+const POSITION_SYNC_MS = 5_000;
+let lastPositionSyncAt = 0;
+let lastPositionSyncOkAt = 0;
+let lastPositionSyncError: string | null = null;
+const exchangeOpenAssets = new Set<string>(); // asset labels, e.g. BTC/ETH/SOL
+const entryInProgressAssets = new Set<string>(); // asset-level in-flight entry lock
+
+function assetLabel(ticker: string): string {
+  const up = ticker.toUpperCase();
+  const aliases: Array<{ asset: string; keys: string[] }> = [
+    { asset: "BTC", keys: ["BTC", "BITCOIN", "KXBTC"] },
+    { asset: "ETH", keys: ["ETH", "ETHEREUM", "KXETH"] },
+    { asset: "SOL", keys: ["SOL", "SOLANA", "KXSOL"] },
+    { asset: "DOGE", keys: ["DOGE", "DOGECOIN", "KXDOGE"] },
+    { asset: "XRP", keys: ["XRP", "RIPPLE", "KXXRP"] },
+    { asset: "ADA", keys: ["ADA", "CARDANO", "KXADA"] },
+    { asset: "MATIC", keys: ["MATIC", "POLYGON", "KXMATIC"] },
+    { asset: "BNB", keys: ["BNB", "KXBNB"] },
+  ];
+  for (const a of aliases) {
+    if (a.keys.some(k => up.includes(k))) return a.asset;
+  }
+  return up;
+}
+
+function hasFreshPositionSnapshot(): boolean {
+  if (lastPositionSyncOkAt <= 0) return false;
+  return Date.now() - lastPositionSyncOkAt <= POSITION_SYNC_MS * 3;
+}
+
+async function refreshExchangeOpenAssets(force = false): Promise<boolean> {
+  const now = Date.now();
+  if (!force && now - lastPositionSyncAt < POSITION_SYNC_MS) {
+    return hasFreshPositionSnapshot();
+  }
+  lastPositionSyncAt = now;
+  try {
+    const pr = await kalshiFetch("GET", "/portfolio/positions") as {
+      positions?: Array<{ ticker_name?: string; position?: number }>
+    };
+    exchangeOpenAssets.clear();
+    for (const p of pr.positions ?? []) {
+      if ((p.position ?? 0) <= 0) continue;
+      const ticker = p.ticker_name ?? "";
+      if (!ticker) continue;
+      exchangeOpenAssets.add(assetLabel(ticker));
+    }
+    lastPositionSyncOkAt = Date.now();
+    lastPositionSyncError = null;
+    return true;
+  } catch (err) {
+    lastPositionSyncError = String(err);
+    logger.warn({ err }, "position gate: exchange sync failed");
+    return false;
+  }
+}
+
+export interface SharedTradeGateStatus {
+  asset: string;
+  openPosition: boolean;
+  entryLocked: boolean;
+  exchangeSyncOk: boolean;
+  lastError: string | null;
+}
+
+function readTradeGateStatus(assetOrTicker: string): SharedTradeGateStatus {
+  const asset = assetLabel(assetOrTicker);
+  return {
+    asset,
+    openPosition: exchangeOpenAssets.has(asset),
+    entryLocked: entryInProgressAssets.has(asset),
+    exchangeSyncOk: hasFreshPositionSnapshot(),
+    lastError: lastPositionSyncError,
+  };
+}
+
+export async function getSharedTradeGateStatus(assetOrTicker: string): Promise<SharedTradeGateStatus> {
+  const syncOk = await refreshExchangeOpenAssets();
+  const status = readTradeGateStatus(assetOrTicker);
+  return { ...status, exchangeSyncOk: syncOk || status.exchangeSyncOk };
+}
+
+export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
+  const asset = assetLabel(assetOrTicker);
+  const exchangeSyncOk = await refreshExchangeOpenAssets();
+  const status = readTradeGateStatus(asset);
+  logger.info(
+    { asset: status.asset, openPosition: status.openPosition, entryLocked: status.entryLocked, exchangeSyncOk, lastError: status.lastError },
+    `[TRADE GATE] asset=${status.asset}, openPosition=${status.openPosition}, entryLocked=${status.entryLocked}`,
+  );
+  if (!exchangeSyncOk && !status.exchangeSyncOk) {
+    return { ok: false, reason: "exchange_sync_unavailable", status: { ...status, exchangeSyncOk: false } };
+  }
+  if (status.openPosition) {
+    return { ok: false, reason: "has_open_position", status };
+  }
+  if (status.entryLocked) {
+    return { ok: false, reason: "entry_in_progress", status };
+  }
+  return { ok: true, status };
+}
+
+export interface TradeEntryGateResult {
+  allowed: boolean;
+  asset: string;
+  openPosition: boolean;
+  entryLocked: boolean;
+  reason?: string;
+}
+
+export async function acquireTradeEntryGate(assetOrTicker: string, _context?: string): Promise<TradeEntryGateResult> {
+  const check = await canEnterAssetTrade(assetOrTicker);
+  const asset = check.status.asset;
+  if (!check.ok) {
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: check.status.entryLocked,
+      reason: check.reason,
+    };
+  }
+
+  if (entryInProgressAssets.has(asset)) {
+    logger.info(
+      { asset, openPosition: check.status.openPosition, entryLocked: true },
+      `[TRADE GATE] asset=${asset}, openPosition=${check.status.openPosition}, entryLocked=true`,
+    );
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: true,
+      reason: "entry_in_progress",
+    };
+  }
+
+  entryInProgressAssets.add(asset);
+  logger.info(
+    { asset, openPosition: check.status.openPosition, entryLocked: true },
+    `[TRADE GATE] asset=${asset}, openPosition=${check.status.openPosition}, entryLocked=true`,
+  );
+  return {
+    allowed: true,
+    asset,
+    openPosition: check.status.openPosition,
+    entryLocked: true,
+  };
+}
+
+export function releaseTradeEntryGate(assetOrTicker: string, _context?: string): void {
+  entryInProgressAssets.delete(assetLabel(assetOrTicker));
+}
+
+export function hasOpenPositionFromExchange(assetOrTicker: string): boolean {
+  return exchangeOpenAssets.has(assetLabel(assetOrTicker));
+}
+
+export function isAssetEntryLocked(assetOrTicker: string): boolean {
+  return entryInProgressAssets.has(assetLabel(assetOrTicker));
+}
+
+export function acquireAssetEntryLock(assetOrTicker: string): boolean {
+  const asset = assetLabel(assetOrTicker);
+  if (entryInProgressAssets.has(asset)) return false;
+  entryInProgressAssets.add(asset);
+  return true;
+}
+
+export function releaseAssetEntryLock(assetOrTicker: string): void {
+  entryInProgressAssets.delete(assetLabel(assetOrTicker));
+}
+
+export function setExchangeOpenPositionsSnapshot(assets: Set<string>): void {
+  exchangeOpenAssets.clear();
+  for (const a of assets) {
+    exchangeOpenAssets.add(assetLabel(a));
+  }
+  lastPositionSyncOkAt = Date.now();
+  lastPositionSyncError = null;
+}
+
+export function noteOpenedAssetPosition(assetOrTicker: string): void {
+  exchangeOpenAssets.add(assetLabel(assetOrTicker));
+}
+
+export function noteClosedAssetPosition(assetOrTicker: string): void {
+  exchangeOpenAssets.delete(assetLabel(assetOrTicker));
 }

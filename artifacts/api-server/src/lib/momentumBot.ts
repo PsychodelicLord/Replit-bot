@@ -16,7 +16,17 @@
  *  - Use max_close_ts to surface short-duration crypto markets
  */
 
-import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook } from "./kalshi-bot";
+import {
+  kalshiFetch,
+  getBotState,
+  refreshBalance,
+  setTradeClosedHook,
+  canEnterAssetTrade,
+  acquireTradeEntryGate,
+  releaseTradeEntryGate,
+  getSharedTradeGateStatus,
+  setExchangeOpenPositionsSnapshot,
+} from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
 import { eq, asc, desc } from "drizzle-orm";
@@ -217,9 +227,7 @@ const simPositions: MomentumPosition[] = [];
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") → cooldown-expiry ms
 const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
-const exchangeOpenAssets = new Set<string>(); // exchange-truth open position assets
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
-const entryInProgressAssets = new Set<string>(); // per-asset lock while a trade execution is in-flight
 let lastExchangeSyncMs = 0;
 let lastExchangeSyncOkAt = 0;
 let lastExchangeSyncError: string | null = null;
@@ -415,18 +423,6 @@ function setLastTradeNow(asset: string): void {
   lastTradeTimeByAssetMs.set(asset, Date.now());
 }
 
-function isEntryInProgress(asset: string): boolean {
-  return entryInProgressAssets.has(asset);
-}
-
-function markEntryInProgress(asset: string): void {
-  entryInProgressAssets.add(asset);
-}
-
-function clearEntryInProgress(asset: string): void {
-  entryInProgressAssets.delete(asset);
-}
-
 function hasFreshExchangePositionSnapshot(): boolean {
   if (lastExchangeSyncOkAt <= 0) return false;
   // Allow a brief grace window beyond sync cadence for transient API jitter.
@@ -445,13 +441,14 @@ async function refreshLiveOpenPositionsFromExchange(force = false): Promise<bool
     const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
       positions?: Array<{ ticker_name?: string; position?: number }>
     };
-    exchangeOpenAssets.clear();
+    const freshAssets = new Set<string>();
     for (const p of posResp.positions ?? []) {
       const qty = p.position ?? 0;
       const ticker = p.ticker_name ?? "";
       if (!ticker || qty <= 0) continue;
-      exchangeOpenAssets.add(coinLabel(ticker));
+      freshAssets.add(coinLabel(ticker));
     }
+    setExchangeOpenPositionsSnapshot(freshAssets);
     lastExchangeSyncOkAt = Date.now();
     lastExchangeSyncError = null;
     return true;
@@ -1721,18 +1718,18 @@ export async function scanMomentumMarkets(): Promise<void> {
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — exchange_sync_unavailable`);
         continue;
       }
-      const localHasPosition = hasOpenPosition(marketCoin);
-      const exchangeHasPosition = exchangeOpenAssets.has(marketCoin);
-      const hasPosition = localHasPosition || exchangeHasPosition;
-      const entryInProgress = isEntryInProgress(marketCoin);
+      const gateStatus = await getSharedTradeGateStatus(marketCoin);
+      const hasPosition = hasOpenPosition(marketCoin) || gateStatus.openPosition;
+      const entryLocked = gateStatus.entryLocked;
       const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
       const dedupCooldownActive = lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS;
       const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
-      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryInProgress=${entryInProgress}, lastTradeAgo=${lastTradeAgoSec}s`);
-      if (hasPosition || entryInProgress || dedupCooldownActive) {
+      console.log(`[TRADE GATE] asset=${marketCoin}, openPosition=${hasPosition}, entryLocked=${entryLocked}`);
+      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s`);
+      if (hasPosition || entryLocked || dedupCooldownActive) {
         const reason = hasPosition
           ? "has_open_position"
-          : entryInProgress
+          : entryLocked
             ? "entry_in_progress"
             : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
@@ -1825,17 +1822,17 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      // Final strict position/lock gate right before attempting the live order.
-      if (hasOpenPosition(marketCoin) || exchangeOpenAssets.has(marketCoin)) {
-        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
+      const entryLock = await acquireTradeEntryGate(marketCoin, "momentum_scan_execute");
+      if (!entryLock.allowed) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${entryLock.reason ?? "trade_gate_blocked"} (final pre-entry check)`);
         continue;
       }
-      if (isEntryInProgress(marketCoin)) {
-        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — entry_in_progress (final pre-entry check)`);
+      if (hasOpenPosition(marketCoin) || entryLock.openPosition) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
+        releaseTradeEntryGate(marketCoin, "momentum_scan_execute_open_position");
         continue;
       }
 
-      markEntryInProgress(marketCoin);
       try {
         const executeResult = await executeMomentumTrade(
           market.ticker,
@@ -1862,7 +1859,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         }
         console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
       } finally {
-        clearEntryInProgress(marketCoin);
+        releaseTradeEntryGate(marketCoin, "momentum_scan_execute_finally");
       }
     }
   }
