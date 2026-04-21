@@ -514,7 +514,7 @@ async function forceStopForUnsafeBalance(reason: string): Promise<void> {
 }
 
 async function assertSafeToEnterTrade(
-  opts: { stopBotOnFailure: boolean; context: string },
+  opts: { stopBotOnFloorHit: boolean; context: string },
 ): Promise<{ ok: boolean; reason?: string }> {
   await refreshBalance();
 
@@ -525,15 +525,12 @@ async function assertSafeToEnterTrade(
   const balanceFresh = lastBalanceRefreshOkAt > 0 && (Date.now() - lastBalanceRefreshOkAt) <= BALANCE_STALE_MS;
   if (!balanceFresh) {
     const reason = `Balance refresh stale/unavailable before ${opts.context}; last error: ${lastBalanceRefreshError ?? "none"}`;
-    if (opts.stopBotOnFailure && state.running) {
-      await forceStopForUnsafeBalance(reason);
-    }
     return { ok: false, reason };
   }
 
   if (state.balanceCents <= botConfig.balanceFloorCents) {
     const reason = `Balance floor hit — balance ${formatUsd(state.balanceCents)} ≤ floor ${formatUsd(botConfig.balanceFloorCents)}`;
-    if (opts.stopBotOnFailure && state.running) {
+    if (opts.stopBotOnFloorHit && state.running) {
       await forceStopForUnsafeBalance(reason);
     }
     return { ok: false, reason };
@@ -561,7 +558,7 @@ async function refreshDailyPnl(): Promise<void> {
 // Full check — used by main bot: stops the bot if a limit is hit
 async function checkSafetyLimits(): Promise<boolean> {
   const balanceCheck = await assertSafeToEnterTrade({
-    stopBotOnFailure: true,
+    stopBotOnFloorHit: true,
     context: "scan cycle",
   });
   if (!balanceCheck.ok) return false;
@@ -590,7 +587,7 @@ async function checkSafetyLimits(): Promise<boolean> {
 // Lightweight check for coin flip — same limits but never stops the main bot
 async function checkSafetyLimitsPassive(): Promise<{ ok: boolean; reason?: string }> {
   const balanceCheck = await assertSafeToEnterTrade({
-    stopBotOnFailure: false,
+    stopBotOnFloorHit: false,
     context: "coin-flip gate",
   });
   if (!balanceCheck.ok) return balanceCheck;
@@ -821,7 +818,7 @@ async function enterTrade(
   }
 
   const balanceGate = await assertSafeToEnterTrade({
-    stopBotOnFailure: true,
+    stopBotOnFloorHit: true,
     context: `entry ${ticker}`,
   });
   if (!balanceGate.ok) {
@@ -1489,7 +1486,7 @@ export async function manualTrade(
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
   try {
     const balanceGate = await assertSafeToEnterTrade({
-      stopBotOnFailure: true,
+      stopBotOnFloorHit: true,
       context: `manual trade ${ticker}`,
     });
     if (!balanceGate.ok) {
