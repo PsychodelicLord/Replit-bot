@@ -248,6 +248,9 @@ const state: BotState = {
 const openMarkets = new Set<string>();
 const MARKET_REENTRY_COOLDOWN_MS = 75_000;
 const marketReentryCooldowns = new Map<string, number>();
+const BALANCE_STALE_MS = 90_000;
+let lastBalanceRefreshOkAt = 0;
+let lastBalanceRefreshError: string | null = null;
 
 function setMarketReentryCooldown(
   marketId: string,
@@ -275,6 +278,10 @@ function getMarketReentryCooldownRemainingMs(marketId: string): number {
 
 function isMarketInReentryCooldown(marketId: string): boolean {
   return getMarketReentryCooldownRemainingMs(marketId) > 0;
+}
+
+function formatUsd(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 // Trade mutex — only one trade entry can execute at a time (prevents race conditions)
@@ -491,11 +498,48 @@ export async function refreshBalance(): Promise<void> {
     const rawCents = r?.balance ?? r?.balance_cents ?? 0;
     // If value looks like dollars (< 20 and non-zero), convert; otherwise treat as cents
     state.balanceCents = rawCents > 0 && rawCents < 20 ? Math.round(rawCents * 100) : rawCents;
+    lastBalanceRefreshOkAt = Date.now();
+    lastBalanceRefreshError = null;
     console.log(`[BALANCE PARSED] raw:${rawCents} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`);
   } catch (err) {
     console.log(`[BALANCE ERROR] ${String(err)}`);
+    lastBalanceRefreshError = String(err);
     // non-fatal; keep last known value
   }
+}
+
+async function forceStopForUnsafeBalance(reason: string): Promise<void> {
+  await botLog("warn", `🛑 Auto-stop: ${reason}`);
+  await stopBot(reason);
+}
+
+async function assertSafeToEnterTrade(
+  opts: { stopBotOnFailure: boolean; context: string },
+): Promise<{ ok: boolean; reason?: string }> {
+  await refreshBalance();
+
+  if (botConfig.balanceFloorCents <= 0) {
+    return { ok: true };
+  }
+
+  const balanceFresh = lastBalanceRefreshOkAt > 0 && (Date.now() - lastBalanceRefreshOkAt) <= BALANCE_STALE_MS;
+  if (!balanceFresh) {
+    const reason = `Balance refresh stale/unavailable before ${opts.context}; last error: ${lastBalanceRefreshError ?? "none"}`;
+    if (opts.stopBotOnFailure && state.running) {
+      await forceStopForUnsafeBalance(reason);
+    }
+    return { ok: false, reason };
+  }
+
+  if (state.balanceCents <= botConfig.balanceFloorCents) {
+    const reason = `Balance floor hit — balance ${formatUsd(state.balanceCents)} ≤ floor ${formatUsd(botConfig.balanceFloorCents)}`;
+    if (opts.stopBotOnFailure && state.running) {
+      await forceStopForUnsafeBalance(reason);
+    }
+    return { ok: false, reason };
+  }
+
+  return { ok: true };
 }
 
 // ─── Daily P&L from DB ───────────────────────────────────────────────────────
@@ -516,17 +560,15 @@ async function refreshDailyPnl(): Promise<void> {
 // ─── Safety checks ───────────────────────────────────────────────────────────
 // Full check — used by main bot: stops the bot if a limit is hit
 async function checkSafetyLimits(): Promise<boolean> {
-  await refreshBalance();
+  const balanceCheck = await assertSafeToEnterTrade({
+    stopBotOnFailure: true,
+    context: "scan cycle",
+  });
+  if (!balanceCheck.ok) return false;
+
   await refreshDailyPnl();
 
   const { balanceFloorCents, dailyProfitTargetCents, dailyLossLimitCents } = botConfig;
-
-  if (balanceFloorCents > 0 && state.balanceCents > 0 && state.balanceCents <= balanceFloorCents) {
-    const reason = `Balance floor hit — balance $${(state.balanceCents / 100).toFixed(2)} ≤ floor $${(balanceFloorCents / 100).toFixed(2)}`;
-    await botLog("warn", `🛑 Auto-stop: ${reason}`);
-    await stopBot(reason);
-    return false;
-  }
 
   if (dailyProfitTargetCents > 0 && state.dailyPnlCents >= dailyProfitTargetCents) {
     const reason = `Daily profit target reached — +$${(state.dailyPnlCents / 100).toFixed(2)}`;
@@ -547,13 +589,18 @@ async function checkSafetyLimits(): Promise<boolean> {
 
 // Lightweight check for coin flip — same limits but never stops the main bot
 async function checkSafetyLimitsPassive(): Promise<{ ok: boolean; reason?: string }> {
-  await refreshBalance();
+  const balanceCheck = await assertSafeToEnterTrade({
+    stopBotOnFailure: false,
+    context: "coin-flip gate",
+  });
+  if (!balanceCheck.ok) return balanceCheck;
+
   await refreshDailyPnl();
 
   const { balanceFloorCents, dailyProfitTargetCents, dailyLossLimitCents } = botConfig;
 
-  if (balanceFloorCents > 0 && state.balanceCents > 0 && state.balanceCents <= balanceFloorCents) {
-    return { ok: false, reason: `Balance floor hit ($${(state.balanceCents / 100).toFixed(2)} ≤ $${(balanceFloorCents / 100).toFixed(2)})` };
+  if (balanceFloorCents > 0 && state.balanceCents <= balanceFloorCents) {
+    return { ok: false, reason: `Balance floor hit (${formatUsd(state.balanceCents)} ≤ ${formatUsd(balanceFloorCents)})` };
   }
   if (dailyProfitTargetCents > 0 && state.dailyPnlCents >= dailyProfitTargetCents) {
     return { ok: false, reason: `Daily profit target already reached` };
@@ -772,6 +819,16 @@ async function enterTrade(
   if (isMarketInReentryCooldown(ticker)) {
     return;
   }
+
+  const balanceGate = await assertSafeToEnterTrade({
+    stopBotOnFailure: true,
+    context: `entry ${ticker}`,
+  });
+  if (!balanceGate.ok) {
+    await botLog("warn", `⛔ Entry blocked: ${balanceGate.reason}`, { ticker, side });
+    return;
+  }
+
   if (tradeMutex) {
     await botLog("info", `⏳ Trade skipped (another trade in progress): ${ticker}`);
     return;
@@ -1431,6 +1488,14 @@ export async function manualTrade(
   quantity: number,
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
   try {
+    const balanceGate = await assertSafeToEnterTrade({
+      stopBotOnFailure: true,
+      context: `manual trade ${ticker}`,
+    });
+    if (!balanceGate.ok) {
+      return { success: false, message: balanceGate.reason ?? "Balance safety gate blocked manual trade" };
+    }
+
     const cooldownRemainingMs = getMarketReentryCooldownRemainingMs(ticker);
     if (cooldownRemainingMs > 0) {
       return {
