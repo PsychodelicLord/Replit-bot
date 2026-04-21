@@ -1616,12 +1616,12 @@ export async function scanMomentumMarkets(): Promise<void> {
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
       // Balance guard — always runs, even if no floor is configured.
-      // Uses the higher of: user-set floor, $2 hard minimum, or (bet + 50¢ buffer).
+      // effectiveFloor = max(user floor, bet size). No hard-coded minimum —
+      // user controls their own risk tolerance via the balance floor setting.
       {
         const effectiveFloor = Math.max(
           state.balanceFloorCents,
-          MIN_BALANCE_HARD_FLOOR_CENTS,
-          effectiveBet + 50,
+          effectiveBet,
         );
         let balanceOk = false;
         try {
@@ -1631,7 +1631,7 @@ export async function scanMomentumMarkets(): Promise<void> {
           // not reflect the deduction yet, so we track it locally to avoid
           // the floor check passing on stale data when placing a second trade.
           const balance = rawBalance - reservedBetCents;
-          console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:${reservedBetCents}¢ available:${balance}¢ floor:${effectiveFloor}¢ (user:${state.balanceFloorCents}¢ hard:${MIN_BALANCE_HARD_FLOOR_CENTS}¢ bet+50:${effectiveBet + 50}¢)`);
+          console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:${reservedBetCents}¢ available:${balance}¢ floor:${effectiveFloor}¢ (user:${state.balanceFloorCents}¢ bet:${effectiveBet}¢)`);
           if (balance > 0 && balance >= effectiveFloor) {
             balanceOk = true;
           } else if (balance > 0 && balance < effectiveFloor) {
