@@ -215,7 +215,7 @@ export function MomentumBot() {
   const [balanceFloor, setBalanceFloor]       = useState("0");
   const [maxSessionLoss, setMaxSessionLoss]   = useState("0");
   const [consecutiveLossLimit, setConsecutiveLossLimit] = useState("3");
-  const [betCostCents, setBetCostCents]       = useState("30");
+  const [betCostCents, setBetCostCents]       = useState("1.00");
   const [priceMin, setPriceMin]               = useState("20");
   const [priceMax, setPriceMax]               = useState("80");
   const [tpCents, setTpCents]                 = useState("5");
@@ -238,7 +238,7 @@ export function MomentumBot() {
   // would overwrite Railway's real values with those defaults.
   useEffect(() => {
     if (!settingsSynced && data !== undefined) {
-      if (data.betCostCents !== undefined)       setBetCostCents(String(data.betCostCents));
+      if (data.betCostCents !== undefined)       setBetCostCents((data.betCostCents / 100).toFixed(2));
       if (data.priceMin !== undefined)           setPriceMin(String(data.priceMin));
       if (data.priceMax !== undefined)           setPriceMax(String(data.priceMax));
       if (data.balanceFloorCents !== undefined)  setBalanceFloor(String((data.balanceFloorCents / 100).toFixed(2)));
@@ -294,7 +294,7 @@ export function MomentumBot() {
       balanceFloorCents:    Math.round(parseFloat(balanceFloor  || "0") * 100),
       maxSessionLossCents:  Math.round(parseFloat(maxSessionLoss || "0") * 100),
       consecutiveLossLimit: parseInt(consecutiveLossLimit || "3", 10),
-      betCostCents:         Math.max(1, parseInt(betCostCents || "30", 10)),
+      betCostCents:         Math.max(1, Math.round(parseFloat(betCostCents || "1.00") * 100)),
       simulatorMode:        overrides.simulatorMode        ?? simulatorMode,
       priceMin:             Math.min(pMin, pMax - 1),
       priceMax:             Math.max(pMax, pMin + 1),
@@ -1151,22 +1151,26 @@ export function MomentumBot() {
                   {/* Spend per trade */}
                   <label className="block">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-slate-400">Spend per trade (¢)</span>
-                      <span className="text-[11px] font-semibold text-emerald-400">
-                        = ${(parseInt(betCostCents) / 100).toFixed(2)} per trade
-                      </span>
+                      <span className="text-[10px] text-slate-400">Spend per trade ($)</span>
                     </div>
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={betCostCents}
-                      onChange={e => setBetCostCents(String(Math.max(1, parseInt(e.target.value) || 1)))}
-                      placeholder="30"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                    />
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">$</span>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={betCostCents}
+                        onChange={e => setBetCostCents(e.target.value)}
+                        onBlur={e => {
+                          const v = parseFloat(e.target.value);
+                          if (!isNaN(v) && v > 0) setBetCostCents(v.toFixed(2));
+                        }}
+                        placeholder="1.00"
+                        className="w-full bg-white/[0.04] border border-white/10 rounded-lg pl-6 pr-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
+                      />
+                    </div>
                     <p className="text-[9px] text-slate-600 mt-0.5">
-                      100¢ = $1.00 · 500¢ = $5.00 · 1000¢ = $10.00
+                      Enter dollars · $1.00 = 1 dollar per trade · $10.00 = ten dollars per trade
                     </p>
                   </label>
 
@@ -1385,7 +1389,7 @@ export function MomentumBot() {
 
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
                   <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Current active settings:</span></p>
-                  <p>· Spend: {data?.betCostCents ?? 30}¢ (${((data?.betCostCents ?? 30) / 100).toFixed(2)}) per trade</p>
+                  <p>· Spend: ${((data?.betCostCents ?? 100) / 100).toFixed(2)} per trade</p>
                   <p>· Entry range: {data?.priceMin ?? 20}¢ – {data?.priceMax ?? 80}¢</p>
                   <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
