@@ -49,9 +49,8 @@ const TRADE_SPREAD_MAX_SIM  = 5;      // sim mode: allow up to 5¢ spread (sligh
 const SPREAD_MAX_SIM        = 8;      // sim mode: scan-level spread filter (looser than 5)
 const MIN_MINUTES_REMAINING_SIM = 2;  // sim mode: enter with 2 min left (vs 3)
 
-const SCAN_INTERVAL_MS       = 15_000; // scan every 15s — gives prices time to move
-const SELL_INTERVAL_MS       = 2_000;  // monitor every 2s
-const AUTOSTART_SCAN_DELAY_MS = 90_000; // on auto-restart: wait 90s before first scan so stale config can be corrected
+const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
+const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 
 const FEE_RATE = 0.07;
 
@@ -720,8 +719,17 @@ async function placeBuyOrder(
     console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
     return null;
   }
-  const estimatedCost = contractCount * pricePerContract;
-  console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) → count:${contractCount} estimatedCost:${estimatedCost}¢`);
+
+  // Absolute hard cap: never send an order that costs more than $20, regardless of any upstream bug.
+  const HARD_MAX_CENTS = 2000;
+  const maxContractsByHardCap = Math.max(1, Math.floor(HARD_MAX_CENTS / pricePerContract));
+  const safeCount = Math.min(contractCount, maxContractsByHardCap);
+  if (safeCount < contractCount) {
+    console.error(`[HARD CAP] contractCount ${contractCount} → ${safeCount} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢) — refusing oversized order`);
+  }
+
+  const estimatedCost = safeCount * pricePerContract;
+  console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) → count:${safeCount} estimatedCost:${estimatedCost}¢`);
 
   const payload: Record<string, unknown> = {
     ticker,
@@ -729,7 +737,7 @@ async function placeBuyOrder(
     type:   "limit",
     action: "buy",
     side:   side.toLowerCase(),
-    count:  contractCount,
+    count:  safeCount,
     yes_price: side === "YES" ? limitCents    : undefined,
     no_price:  side === "NO"  ? noPriceCents  : undefined,  // must be in NO-space, not YES-space
   };
