@@ -219,6 +219,7 @@ const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") �
 const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
 const exchangeOpenAssets = new Set<string>(); // exchange-truth open position assets
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
+const entryInProgressAssets = new Set<string>(); // per-asset lock while a trade execution is in-flight
 let lastExchangeSyncMs = 0;
 let lastExchangeSyncOkAt = 0;
 let lastExchangeSyncError: string | null = null;
@@ -412,6 +413,18 @@ function getLastTradeAgoMs(asset: string): number | null {
 
 function setLastTradeNow(asset: string): void {
   lastTradeTimeByAssetMs.set(asset, Date.now());
+}
+
+function isEntryInProgress(asset: string): boolean {
+  return entryInProgressAssets.has(asset);
+}
+
+function markEntryInProgress(asset: string): void {
+  entryInProgressAssets.add(asset);
+}
+
+function clearEntryInProgress(asset: string): void {
+  entryInProgressAssets.delete(asset);
 }
 
 function hasFreshExchangePositionSnapshot(): boolean {
@@ -1708,13 +1721,20 @@ export async function scanMomentumMarkets(): Promise<void> {
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — exchange_sync_unavailable`);
         continue;
       }
-      const hasPosition = hasOpenPosition(marketCoin) || exchangeOpenAssets.has(marketCoin);
+      const localHasPosition = hasOpenPosition(marketCoin);
+      const exchangeHasPosition = exchangeOpenAssets.has(marketCoin);
+      const hasPosition = localHasPosition || exchangeHasPosition;
+      const entryInProgress = isEntryInProgress(marketCoin);
       const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
       const dedupCooldownActive = lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS;
       const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
-      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, lastTradeAgo=${lastTradeAgoSec}s`);
-      if (hasPosition || dedupCooldownActive) {
-        const reason = hasPosition ? "has_open_position" : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
+      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryInProgress=${entryInProgress}, lastTradeAgo=${lastTradeAgoSec}s`);
+      if (hasPosition || entryInProgress || dedupCooldownActive) {
+        const reason = hasPosition
+          ? "has_open_position"
+          : entryInProgress
+            ? "entry_in_progress"
+            : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
         continue;
       }
@@ -1805,30 +1825,45 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      const executeResult = await executeMomentumTrade(
-        market.ticker,
-        market.title,
-        side,
-        ob.bid,
-        ob.ask,
-        market.closeTs,
-        effectiveBet,
-      );
-      console.log(
-        `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
-      );
-      log(
-        `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
-      );
-      if (executeResult.status === "trade_opened") {
-        setLastTradeNow(marketCoin);
+      // Final strict position/lock gate right before attempting the live order.
+      if (hasOpenPosition(marketCoin) || exchangeOpenAssets.has(marketCoin)) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
+        continue;
       }
-      // Reserve this bet so the next candidate's balance check sees the correct available balance,
-      // even if Kalshi's API hasn't updated yet.
-      if (executeResult.status === "trade_opened") {
-        reservedBetCents += effectiveBet;
+      if (isEntryInProgress(marketCoin)) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — entry_in_progress (final pre-entry check)`);
+        continue;
       }
-      console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
+
+      markEntryInProgress(marketCoin);
+      try {
+        const executeResult = await executeMomentumTrade(
+          market.ticker,
+          market.title,
+          side,
+          ob.bid,
+          ob.ask,
+          market.closeTs,
+          effectiveBet,
+        );
+        console.log(
+          `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+        );
+        log(
+          `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+        );
+        if (executeResult.status === "trade_opened") {
+          setLastTradeNow(marketCoin);
+        }
+        // Reserve this bet so the next candidate's balance check sees the correct available balance,
+        // even if Kalshi's API hasn't updated yet.
+        if (executeResult.status === "trade_opened") {
+          reservedBetCents += effectiveBet;
+        }
+        console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
+      } finally {
+        clearEntryInProgress(marketCoin);
+      }
     }
   }
 
