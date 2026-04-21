@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { db, tradesTable, botLogsTable, botSettingsTable } from "@workspace/db";
 import { logger } from "./logger";
-import { eq, gte, sql } from "drizzle-orm";
+import { and, eq, gte, ne, sql } from "drizzle-orm";
 
 // ─── DB keepalive ─────────────────────────────────────────────────────────────
 // Pings the database every 15 s from the moment the server starts.
@@ -39,6 +39,7 @@ function firePositionRemovedCooldownHook(
   reason: PositionRemovalReason,
   tradeId: number,
 ) {
+  setMarketReentryCooldown(marketId, reason, tradeId);
   try { _onPositionRemovedForCooldown?.(marketId, reason, tradeId); } catch (_) {}
 }
 
@@ -245,6 +246,36 @@ const state: BotState = {
 };
 
 const openMarkets = new Set<string>();
+const MARKET_REENTRY_COOLDOWN_MS = 75_000;
+const marketReentryCooldowns = new Map<string, number>();
+
+function setMarketReentryCooldown(
+  marketId: string,
+  reason: string,
+  tradeId?: number,
+  baseTimeMs = Date.now(),
+): void {
+  const untilMs = baseTimeMs + MARKET_REENTRY_COOLDOWN_MS;
+  const existing = marketReentryCooldowns.get(marketId) ?? 0;
+  if (untilMs <= existing) return;
+  marketReentryCooldowns.set(marketId, untilMs);
+  logger.info({ marketId, reason, tradeId, untilMs }, "market re-entry cooldown set");
+}
+
+function getMarketReentryCooldownRemainingMs(marketId: string): number {
+  const untilMs = marketReentryCooldowns.get(marketId);
+  if (!untilMs) return 0;
+  const remainingMs = untilMs - Date.now();
+  if (remainingMs <= 0) {
+    marketReentryCooldowns.delete(marketId);
+    return 0;
+  }
+  return remainingMs;
+}
+
+function isMarketInReentryCooldown(marketId: string): boolean {
+  return getMarketReentryCooldownRemainingMs(marketId) > 0;
+}
 
 // Trade mutex — only one trade entry can execute at a time (prevents race conditions)
 let tradeMutex = false;
@@ -676,6 +707,7 @@ async function evaluateMarket(market: KalshiMarket): Promise<void> {
   if (minutesLeft <= botConfig.minMinutesRemaining) return;
 
   if (openMarkets.has(ticker)) return;
+  if (isMarketInReentryCooldown(ticker)) return;
 
   // Skip tickers we recently found to have zero liquidity
   const lastZero = zeroPriceTs.get(ticker);
@@ -737,6 +769,9 @@ async function enterTrade(
   buyPriceCents: number,
   minutesRemaining: number,
 ): Promise<void> {
+  if (isMarketInReentryCooldown(ticker)) {
+    return;
+  }
   if (tradeMutex) {
     await botLog("info", `⏳ Trade skipped (another trade in progress): ${ticker}`);
     return;
@@ -876,6 +911,7 @@ async function executeSell(
   if (idx >= 0) openPositions.splice(idx, 1);
   openMarkets.delete(pos.marketId);
   state.openPositionCount = openPositions.length;
+  setMarketReentryCooldown(pos.marketId, "sell_filled_immediate", pos.tradeId);
 
   await botLog("info",
     `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`,
@@ -1298,6 +1334,7 @@ export async function startBot(): Promise<BotState> {
   state.tradesSucceeded = 0;
   state.stoppedReason = null;
   zeroPriceTs.clear();     // fresh start — re-evaluate all markets
+  marketReentryCooldowns.clear();
   lastIdleScanLogMs = 0;   // always show first scan result
 
   // Re-hydrate openPositions + openMarkets from DB so the sell monitor
@@ -1320,9 +1357,37 @@ export async function startBot(): Promise<BotState> {
         buyOrderId:      t.kalshiBuyOrderId ?? null,
       });
     }
+
+    // Restore recent closed/cancelled/expired trades into cooldown map so restarts
+    // do not immediately re-enter the same ticker while the old market is still live.
+    const cutoff = new Date(Date.now() - MARKET_REENTRY_COOLDOWN_MS);
+    const recentlyClosed = await db
+      .select({
+        tradeId: tradesTable.id,
+        marketId: tradesTable.marketId,
+        closedAt: tradesTable.closedAt,
+      })
+      .from(tradesTable)
+      .where(and(ne(tradesTable.status, "open"), gte(tradesTable.closedAt, cutoff)));
+
+    let restoredCooldowns = 0;
+    for (const t of recentlyClosed) {
+      if (!t.closedAt) continue;
+      const untilMs = t.closedAt.getTime() + MARKET_REENTRY_COOLDOWN_MS;
+      if (untilMs <= Date.now()) continue;
+      const prev = marketReentryCooldowns.get(t.marketId) ?? 0;
+      if (untilMs > prev) {
+        marketReentryCooldowns.set(t.marketId, untilMs);
+        restoredCooldowns++;
+      }
+    }
+
     state.openPositionCount = openPositions.length;
     if (openPositions.length > 0) {
       logger.info({ count: openPositions.length }, "startBot: hydrated open positions from DB");
+    }
+    if (restoredCooldowns > 0) {
+      logger.info({ restoredCooldowns }, "startBot: restored market re-entry cooldowns");
     }
   } catch (dbErr) {
     logger.warn({ err: dbErr }, "startBot: DB hydration failed — new trades will still be monitored via registerOpenPosition()");
@@ -1366,6 +1431,14 @@ export async function manualTrade(
   quantity: number,
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
   try {
+    const cooldownRemainingMs = getMarketReentryCooldownRemainingMs(ticker);
+    if (cooldownRemainingMs > 0) {
+      return {
+        success: false,
+        message: `Cooldown active for ${ticker} (${Math.ceil(cooldownRemainingMs / 1000)}s remaining)`,
+      };
+    }
+
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     if (!resp.market) {
       return { success: false, message: `Market not found: ${ticker}` };
@@ -1615,6 +1688,7 @@ export async function coinFlipTrade(): Promise<CoinFlipResult> {
     for (const candidate of shuffled) {
       // Skip markets already held — each open position must be on a different market
       if (occupiedTickers.has(candidate.ticker)) continue;
+      if (isMarketInReentryCooldown(candidate.ticker)) continue;
 
       triedAll++;
       const detailResp = await kalshiFetch("GET", `/markets/${candidate.ticker}`) as { market?: KalshiMarket };
@@ -1715,6 +1789,7 @@ export async function clearStuckPositions(): Promise<{ cleared: number }> {
     openMarkets.delete(trade.marketId);
     const idx = openPositions.findIndex(p => p.tradeId === trade.id);
     if (idx >= 0) openPositions.splice(idx, 1);
+    setMarketReentryCooldown(trade.marketId, "force_clear", trade.id);
     await botLog("warn", `🧹 Trade ${trade.id} force-cleared via dashboard reset`, { tradeId: trade.id });
   }
   state.openPositionCount = 0;
