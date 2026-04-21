@@ -236,7 +236,7 @@ router.get("/bot/momentum/live-performance", (_req, res): void => {
   res.json(getLivePerformanceReport());
 });
 
-router.post("/bot/momentum/auto", (req, res): void => {
+router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
   try {
     const parsed = MomentumBotAutoBody.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
@@ -249,8 +249,8 @@ router.post("/bot/momentum/auto", (req, res): void => {
       return;
     }
 
-    // Update risk config if provided
-    updateMomentumConfig({
+    // Await config update so DB write is guaranteed before responding
+    await updateMomentumConfig({
       balanceFloorCents:    balanceFloorCents    ?? 0,
       maxSessionLossCents:  maxSessionLossCents  ?? 0,
       consecutiveLossLimit: consecutiveLossLimit ?? 0,

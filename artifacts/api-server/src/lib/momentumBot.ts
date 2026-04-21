@@ -1714,7 +1714,7 @@ function saveEnabledFlag(enabled: boolean): void {
  * or real-trade stats. Use this in updateMomentumConfig so that toggling settings
  * before loadMomentumConfig completes never overwrites the scoreboard with zeros.
  */
-function saveConfigFieldsOnly(): void {
+async function saveConfigFieldsOnly(): Promise<void> {
   const set = {
     balanceFloorCents:         state.balanceFloorCents,
     maxSessionLossCents:       state.maxSessionLossCents,
@@ -1730,10 +1730,10 @@ function saveConfigFieldsOnly(): void {
     sessionProfitTargetCents:  state.sessionProfitTargetCents,
     allowedCoins:              state.allowedCoins.join(","),
   };
-  db.insert(momentumSettingsTable)
+  await db.insert(momentumSettingsTable)
     .values({ id: 1, ...set })
-    .onConflictDoUpdate({ target: momentumSettingsTable.id, set })
-    .catch(err => console.error("[momentumBot] saveConfigFieldsOnly failed:", String(err)));
+    .onConflictDoUpdate({ target: momentumSettingsTable.id, set });
+  console.log(`[momentumBot] Config saved to DB — betCostCents:${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}/trade)`);
 }
 
 /**
@@ -1956,7 +1956,7 @@ export async function debugMomentumMarkets() {
   };
 }
 
-export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
+export async function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): Promise<void> {
   if (cfg.balanceFloorCents !== undefined) state.balanceFloorCents = cfg.balanceFloorCents;
   if (cfg.maxSessionLossCents !== undefined) state.maxSessionLossCents = cfg.maxSessionLossCents;
   if (cfg.consecutiveLossLimit !== undefined) state.consecutiveLossLimit = cfg.consecutiveLossLimit;
@@ -1973,7 +1973,7 @@ export function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): void {
     state.allowedCoins = cfg.allowedCoins.filter(c => ALLOWED_COINS.includes(c));
     if (state.allowedCoins.length === 0) state.allowedCoins = [...ALLOWED_COINS]; // never allow empty list
   }
-  saveConfigFieldsOnly(); // never touches simWins/simLosses — safe before loadMomentumConfig completes
+  await saveConfigFieldsOnly(); // awaited — guarantees DB write before Railway can restart
 }
 
 export function startMomentumBot(): MomentumBotState {
