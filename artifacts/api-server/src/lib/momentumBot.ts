@@ -720,16 +720,29 @@ async function placeBuyOrder(
     return null;
   }
 
-  // Absolute hard cap: never send an order that costs more than $20, regardless of any upstream bug.
+  // ── Hard cap: absolute maximum is the budget itself (betCostCents). ────────
+  // $20 (2000¢) secondary ceiling in case betCostCents is somehow stale/wrong.
   const HARD_MAX_CENTS = 2000;
   const maxContractsByHardCap = Math.max(1, Math.floor(HARD_MAX_CENTS / pricePerContract));
   const safeCount = Math.min(contractCount, maxContractsByHardCap);
-  if (safeCount < contractCount) {
-    console.error(`[HARD CAP] contractCount ${contractCount} → ${safeCount} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢) — refusing oversized order`);
+  const estimatedCost = safeCount * pricePerContract;
+
+  // ── [SIZE CHECK] log — emitted before EVERY live order ───────────────────
+  const balanceCents = getBotState().balanceCents;
+  console.log(`[SIZE CHECK] requested=${betCostCents}¢ ($${(betCostCents/100).toFixed(2)}) capped=${estimatedCost}¢ ($${(estimatedCost/100).toFixed(2)}) balance=${balanceCents}¢ ($${(balanceCents/100).toFixed(2)}) contracts=${safeCount} price=${pricePerContract}¢`);
+
+  // ── Hard fail-safe: estimatedCost must NEVER exceed betCostCents ──────────
+  // Math.floor guarantees this, but if any upstream change ever breaks that
+  // invariant this will catch it before money leaves the account.
+  if (estimatedCost > betCostCents) {
+    const msg = `[SIZE FAIL-SAFE] estimatedCost=${estimatedCost}¢ exceeds betCostCents=${betCostCents}¢ — ORDER BLOCKED`;
+    console.error(msg);
+    throw new Error(msg);
   }
 
-  const estimatedCost = safeCount * pricePerContract;
-  console.log(`[ORDER SIZING] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) → count:${safeCount} estimatedCost:${estimatedCost}¢`);
+  if (safeCount < contractCount) {
+    console.error(`[HARD CAP] contractCount ${contractCount} → ${safeCount} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢)`);
+  }
 
   const payload: Record<string, unknown> = {
     ticker,
@@ -1584,6 +1597,9 @@ export async function scanMomentumMarkets(): Promise<void> {
     const healthMult    = health === "Fragile" ? 0.70 : 1.0;
     let effectiveBet = Math.round(state.betCostCents * signalMult * healthMult);
     effectiveBet = Math.max(1, effectiveBet);
+    // Hard cap: effectiveBet must never exceed the configured betCostCents, regardless of any future
+    // multiplier changes. Multipliers are currently ≤1.0 but this enforces it structurally.
+    effectiveBet = Math.min(effectiveBet, state.betCostCents);
 
     console.log(`[SIZING] ${coinLabel(market.ticker)} ${side} | base:${state.betCostCents}¢ velocity:${decision.centsPerSec.toFixed(2)}¢/s signalMult:${signalMult} health:${health ?? "Pending"} → bet:${effectiveBet}¢`);
 
