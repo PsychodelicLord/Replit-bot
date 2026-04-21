@@ -946,6 +946,8 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
         } catch (_) { /* use fallback 50¢ */ }
 
         // Register in memory IMMEDIATELY — no DB required
+        // closeTs is critical: without it the expiry force-exit never fires after a restart.
+        const closeTs = m.close_time ? new Date(m.close_time).getTime() : 0;
         const provisId = -(Date.now() + imported);
         registerOpenPosition({
           tradeId:         provisId,
@@ -955,7 +957,7 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
           contractCount:   pos.position ?? 1,
           enteredAt:       Date.now(),
           buyOrderId:      null,
-        });
+        }, closeTs);
         imported++;
 
         logger.info({ ticker, side, buyPriceCents, provisId }, "syncPortfolioFromKalshi: registered orphaned position");

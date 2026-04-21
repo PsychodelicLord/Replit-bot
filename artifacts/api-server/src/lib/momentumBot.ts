@@ -1293,9 +1293,20 @@ async function runSellMonitor(): Promise<void> {
     // If order book is unavailable, fall back to last known price so SL/TP can still fire.
     // Never let a fetch failure silently block position management.
     if (currentBid <= 0 && currentAsk <= 0) {
+      // Near-expiry with no liquidity: market is draining to 0 — exit immediately.
+      // Without this, lastSeenPriceCents stays at entry price and the SL never fires.
+      if (pos.closeTs > 0) {
+        const minsLeft = (pos.closeTs - now) / 60_000;
+        if (minsLeft < 5) {
+          const exitPx = Math.max(1, pos.lastSeenPriceCents);
+          console.warn(`[SELL-MONITOR] EMERGENCY EXIT — ${coinLabel(pos.marketId)} ${minsLeft.toFixed(1)}min left with 0 bid/ask — force-exiting at ${exitPx}¢`);
+          await placeSellOrder(pos, exitPx, exitPx);
+          continue;
+        }
+      }
       if (pos.lastSeenPriceCents > 0) {
         const fallbackMid = pos.lastSeenPriceCents;
-        const fallbackBid = pos.side === "YES" ? Math.max(1, fallbackMid - 1) : Math.max(1, fallbackMid - 1);
+        const fallbackBid = Math.max(1, fallbackMid - 1);
         console.warn(`[SELL-MONITOR] ${coinLabel(pos.marketId)} — order book unavailable, using last known price ${fallbackMid}¢`);
         const gain = pos.side === "YES"
           ? fallbackMid - pos.entryPriceCents
