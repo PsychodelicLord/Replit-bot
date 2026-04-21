@@ -233,6 +233,9 @@ let sellTimer: NodeJS.Timeout | null = null;
 // Startup hold — blocks all trades for 60s after (re)start so DB recovery and
 // syncPortfolioFromKalshi can repopulate openPositions before any new entries fire.
 let startupHoldUntilMs = 0;
+// Recovery latch — live mode cannot open new trades until DB recovery for open
+// positions has completed at least once after start/restart.
+let recoveryReady = false;
 
 // ─── Bot Health Score rolling buffer ────────────────────────────────────────
 interface TradeRecord {
@@ -1443,6 +1446,13 @@ export async function scanMomentumMarkets(): Promise<void> {
     return;
   }
 
+  // Live mode safety: never trade before restart recovery has completed.
+  // If recovery failed/unfinished, we could forget existing open positions and re-enter.
+  if (!state.simulatorMode && !recoveryReady) {
+    console.log("[SCAN] Recovery latch active — waiting for DB open-position recovery before allowing live entries");
+    return;
+  }
+
   // Risk checks
   if (checkRiskPause()) {
     state.status = "PAUSED";
@@ -2106,6 +2116,7 @@ export function startMomentumBot(): MomentumBotState {
   state.enabled = true;
   state.autoMode = true;
   state.status = "WAITING_FOR_SETUP";
+  recoveryReady = false;
 
   // Wire up real-trade W/L counter (hook avoids circular import)
   setTradeClosedHook(recordTradeResult);
@@ -2168,8 +2179,16 @@ export function startMomentumBot(): MomentumBotState {
           log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
           dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
         }
+        recoveryReady = true;
+        console.log(`[RECOVERY] Ready — DB recovery complete, live entries unlocked (restored:${recovered})`);
       })
-      .catch(err => warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)}`));
+      .catch(err => {
+        // Keep recoveryReady=false so live mode cannot re-enter blindly after restart.
+        warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)} — live entries remain locked`);
+      });
+  } else {
+    // Sim mode does not rely on DB position recovery.
+    recoveryReady = true;
   }
 
   // Kick off scan loop with a brief startup pause
