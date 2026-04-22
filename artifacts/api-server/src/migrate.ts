@@ -42,6 +42,22 @@ export async function runMigrations(): Promise<void> {
     await db.execute(sql`
       ALTER TABLE trades ADD COLUMN IF NOT EXISTS contract_count_fp TEXT
     `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS trade_entry_locks (
+        asset      TEXT PRIMARY KEY,
+        owner_id   TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS trade_entry_locks_expires_at_idx
+      ON trade_entry_locks (expires_at)
+    `);
+    await db.execute(sql`
+      DELETE FROM trade_entry_locks
+      WHERE expires_at <= NOW()
+    `);
 
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS momentum_settings (

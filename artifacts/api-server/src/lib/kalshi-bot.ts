@@ -1595,6 +1595,9 @@ let lastPositionSyncOkAt = 0;
 let lastPositionSyncError: string | null = null;
 const exchangeOpenAssets = new Set<string>(); // asset labels, e.g. BTC/ETH/SOL
 const entryInProgressAssets = new Set<string>(); // asset-level in-flight entry lock
+const ENTRY_LOCK_TTL_MS = 45_000;
+const ENTRY_LOCK_OWNER_ID = `${process.pid}-${crypto.randomUUID()}`;
+const heldDistributedEntryLocks = new Set<string>(); // assets with DB lock held by this process
 
 function assetLabel(ticker: string): string {
   const up = ticker.toUpperCase();
@@ -1647,20 +1650,109 @@ async function refreshExchangeOpenAssets(force = false): Promise<boolean> {
   }
 }
 
+type QueryRows<T extends Record<string, unknown>> = { rows?: T[] };
+
+function extractQueryRows<T extends Record<string, unknown>>(result: unknown): T[] {
+  const maybeRows = (result as QueryRows<T> | null)?.rows;
+  return Array.isArray(maybeRows) ? maybeRows : [];
+}
+
+interface DistributedEntryLockState {
+  ok: boolean;
+  locked: boolean;
+  ownedBySelf: boolean;
+  ownerId: string | null;
+  error: string | null;
+}
+
+async function getDistributedEntryLockState(asset: string): Promise<DistributedEntryLockState> {
+  try {
+    const result = await db.execute(
+      sql`
+        SELECT owner_id
+        FROM trade_entry_locks
+        WHERE asset = ${asset}
+          AND expires_at > NOW()
+        LIMIT 1
+      `,
+    );
+    const rows = extractQueryRows<{ owner_id: string | null }>(result);
+    const ownerId = rows[0]?.owner_id ?? null;
+    const ownedBySelf = ownerId === ENTRY_LOCK_OWNER_ID;
+    return {
+      ok: true,
+      // A lock owned by this process is already represented by local memory lock.
+      locked: ownerId !== null && !ownedBySelf,
+      ownedBySelf,
+      ownerId,
+      error: null,
+    };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "position gate: distributed entry lock state query failed");
+    return { ok: false, locked: true, ownedBySelf: false, ownerId: null, error: message };
+  }
+}
+
+async function acquireDistributedEntryLock(asset: string): Promise<{ ok: boolean; acquired: boolean; error: string | null }> {
+  const expiresAt = new Date(Date.now() + ENTRY_LOCK_TTL_MS);
+  try {
+    const result = await db.execute(
+      sql`
+        INSERT INTO trade_entry_locks (asset, owner_id, expires_at, updated_at)
+        VALUES (${asset}, ${ENTRY_LOCK_OWNER_ID}, ${expiresAt}, NOW())
+        ON CONFLICT (asset) DO UPDATE
+        SET owner_id = EXCLUDED.owner_id,
+            expires_at = EXCLUDED.expires_at,
+            updated_at = NOW()
+        WHERE trade_entry_locks.expires_at <= NOW()
+          OR trade_entry_locks.owner_id = EXCLUDED.owner_id
+        RETURNING owner_id
+      `,
+    );
+    const rows = extractQueryRows<{ owner_id: string | null }>(result);
+    const ownerId = rows[0]?.owner_id ?? null;
+    return { ok: true, acquired: ownerId === ENTRY_LOCK_OWNER_ID, error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "position gate: distributed entry lock acquisition failed");
+    return { ok: false, acquired: false, error: message };
+  }
+}
+
+async function releaseDistributedEntryLock(asset: string): Promise<void> {
+  try {
+    await db.execute(
+      sql`
+        DELETE FROM trade_entry_locks
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    );
+  } catch (err) {
+    logger.warn({ err, asset }, "position gate: distributed entry lock release failed");
+  }
+}
+
 export interface SharedTradeGateStatus {
   asset: string;
   openPosition: boolean;
   entryLocked: boolean;
+  entryLockedLocal: boolean;
+  entryLockedDistributed: boolean;
   exchangeSyncOk: boolean;
   lastError: string | null;
 }
 
-function readTradeGateStatus(assetOrTicker: string): SharedTradeGateStatus {
+function readTradeGateStatus(assetOrTicker: string, distributedLocked = false): SharedTradeGateStatus {
   const asset = assetLabel(assetOrTicker);
+  const localLocked = entryInProgressAssets.has(asset);
   return {
     asset,
     openPosition: exchangeOpenAssets.has(asset),
-    entryLocked: entryInProgressAssets.has(asset),
+    entryLocked: localLocked || distributedLocked,
+    entryLockedLocal: localLocked,
+    entryLockedDistributed: distributedLocked,
     exchangeSyncOk: hasFreshPositionSnapshot(),
     lastError: lastPositionSyncError,
   };
@@ -1668,25 +1760,45 @@ function readTradeGateStatus(assetOrTicker: string): SharedTradeGateStatus {
 
 export async function getSharedTradeGateStatus(assetOrTicker: string): Promise<SharedTradeGateStatus> {
   const syncOk = await refreshExchangeOpenAssets();
-  const status = readTradeGateStatus(assetOrTicker);
-  return { ...status, exchangeSyncOk: syncOk || status.exchangeSyncOk };
+  const asset = assetLabel(assetOrTicker);
+  const distributed = await getDistributedEntryLockState(asset);
+  const status = readTradeGateStatus(asset, distributed.locked);
+  return {
+    ...status,
+    exchangeSyncOk: syncOk || status.exchangeSyncOk,
+    lastError: distributed.error ?? status.lastError,
+  };
 }
 
 export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
   const asset = assetLabel(assetOrTicker);
   const exchangeSyncOk = await refreshExchangeOpenAssets();
-  const status = readTradeGateStatus(asset);
+  const distributed = await getDistributedEntryLockState(asset);
+  const status = readTradeGateStatus(asset, distributed.locked);
+  const effectiveExchangeSyncOk = exchangeSyncOk || status.exchangeSyncOk;
+  const lastError = distributed.error ?? status.lastError;
   logger.info(
-    { asset: status.asset, openPosition: status.openPosition, entryLocked: status.entryLocked, exchangeSyncOk, lastError: status.lastError },
+    {
+      asset: status.asset,
+      openPosition: status.openPosition,
+      entryLocked: status.entryLocked,
+      entryLockedLocal: status.entryLockedLocal,
+      entryLockedDistributed: status.entryLockedDistributed,
+      exchangeSyncOk: effectiveExchangeSyncOk,
+      lastError,
+    },
     `[TRADE GATE] asset=${status.asset}, openPosition=${status.openPosition}, entryLocked=${status.entryLocked}`,
   );
-  if (!exchangeSyncOk && !status.exchangeSyncOk) {
-    return { ok: false, reason: "exchange_sync_unavailable", status: { ...status, exchangeSyncOk: false } };
+  if (!effectiveExchangeSyncOk) {
+    return { ok: false, reason: "exchange_sync_unavailable", status: { ...status, exchangeSyncOk: false, lastError } };
+  }
+  if (!distributed.ok) {
+    return { ok: false, reason: "entry_lock_unavailable", status: { ...status, lastError } };
   }
   if (status.openPosition) {
     return { ok: false, reason: "has_open_position", status };
   }
-  if (status.entryLocked) {
+  if (status.entryLockedLocal || status.entryLockedDistributed) {
     return { ok: false, reason: "entry_in_progress", status };
   }
   return { ok: true, status };
@@ -1697,6 +1809,8 @@ export interface TradeEntryGateResult {
   asset: string;
   openPosition: boolean;
   entryLocked: boolean;
+  entryLockedLocal: boolean;
+  entryLockedDistributed: boolean;
   reason?: string;
 }
 
@@ -1709,6 +1823,8 @@ export async function acquireTradeEntryGate(assetOrTicker: string, _context?: st
       asset,
       openPosition: check.status.openPosition,
       entryLocked: check.status.entryLocked,
+      entryLockedLocal: check.status.entryLockedLocal,
+      entryLockedDistributed: check.status.entryLockedDistributed,
       reason: check.reason,
     };
   }
@@ -1723,25 +1839,89 @@ export async function acquireTradeEntryGate(assetOrTicker: string, _context?: st
       asset,
       openPosition: check.status.openPosition,
       entryLocked: true,
+      entryLockedLocal: true,
+      entryLockedDistributed: check.status.entryLockedDistributed,
       reason: "entry_in_progress",
     };
   }
 
+  const distributedAcquire = await acquireDistributedEntryLock(asset);
+  if (!distributedAcquire.ok) {
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: true,
+      entryLockedLocal: false,
+      entryLockedDistributed: true,
+      reason: "entry_lock_unavailable",
+    };
+  }
+  if (!distributedAcquire.acquired) {
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: true,
+      entryLockedLocal: false,
+      entryLockedDistributed: true,
+      reason: "entry_in_progress",
+    };
+  }
+
+  heldDistributedEntryLocks.add(asset);
   entryInProgressAssets.add(asset);
+  const postAcquireSyncOk = await refreshExchangeOpenAssets(true);
+  const postAcquireOpen = exchangeOpenAssets.has(asset);
+  if (!postAcquireSyncOk && !hasFreshPositionSnapshot()) {
+    entryInProgressAssets.delete(asset);
+    heldDistributedEntryLocks.delete(asset);
+    void releaseDistributedEntryLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: postAcquireOpen,
+      entryLocked: false,
+      entryLockedLocal: false,
+      entryLockedDistributed: false,
+      reason: "exchange_sync_unavailable",
+    };
+  }
+  if (postAcquireOpen) {
+    entryInProgressAssets.delete(asset);
+    heldDistributedEntryLocks.delete(asset);
+    void releaseDistributedEntryLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: true,
+      entryLocked: false,
+      entryLockedLocal: false,
+      entryLockedDistributed: false,
+      reason: "has_open_position",
+    };
+  }
+
   logger.info(
-    { asset, openPosition: check.status.openPosition, entryLocked: true },
-    `[TRADE GATE] asset=${asset}, openPosition=${check.status.openPosition}, entryLocked=true`,
+    { asset, openPosition: false, entryLocked: true, entryLockedLocal: true, entryLockedDistributed: true },
+    `[TRADE GATE] asset=${asset}, openPosition=false, entryLocked=true`,
   );
   return {
     allowed: true,
     asset,
-    openPosition: check.status.openPosition,
+    openPosition: false,
     entryLocked: true,
+    entryLockedLocal: true,
+    entryLockedDistributed: true,
   };
 }
 
 export function releaseTradeEntryGate(assetOrTicker: string, _context?: string): void {
-  entryInProgressAssets.delete(assetLabel(assetOrTicker));
+  const asset = assetLabel(assetOrTicker);
+  entryInProgressAssets.delete(asset);
+  if (!heldDistributedEntryLocks.has(asset)) return;
+  heldDistributedEntryLocks.delete(asset);
+  void releaseDistributedEntryLock(asset);
 }
 
 export function hasOpenPositionFromExchange(assetOrTicker: string): boolean {
