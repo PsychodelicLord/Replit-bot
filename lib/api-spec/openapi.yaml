@@ -739,7 +739,9 @@ components:
         sellPriceCents:
           type: ["integer", "null"]
         contractCount:
-          type: integer
+          type: number
+        contractCountFp:
+          type: ["string", "null"]
         feeCents:
           type: integer
         pnlCents:
@@ -760,6 +762,7 @@ components:
         - buyPriceCents
         - sellPriceCents
         - contractCount
+        - contractCountFp
         - feeCents
         - pnlCents
         - status

@@ -90,6 +90,25 @@ interface MomentumPosition {
   pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
 }
 
+function normalizeCountFp(raw?: string | null): string | null {
+  if (!raw) return null;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed.toFixed(2);
+}
+
+function countFpToStorageUnits(countFp: string | null): number {
+  if (!countFp) return 0;
+  const parsed = Number.parseFloat(countFp);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.round(parsed * 100);
+}
+
+function storageUnitsToCountFp(units: number): string | null {
+  if (!Number.isFinite(units) || units <= 0) return null;
+  return (units / 100).toFixed(2);
+}
+
 type MarketMeta = {
   ticker: string;
   title: string;
@@ -1042,13 +1061,17 @@ async function placeSellOrder(
   }
 
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
+  const sellCount = pos.contractCountFp && pos.contractCountFp.trim().length > 0
+    ? pos.contractCountFp
+    : pos.contractCount;
   const payload = {
     ticker: pos.marketId,
     client_order_id: clientOrderId,
     type: "limit",
     action: "sell",
     side: pos.side.toLowerCase(),
-    count: pos.contractCount,
+    count: typeof sellCount === "number" ? sellCount : undefined,
+    count_fp: typeof sellCount === "string" ? sellCount : undefined,
     yes_price: pos.side === "YES" ? limitCents : undefined,
     no_price:  pos.side === "NO"  ? limitCents : undefined,
   };
@@ -2417,6 +2440,7 @@ export function startMomentumBot(): MomentumBotState {
             entryPriceCents:    t.buyPriceCents,
             entrySlippageCents: 0,
             contractCount:      t.contractCount,
+            contractCountFp:    t.contractCountFp ?? undefined,
             enteredAt:          t.createdAt.getTime(),
             lastSeenPriceCents: entryYesEquiv,
             lastMovedAt:        Date.now(),
