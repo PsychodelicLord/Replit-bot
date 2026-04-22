@@ -483,6 +483,20 @@ function setLastTradeNow(asset: string): void {
   lastTradeTimeByAssetMs.set(asset, Date.now());
 }
 
+function getRemainingCooldownMs(
+  cooldowns: Map<string, number>,
+  asset: string,
+): number {
+  const untilMs = cooldowns.get(asset) ?? 0;
+  if (untilMs <= 0) return 0;
+  const remainingMs = untilMs - Date.now();
+  if (remainingMs <= 0) {
+    cooldowns.delete(asset);
+    return 0;
+  }
+  return remainingMs;
+}
+
 async function restoreRestartEntryGuardsFromDb(): Promise<{ dedupRestored: number; cooldownRestored: number }> {
   const now = Date.now();
   const dedupCutoff = new Date(now - ENTRY_CHECK_COOLDOWN_MS);
@@ -1733,14 +1747,14 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   for (const market of markets) {
     if (activePositions.some(p => p.marketId === market.ticker)) continue;
-    const cooldown = marketCooldowns.get(coinLabel(market.ticker));
-    if (cooldown && Date.now() < cooldown) {
-      console.log(`[SCAN] ${coinLabel(market.ticker)} — coin cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s left), skipping`);
+    const marketCoin = coinLabel(market.ticker);
+    const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
+    if (coinCooldownRemainingMs > 0) {
+      console.log(`[SCAN] ${marketCoin} — coin cooldown active (${Math.ceil(coinCooldownRemainingMs / 1000)}s left), skipping`);
       continue;
     }
 
     // ── Coin allow-list filter ────────────────────────────────────────────────
-    const marketCoin = coinLabel(market.ticker);
     if (!state.allowedCoins.includes(marketCoin)) {
       console.log(`[SCAN] ${marketCoin} — not in allowedCoins [${state.allowedCoins.join(",")}], skipping`);
       continue;
@@ -1884,7 +1898,9 @@ export async function scanMomentumMarkets(): Promise<void> {
   let reservedBetCents = 0;
 
   for (const candidate of candidates) {
-    if (activePositions.length >= MAX_POSITIONS) break;
+    // Always recompute from canonical state in case positions changed mid-scan.
+    const currentPositions = state.simulatorMode ? simPositions : openPositions;
+    if (currentPositions.length >= MAX_POSITIONS) break;
 
     // Safety guard — if bot was stopped between Phase 1 and Phase 3, abort
     if (!state.enabled) {
@@ -1894,6 +1910,11 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     const { market, ob, side, decision } = candidate;
     const marketCoin = coinLabel(market.ticker);
+    const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
+    if (coinCooldownRemainingMs > 0) {
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin_cooldown_${Math.ceil(coinCooldownRemainingMs / 1000)}s`);
+      continue;
+    }
 
     // Exchange-first entry guard (live mode only):
     // - hasPosition: true if local OR exchange state says this asset is already open
@@ -1909,22 +1930,26 @@ export async function scanMomentumMarkets(): Promise<void> {
       const hasPosition = hasOpenPosition(marketCoin) || gateStatus.openPosition;
       const entryLocked = gateStatus.entryLocked;
       const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
-      const dedupCooldownActive = lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS;
+      const closeDedupRemainingMs = getRemainingCooldownMs(assetEntryCooldownUntilMs, marketCoin);
+      const dedupCooldownActive =
+        (lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS) || closeDedupRemainingMs > 0;
       const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
       console.log(`[TRADE GATE] asset=${marketCoin}, openPosition=${hasPosition}, entryLocked=${entryLocked}`);
-      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s`);
+      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s, postExitCooldown=${Math.ceil(closeDedupRemainingMs / 1000)}s`);
       if (hasPosition || entryLocked || dedupCooldownActive) {
         const reason = hasPosition
           ? "has_open_position"
           : entryLocked
             ? "entry_in_progress"
-            : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
+            : closeDedupRemainingMs > 0
+              ? `post_exit_cooldown_${Math.ceil(closeDedupRemainingMs / 1000)}s`
+              : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
         continue;
       }
     } else {
       // Simulator keeps existing local-memory duplicate guard.
-      if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
+      if (currentPositions.some(p => coinLabel(p.marketId) === marketCoin)) {
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
         continue;
       }
