@@ -80,6 +80,7 @@ interface MomentumPosition {
   side: "YES" | "NO";
   entryPriceCents: number;
   contractCount: number;
+  contractCountFp?: string;
   enteredAt: number;        // ms
   lastSeenPriceCents: number;
   lastMovedAt: number;      // ms — last time price moved ≥1¢
@@ -88,6 +89,17 @@ interface MomentumPosition {
   sellRetries?: number;     // how many times a sell limit order was placed but rested unfilled
   pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
 }
+
+type MarketMeta = {
+  ticker: string;
+  title: string;
+  minutesRemaining: number;
+  closeTs: number;
+  status: string;
+  askCents: number;
+  bidCents: number;
+  fractionalTradingEnabled: boolean;
+};
 
 interface MomentumDecision {
   action: "BUY_YES" | "BUY_NO" | "SKIP";
@@ -228,6 +240,7 @@ const simPositions: MomentumPosition[] = [];
 const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") → cooldown-expiry ms
 const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
+const marketFractionalTradingEnabledByTicker = new Map<string, boolean>();
 let lastExchangeSyncMs = 0;
 let lastExchangeSyncOkAt = 0;
 let lastExchangeSyncError: string | null = null;
@@ -407,6 +420,29 @@ function coinLabel(ticker: string): string {
     if (ticker.toUpperCase().includes(coin)) return coin;
   }
   return ticker;
+}
+
+function parseFixedPointCountToContracts(value: string): number {
+  const trimmed = value.trim();
+  const parsed = Number.parseFloat(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return parsed;
+}
+
+function parseContractCount(raw: unknown): number {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  }
+  if (typeof raw === "string") {
+    return parseFixedPointCountToContracts(raw);
+  }
+  return 0;
+}
+
+function recordMarketCapabilities(markets: Array<{ ticker: string; fractionalTradingEnabled: boolean }>): void {
+  for (const market of markets) {
+    marketFractionalTradingEnabledByTicker.set(market.ticker, market.fractionalTradingEnabled);
+  }
 }
 
 function hasOpenPosition(asset: string): boolean {
@@ -737,6 +773,7 @@ type RawMarket = {
   status?: string;
   yes_ask_dollars?: number;
   yes_bid_dollars?: number;
+  fractional_trading_enabled?: boolean;
 };
 
 function rawToMarket(m: RawMarket, now: number) {
@@ -748,18 +785,27 @@ function rawToMarket(m: RawMarket, now: number) {
     ? Math.round(m.yes_ask_dollars * 100) : 0;
   const bidCents = m.yes_bid_dollars != null && m.yes_bid_dollars > 0
     ? Math.round(m.yes_bid_dollars * 100) : 0;
-  return { ticker: m.ticker!, title: m.title ?? m.ticker!, minutesRemaining, closeTs, status: m.status ?? "open", askCents, bidCents };
+  return {
+    ticker: m.ticker!,
+    title: m.title ?? m.ticker!,
+    minutesRemaining,
+    closeTs,
+    status: m.status ?? "open",
+    askCents,
+    bidCents,
+    fractionalTradingEnabled: m.fractional_trading_enabled === true,
+  };
 }
 
 // ── Market list cache — refreshed every 2 min to avoid rate-limiting Kalshi ──
 let _marketCache: {
-  markets: Array<{ ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number }>;
+  markets: Array<{ ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number; fractionalTradingEnabled: boolean }>;
   cachedAt: number;
 } | null = null;
 const MARKET_CACHE_TTL_MS = 2 * 60_000; // re-fetch market list every 2 minutes
 
 export async function fetchActiveMarkets(): Promise<Array<{
-  ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number;
+  ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number; fractionalTradingEnabled: boolean;
 }>> {
   const now = Date.now();
 
@@ -803,6 +849,7 @@ export async function fetchActiveMarkets(): Promise<Array<{
     .filter(m => m.ticker && (!m.status || m.status === "open" || m.status === "active"))
     .map(m => rawToMarket(m, now))
     .filter(m => m.minutesRemaining > (state.simulatorMode ? MIN_MINUTES_REMAINING_SIM : MIN_MINUTES_REMAINING));
+  recordMarketCapabilities(markets.map((m) => ({ ticker: m.ticker, fractionalTradingEnabled: m.fractionalTradingEnabled })));
 
   console.log(`[FETCH] Refresh complete — ${markets.length} eligible markets found`);
 
@@ -819,8 +866,37 @@ export async function fetchActiveMarkets(): Promise<Array<{
 
 // ─── Order placement ────────────────────────────────────────────────────────
 type BuyOrderResult =
-  | { ok: true; orderId: string; fillPrice: number; contractCount: number }
+  | { ok: true; orderId: string; fillPrice: number; contractCount: number; countFp?: string | null }
   | { ok: false; reason: "budget_too_small" | "order_failed"; message: string };
+
+type CountMode =
+  | { mode: "integer"; count: number }
+  | { mode: "fractional"; countFp: string };
+
+function toFixedPointCount(contracts: number): string {
+  return contracts.toFixed(2);
+}
+
+function deriveCountMode(
+  ticker: string,
+  side: "YES" | "NO",
+  entryPriceCents: number,
+  betCostCents: number,
+): CountMode | null {
+  if (entryPriceCents <= 0) return null;
+  const fractionalEnabled = marketFractionalTradingEnabledByTicker.get(ticker) === true;
+  if (fractionalEnabled) {
+    // Kalshi fixed-point contract units: support sub-contract entries, capped to 2 decimals.
+    const fractionalContracts = betCostCents / entryPriceCents;
+    if (fractionalContracts < 0.01) return null;
+    const floored = Math.floor(fractionalContracts * 100) / 100;
+    if (floored < 0.01) return null;
+    return { mode: "fractional", countFp: toFixedPointCount(floored) };
+  }
+  const integerContracts = Math.floor(betCostCents / entryPriceCents);
+  if (integerContracts < 1) return null;
+  return { mode: "integer", count: integerContracts };
+}
 
 async function placeBuyOrder(
   ticker: string,
@@ -829,45 +905,52 @@ async function placeBuyOrder(
   betCostCents: number,
 ): Promise<BuyOrderResult> {
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
-  // Kalshi uses count-based ordering (number of contracts), not cost-based.
-  // limitCents is always passed in YES-space.
-  // For NO orders: actual NO cost per contract = 100 − limitCents (NO-space conversion).
-  const noPriceCents      = 100 - limitCents;
-  const pricePerContract  = side === "NO" ? noPriceCents : limitCents;
-
-  // If budget < price, we can't afford even 1 contract — skip rather than overspend.
-  const contractCount = Math.floor(betCostCents / pricePerContract);
-  if (contractCount < 1) {
-    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
+  // limitCents is always YES-space.
+  // For NO, per-contract entry cost is NO-space = 100 - YES.
+  const noPriceCents = 100 - limitCents;
+  const pricePerContract = side === "NO" ? noPriceCents : limitCents;
+  const countMode = deriveCountMode(ticker, side, pricePerContract, betCostCents);
+  if (!countMode) {
+    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford minimum contract size, skipping entry`);
     return {
       ok: false,
       reason: "budget_too_small",
-      message: `budget ${betCostCents}¢ < single-contract price ${pricePerContract}¢`,
+      message: `budget ${betCostCents}¢ is below minimum size at ${pricePerContract}¢`,
     };
   }
 
   // ── Hard cap: absolute maximum is the budget itself (betCostCents). ────────
-  // $20 (2000¢) secondary ceiling in case betCostCents is somehow stale/wrong.
+  // Secondary ceiling protects against stale oversize config.
   const HARD_MAX_CENTS = 2000;
-  const maxContractsByHardCap = Math.max(1, Math.floor(HARD_MAX_CENTS / pricePerContract));
-  const safeCount = Math.min(contractCount, maxContractsByHardCap);
-  const estimatedCost = safeCount * pricePerContract;
+  const hardCapCost = Math.min(betCostCents, HARD_MAX_CENTS);
+  const requestedContracts = countMode.mode === "fractional"
+    ? Number.parseFloat(countMode.countFp)
+    : countMode.count;
+  const maxContractsByHardCap = countMode.mode === "fractional"
+    ? Math.floor((hardCapCost / pricePerContract) * 100) / 100
+    : Math.max(1, Math.floor(hardCapCost / pricePerContract));
+  const safeContracts = countMode.mode === "fractional"
+    ? Math.min(requestedContracts, maxContractsByHardCap)
+    : Math.min(requestedContracts, maxContractsByHardCap);
+  const safeCountFp = countMode.mode === "fractional" ? toFixedPointCount(safeContracts) : null;
+  const safeCount = countMode.mode === "integer" ? Math.max(1, Math.floor(safeContracts)) : null;
+  const estimatedCost = Math.round(safeContracts * pricePerContract);
 
   // ── [SIZE CHECK] log — emitted before EVERY live order ───────────────────
   const balanceCents = getBotState().balanceCents;
-  console.log(`[SIZE CHECK] requested=${betCostCents}¢ ($${(betCostCents/100).toFixed(2)}) capped=${estimatedCost}¢ ($${(estimatedCost/100).toFixed(2)}) balance=${balanceCents}¢ ($${(balanceCents/100).toFixed(2)}) contracts=${safeCount} price=${pricePerContract}¢`);
+  console.log(
+    `[SIZE CHECK] requested=${betCostCents}¢ ($${(betCostCents/100).toFixed(2)}) capped=${estimatedCost}¢ ($${(estimatedCost/100).toFixed(2)}) balance=${balanceCents}¢ ($${(balanceCents/100).toFixed(2)}) contracts=${countMode.mode === "fractional" ? safeCountFp : safeCount} price=${pricePerContract}¢ mode=${countMode.mode}`,
+  );
 
   // ── Hard fail-safe: estimatedCost must NEVER exceed betCostCents ──────────
-  // Math.floor guarantees this, but if any upstream change ever breaks that
-  // invariant this will catch it before money leaves the account.
   if (estimatedCost > betCostCents) {
     const msg = `[SIZE FAIL-SAFE] estimatedCost=${estimatedCost}¢ exceeds betCostCents=${betCostCents}¢ — ORDER BLOCKED`;
     console.error(msg);
     throw new Error(msg);
   }
 
-  if (safeCount < contractCount) {
-    console.error(`[HARD CAP] contractCount ${contractCount} → ${safeCount} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢)`);
+  if (safeContracts < requestedContracts) {
+    console.error(`[HARD CAP] contracts ${requestedContracts} → ${safeContracts} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢ mode:${countMode.mode})`);
   }
 
   const payload: Record<string, unknown> = {
@@ -876,7 +959,9 @@ async function placeBuyOrder(
     type:   "limit",
     action: "buy",
     side:   side.toLowerCase(),
-    count:  safeCount,
+    count: countMode.mode === "integer" ? safeCount : undefined,
+    count_fp: countMode.mode === "fractional" ? safeCountFp : undefined,
+    buy_max_cost: betCostCents,
     yes_price: side === "YES" ? limitCents    : undefined,
     no_price:  side === "NO"  ? noPriceCents  : undefined,  // must be in NO-space, not YES-space
   };
@@ -884,15 +969,31 @@ async function placeBuyOrder(
   console.log(`[ORDER PAYLOAD] ${JSON.stringify(payload)}`);
   try {
     const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
-      order?: { order_id?: string; yes_price?: number; no_price?: number; count?: number }
+      order?: { order_id?: string; yes_price?: number; no_price?: number; yes_price_dollars?: string; no_price_dollars?: string; count?: number; count_fp?: string; filled_count?: number; filled_count_fp?: string }
     };
     console.log(`[ORDER RESPONSE] ${JSON.stringify(resp)}`);
     const orderId   = resp?.order?.order_id ?? clientOrderId;
-    const rawPrice  = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
-    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pricePerContract; // fallback uses NO-space price for NO
-    const filled    = resp?.order?.count ?? contractCount;
-    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filled} cost:${betCostCents}¢`);
-    return { ok: true, orderId, fillPrice, contractCount: filled };
+    const rawPriceCents = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
+    const rawPriceDollars = side === "YES" ? resp?.order?.yes_price_dollars : resp?.order?.no_price_dollars;
+    const fillPrice = rawPriceCents > 0
+      ? Math.round(rawPriceCents * 100)
+      : rawPriceDollars
+        ? Math.round(Number.parseFloat(rawPriceDollars) * 100)
+        : pricePerContract;
+    const filledRaw: unknown = resp?.order?.filled_count_fp
+      ?? resp?.order?.count_fp
+      ?? resp?.order?.filled_count
+      ?? resp?.order?.count
+      ?? (countMode.mode === "fractional" ? safeCountFp : safeCount ?? 0);
+    const filled = parseContractCount(filledRaw);
+    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filledRaw} parsed:${filled} cost:${betCostCents}¢ mode:${countMode.mode}`);
+    return {
+      ok: true,
+      orderId,
+      fillPrice,
+      contractCount: filled,
+      countFp: typeof filledRaw === "string" ? filledRaw : (countMode.mode === "fractional" ? safeCountFp : null),
+    };
   } catch (err) {
     const message = String(err);
     console.error(`[ORDER FAILED] ${message}`);
@@ -954,7 +1055,8 @@ async function placeSellOrder(
     // Kalshi returns count=0 when a limit order is resting (unfilled).
     // If unfilled, cancel the resting order, keep the position alive, and return false.
     // The sell monitor will retry next tick with a more aggressive price.
-    const fillCount: number = resp?.order?.count ?? resp?.order?.filled_count ?? 0;
+    const fillCountRaw: unknown = resp?.order?.count_fp ?? resp?.order?.count ?? resp?.order?.filled_count ?? 0;
+    const fillCount: number = parseContractCount(fillCountRaw);
     const sellOrderId: string | undefined = resp?.order?.order_id;
     if (fillCount === 0) {
       pos.pendingSellOrderId = sellOrderId;
@@ -1088,16 +1190,16 @@ export async function executeMomentumTrade(
     };
   }
 
-  // If the limit order didn't fill immediately (resting order), contractCount comes back as 0.
-  // A 0-contract position can never be sold — it becomes a silent ghost that blocks the slot
+  // If the limit order didn't fill immediately (resting order), filled count comes back as 0.
+  // A 0-sized position can never be sold — it becomes a silent ghost that blocks the slot
   // and never records a loss. Cancel it immediately and bail out.
-  if (result.contractCount === 0) {
+  if (result.contractCount <= 0) {
     console.warn(`[ORDER UNFILLED] ${coinLabel(ticker)} ${side} — order resting on book (count:0), cancelling`);
     dbLog("warn", `[MOMENTUM] ORDER UNFILLED: ${coinLabel(ticker)} ${side} @${result.fillPrice}¢ — resting order, cancelled`);
     kalshiFetch("DELETE", `/portfolio/orders/${result.orderId}`).catch(() => {});
     return {
       status: "order_unfilled_cancelled",
-      reason: `order ${result.orderId} returned contractCount=0 and was cancelled`,
+      reason: `order ${result.orderId} returned filled count=0 and was cancelled`,
     };
   }
 
@@ -1140,6 +1242,7 @@ export async function executeMomentumTrade(
     entryPriceCents:   result.fillPrice,
     entrySlippageCents: Math.abs(result.fillPrice - expectedEntryPrice), // actual vs expected (correct space)
     contractCount: result.contractCount,
+    contractCountFp: result.countFp ?? undefined,
     enteredAt: Date.now(),
     lastSeenPriceCents: entryYesEquiv,  // YES-space so stale-tracker comparisons are valid
     lastMovedAt: Date.now(),
@@ -1159,7 +1262,7 @@ export async function executeMomentumTrade(
   dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
   return {
     status: "trade_opened",
-    reason: `trade opened with ${result.contractCount} contract(s) at ${result.fillPrice}¢`,
+    reason: `trade opened with ${result.countFp ?? result.contractCount} contract(s) at ${result.fillPrice}¢`,
   };
 }
 
@@ -1401,7 +1504,7 @@ async function runSellMonitor(): Promise<void> {
 
   // Purge any ghost positions with 0 contracts — these can never be sold and block slots
   for (const pos of [...openPositions]) {
-    if (pos.contractCount === 0) {
+    if (pos.contractCount <= 0) {
       const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
       if (idx >= 0) openPositions.splice(idx, 1);
       state.openTradeCount = openPositions.length;
