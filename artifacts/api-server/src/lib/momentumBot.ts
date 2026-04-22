@@ -422,6 +422,11 @@ function coinLabel(ticker: string): string {
   return ticker;
 }
 
+function isCryptoMomentumTicker(ticker: string): boolean {
+  const up = ticker.toUpperCase();
+  return ALLOWED_TICKER_PREFIXES.some((prefix) => up.startsWith(prefix));
+}
+
 function parseFixedPointCountToContracts(value: string): number {
   const trimmed = value.trim();
   const parsed = Number.parseFloat(trimmed);
@@ -884,7 +889,8 @@ function deriveCountMode(
   betCostCents: number,
 ): CountMode | null {
   if (entryPriceCents <= 0) return null;
-  const fractionalEnabled = marketFractionalTradingEnabledByTicker.get(ticker) === true;
+  const marketFlag = marketFractionalTradingEnabledByTicker.get(ticker) === true;
+  const fractionalEnabled = marketFlag || isCryptoMomentumTicker(ticker);
   if (fractionalEnabled) {
     // Kalshi fixed-point contract units: support sub-contract entries, capped to 2 decimals.
     const fractionalContracts = betCostCents / entryPriceCents;
