@@ -2,6 +2,7 @@ import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
 import { MomentumBot } from "@/components/momentum-bot";
 import { TradeTable } from "@/components/trade-table";
 import { Wallet, TrendingUp, TrendingDown, Trophy, Skull, Zap } from "lucide-react";
+import { customFetch } from "@workspace/api-client-react";
 
 const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
 
@@ -76,7 +77,7 @@ export function Dashboard() {
             <button
               onClick={async () => {
                 if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
-                await fetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
+                await customFetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
               }}
               className="px-2.5 py-1.5 rounded-lg border border-red-800/60 bg-red-950/40 text-[11px] font-semibold text-red-400 hover:bg-red-900/50 hover:text-red-300 transition-colors"
             >

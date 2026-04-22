@@ -4,6 +4,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Dashboard } from "@/pages/dashboard";
 import NotFound from "@/pages/not-found";
+import { setAuthTokenGetter } from "@workspace/api-client-react";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,6 +25,11 @@ function Router() {
 }
 
 function App() {
+  setAuthTokenGetter(() => {
+    const token = import.meta.env.VITE_BOT_ADMIN_TOKEN;
+    return token && token.trim().length > 0 ? token : null;
+  });
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>

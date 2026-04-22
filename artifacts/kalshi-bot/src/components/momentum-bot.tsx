@@ -3,6 +3,7 @@ import { useGetMomentumBotStatus, useSetMomentumBotAuto, getGetMomentumBotStatus
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 import type { PaperStats } from "@workspace/api-client-react";
 import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Clock, RefreshCw, X, Bell, BellOff, DollarSign } from "lucide-react";
+import { customFetch } from "@workspace/api-client-react";
 
 const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
 
@@ -174,8 +175,8 @@ export function MomentumBot() {
   const [debugData, setDebugData] = useState<DebugData | null>(null);
   const fetchDebug = useCallback(async () => {
     try {
-      const res = await fetch("/api/bot/momentum/debug");
-      if (res.ok) setDebugData(await res.json());
+      const data = await customFetch<DebugData>("/api/bot/momentum/debug", { responseType: "json" });
+      setDebugData(data);
     } catch { /* non-fatal */ }
   }, []);
 
@@ -189,8 +190,8 @@ export function MomentumBot() {
   const [livePerf, setLivePerf] = useState<LivePerfReport | null>(null);
   const fetchLivePerf = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE_URL}api/bot/momentum/live-performance`);
-      if (res.ok) setLivePerf(await res.json());
+      const data = await customFetch<LivePerfReport>(`${BASE_URL}api/bot/momentum/live-performance`, { responseType: "json" });
+      setLivePerf(data);
     } catch { /* non-fatal */ }
   }, []);
 
@@ -384,7 +385,7 @@ export function MomentumBot() {
 
   const { data: paperStats, refetch: refetchPaper } = useQuery<PaperStats>({
     queryKey: ["paper-stats"],
-    queryFn: () => fetch(`${BASE_URL}api/bot/momentum/paper-stats`).then(r => r.json()),
+    queryFn: () => customFetch<PaperStats>(`${BASE_URL}api/bot/momentum/paper-stats`, { responseType: "json" }),
     refetchInterval: 15_000,
     enabled: isSimMode,
   });
@@ -553,7 +554,7 @@ export function MomentumBot() {
               <button
                 onClick={async () => {
                   if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
-                  await fetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
+                  await customFetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
                 }}
                 className="rounded-md border border-red-800/60 bg-red-950/40 px-2 py-0.5 text-[10px] font-semibold text-red-400 hover:bg-red-900/50 hover:text-red-300 transition-colors"
               >
@@ -683,7 +684,7 @@ export function MomentumBot() {
                   <button
                     onClick={async () => {
                       if (!confirm("Reset lifetime sim scoreboard to 0?")) return;
-                      await fetch(`${BASE_URL}api/bot/momentum/reset-sim`, { method: "POST" });
+                      await customFetch(`${BASE_URL}api/bot/momentum/reset-sim`, { method: "POST" });
                     }}
                     className="mt-1.5 w-full text-[9px] text-slate-600 hover:text-slate-400 transition-colors text-center py-0.5"
                   >
@@ -872,7 +873,7 @@ export function MomentumBot() {
           <button
             onClick={async () => {
               if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
-              await fetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
+              await customFetch(`${BASE_URL}api/bot/momentum/reset-all`, { method: "POST" });
             }}
             className="mt-3 w-full rounded-lg border border-red-900/50 bg-red-950/30 py-2 text-xs text-red-400 hover:bg-red-900/40 hover:text-red-300 transition-colors text-center font-semibold"
           >
