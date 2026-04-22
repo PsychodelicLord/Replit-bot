@@ -17,7 +17,8 @@ const queryClient = new QueryClient({
 
 setAuthTokenGetter(() => {
   const token = import.meta.env.VITE_BOT_ADMIN_TOKEN;
-  return token && token.trim().length > 0 ? token : null;
+  const normalized = token?.trim();
+  return normalized && normalized.length > 0 ? normalized : null;
 });
 
 function Router() {

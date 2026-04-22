@@ -31,7 +31,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const BOT_ADMIN_TOKEN = process.env["BOT_ADMIN_TOKEN"] ?? "";
+const BOT_ADMIN_TOKEN = (process.env["BOT_ADMIN_TOKEN"] ?? "").trim();
 const isProductionDeployment = !!process.env["RAILWAY_ENVIRONMENT"];
 const PROTECTED_API_PREFIXES = [
   "/bot/start",
@@ -55,7 +55,7 @@ const requireBotAdminToken: RequestHandler = (req, res, next) => {
     res.status(500).json({ error: "Server auth misconfigured" });
     return;
   }
-  const auth = req.header("authorization") ?? "";
+  const auth = (req.header("authorization") ?? "").trim();
   const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   if (token !== BOT_ADMIN_TOKEN) {
     logger.warn({ path: pathOnly, method }, "Unauthorized bot control request blocked");
