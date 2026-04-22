@@ -29,7 +29,7 @@ import {
 } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
-import { eq, asc, desc } from "drizzle-orm";
+import { eq, asc, desc, gte } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
@@ -421,6 +421,59 @@ function getLastTradeAgoMs(asset: string): number | null {
 
 function setLastTradeNow(asset: string): void {
   lastTradeTimeByAssetMs.set(asset, Date.now());
+}
+
+async function restoreRestartEntryGuardsFromDb(): Promise<{ dedupRestored: number; cooldownRestored: number }> {
+  const now = Date.now();
+  const dedupCutoff = new Date(now - ENTRY_CHECK_COOLDOWN_MS);
+  const cooldownCutoff = new Date(now - COOLDOWN_MS);
+
+  try {
+    const [recentEntries, recentClosures] = await Promise.all([
+      db.select({
+        marketId: tradesTable.marketId,
+        createdAt: tradesTable.createdAt,
+      }).from(tradesTable).where(gte(tradesTable.createdAt, dedupCutoff)),
+      db.select({
+        marketId: tradesTable.marketId,
+        closedAt: tradesTable.closedAt,
+      }).from(tradesTable).where(gte(tradesTable.closedAt, cooldownCutoff)),
+    ]);
+
+    let dedupRestored = 0;
+    for (const trade of recentEntries) {
+      const asset = coinLabel(trade.marketId);
+      const createdMs = trade.createdAt.getTime();
+      const prev = lastTradeTimeByAssetMs.get(asset) ?? 0;
+      if (createdMs > prev) {
+        lastTradeTimeByAssetMs.set(asset, createdMs);
+        dedupRestored++;
+      }
+    }
+
+    let cooldownRestored = 0;
+    for (const trade of recentClosures) {
+      if (!trade.closedAt) continue;
+      const asset = coinLabel(trade.marketId);
+      const untilMs = trade.closedAt.getTime() + COOLDOWN_MS;
+      if (untilMs <= now) continue;
+      const prev = marketCooldowns.get(asset) ?? 0;
+      if (untilMs > prev) {
+        marketCooldowns.set(asset, untilMs);
+        const dedupUntil = trade.closedAt.getTime() + ENTRY_CHECK_COOLDOWN_MS;
+        const dedupPrev = assetEntryCooldownUntilMs.get(asset) ?? 0;
+        if (dedupUntil > dedupPrev) {
+          assetEntryCooldownUntilMs.set(asset, dedupUntil);
+        }
+        cooldownRestored++;
+      }
+    }
+
+    return { dedupRestored, cooldownRestored };
+  } catch (err) {
+    warn(`[RECOVERY] Failed to restore entry guards from DB: ${String(err)}`);
+    return { dedupRestored: 0, cooldownRestored: 0 };
+  }
 }
 
 function hasFreshExchangePositionSnapshot(): boolean {
@@ -2266,6 +2319,12 @@ export function startMomentumBot(): MomentumBotState {
           state.status = "IN_TRADE";
           log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
           dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
+        }
+        const guardRestore = await restoreRestartEntryGuardsFromDb();
+        if (guardRestore.dedupRestored > 0 || guardRestore.cooldownRestored > 0) {
+          log(
+            `🔄 [RECOVERY] Restored anti-stack guards from DB — dedup:${guardRestore.dedupRestored} cooldown:${guardRestore.cooldownRestored}`,
+          );
         }
         const exchangeSyncOk = await refreshLiveOpenPositionsFromExchange(true);
         if (!exchangeSyncOk) {
