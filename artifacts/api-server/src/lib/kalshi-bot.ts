@@ -999,7 +999,9 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
     const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
       positions?: Array<{ ticker_name?: string; position?: number; market_exposure?: number }>
     };
-    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0);
+    // Treat ANY non-zero exposure as an open position.
+    // Some APIs encode NO exposure as negative quantity; filtering only >0 can miss it.
+    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) !== 0);
 
     logger.info({ count: positions.length }, "syncPortfolioFromKalshi: Kalshi positions found");
 
@@ -1629,7 +1631,8 @@ async function refreshExchangeOpenAssets(force = false): Promise<boolean> {
     };
     exchangeOpenAssets.clear();
     for (const p of pr.positions ?? []) {
-      if ((p.position ?? 0) <= 0) continue;
+      // Non-zero exposure means this asset is still open (positive or negative).
+      if ((p.position ?? 0) === 0) continue;
       const ticker = p.ticker_name ?? "";
       if (!ticker) continue;
       exchangeOpenAssets.add(assetLabel(ticker));

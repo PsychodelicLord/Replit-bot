@@ -498,7 +498,7 @@ async function refreshLiveOpenPositionsFromExchange(force = false): Promise<bool
     for (const p of posResp.positions ?? []) {
       const qty = p.position ?? 0;
       const ticker = p.ticker_name ?? "";
-      if (!ticker || qty <= 0) continue;
+      if (!ticker || qty === 0) continue;
       freshAssets.add(coinLabel(ticker));
     }
     setExchangeOpenPositionsSnapshot(freshAssets);
