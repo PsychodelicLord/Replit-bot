@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, clearStuckPositions } from "../lib/kalshi-bot";
+import { getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, clearStuckPositions, refreshBalance } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport, getPaperStats } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
@@ -60,6 +60,13 @@ router.patch("/bot/config", async (req, res): Promise<void> => {
 });
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
+  // Keep dashboard balance fresh even when the legacy kalshi-bot loop is disabled.
+  // Non-fatal on API issues: we return the last known balance snapshot.
+  try {
+    await refreshBalance();
+  } catch {
+    // ignore: status endpoint should remain available even if balance refresh fails
+  }
   res.json(GetBotStatusResponse.parse(serializeMomentumState()));
 });
 

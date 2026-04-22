@@ -489,18 +489,58 @@ async function botLog(level: string, message: string, data?: unknown): Promise<v
 }
 
 // ─── Fetch and update account balance ────────────────────────────────────────
+function parseMoneyFieldToCents(value: unknown, forceCents: boolean): number | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) return null;
+    if (forceCents) return Math.round(value);
+    // If decimal is present, treat as dollars; integer values are treated as cents.
+    return Number.isInteger(value) ? Math.round(value) : Math.round(value * 100);
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return null;
+    if (forceCents) return Math.round(parsed);
+    return value.includes(".") ? Math.round(parsed * 100) : Math.round(parsed);
+  }
+  return null;
+}
+
 export async function refreshBalance(): Promise<void> {
   try {
     const resp = await kalshiFetch("GET", "/portfolio/balance");
     console.log(`[BALANCE RAW] ${JSON.stringify(resp)}`);
-    // Kalshi returns { balance: <cents as integer>, portfolio_value: <cents>, ... }
-    const r = resp as { balance?: number; balance_cents?: number };
-    const rawCents = r?.balance ?? r?.balance_cents ?? 0;
-    // If value looks like dollars (< 20 and non-zero), convert; otherwise treat as cents
-    state.balanceCents = rawCents > 0 && rawCents < 20 ? Math.round(rawCents * 100) : rawCents;
+    const r = resp as Record<string, unknown>;
+
+    // Prefer explicit cents fields first; fallback to generic fields.
+    const candidates: Array<{ key: string; forceCents: boolean }> = [
+      { key: "balance_cents", forceCents: true },
+      { key: "available_balance_cents", forceCents: true },
+      { key: "cash_balance_cents", forceCents: true },
+      { key: "balance", forceCents: false },
+      { key: "available_balance", forceCents: false },
+      { key: "cash_balance", forceCents: false },
+    ];
+
+    let parsedCents: number | null = null;
+    let usedKey = "none";
+    for (const candidate of candidates) {
+      parsedCents = parseMoneyFieldToCents(r[candidate.key], candidate.forceCents);
+      if (parsedCents !== null) {
+        usedKey = candidate.key;
+        break;
+      }
+    }
+
+    if (parsedCents === null) {
+      throw new Error("balance response missing parseable balance field");
+    }
+
+    state.balanceCents = parsedCents;
     lastBalanceRefreshOkAt = Date.now();
     lastBalanceRefreshError = null;
-    console.log(`[BALANCE PARSED] raw:${rawCents} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`);
+    console.log(
+      `[BALANCE PARSED] key:${usedKey} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`,
+    );
   } catch (err) {
     console.log(`[BALANCE ERROR] ${String(err)}`);
     lastBalanceRefreshError = String(err);
