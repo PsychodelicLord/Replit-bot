@@ -1176,10 +1176,18 @@ function enterSimPosition(
 ): void {
   const limitCents    = Math.min(askCents, bidCents + 1);
   const budget        = betCents ?? state.betCostCents;
-  // Cap contract count: use at least MIN_PRICE_FOR_CONTRACTS as the divisor.
-  // Without this cap, a 5¢-priced entry with 100¢ bet = 20 contracts,
-  // so a -3¢ SL hit becomes -60¢ total. At 20¢ baseline, max loss = -3¢ × 5 = -15¢.
-  const contractCount = budget / Math.max(limitCents, MIN_PRICE_FOR_CONTRACTS);
+  const entryPriceCents = side === "NO" ? (100 - limitCents) : limitCents;
+  // Mirror live sizing in paper mode: integer contracts and the same min-price
+  // denominator guard so sim P&L/auto-sell behavior stays comparable.
+  const cappedPricePerContract = Math.max(entryPriceCents, MIN_PRICE_FOR_CONTRACTS);
+  const contractCount = Math.floor(budget / cappedPricePerContract);
+  if (contractCount < 1) {
+    log(
+      `🎮 [SIM] SKIP ${side} ${coinLabel(ticker)} — budget:${budget}¢ < 1 contract @${cappedPricePerContract}¢`,
+    );
+    dbLog("warn", `[SIM] SKIP ${side} ${coinLabel(ticker)} budget:${budget}¢ price:${cappedPricePerContract}¢`);
+    return;
+  }
   const tradeId       = -(Date.now());
 
   const pos: MomentumPosition = {
@@ -1187,9 +1195,10 @@ function enterSimPosition(
     marketId: ticker,
     marketTitle: title,
     side,
-    entryPriceCents: limitCents,
+    entryPriceCents,
     contractCount,
     enteredAt: Date.now(),
+    // Keep this in YES-space for stale movement tracking.
     lastSeenPriceCents: limitCents,
     lastMovedAt: Date.now(),
     buyOrderId: null,
@@ -1200,15 +1209,13 @@ function enterSimPosition(
   state.simOpenTradeCount = simPositions.length;
   state.status = "IN_TRADE";
 
-  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢ | contracts:${contractCount.toFixed(3)} cost:${budget}¢`);
+  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${entryPriceCents}¢ | contracts:${contractCount} cost:${budget}¢`);
   dbLog("info", `[SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢`);
 }
 
 /** Close a paper position at current price — no Kalshi API call */
 function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason: string): void {
-  const rawGain  = pos.side === "YES"
-    ? exitPriceCents - pos.entryPriceCents
-    : pos.entryPriceCents - exitPriceCents;
+  const rawGain  = exitPriceCents - pos.entryPriceCents;
   const pnlCents = Math.round(rawGain * pos.contractCount);
 
   const idx = simPositions.findIndex(p => p.tradeId === pos.tradeId);
@@ -1363,23 +1370,18 @@ async function monitorSimPositions(): Promise<void> {
       }
     } catch { /* keep last known */ }
 
-    // Trigger checks must use executable prices (same side as real sell path),
-    // not midpoint snapshots, otherwise SL can be missed in wide spreads.
+    // Trigger checks use executable prices in side-space:
+    // YES exits at YES bid; NO exits at NO bid (100 - YES ask).
     const executableExitPrice = pos.side === "YES"
       ? (currentBid > 0 ? currentBid : currentMid)
-      : (currentAsk > 0 ? currentAsk : currentMid);
-    const gain = pos.side === "YES"
-      ? executableExitPrice - pos.entryPriceCents
-      : pos.entryPriceCents - executableExitPrice;
+      : (currentAsk > 0 ? Math.max(1, 100 - currentAsk) : Math.max(1, 100 - currentMid));
+    const gain = executableExitPrice - pos.entryPriceCents;
 
     if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) pos.lastMovedAt = now;
     pos.lastSeenPriceCents = currentMid;
 
-    // Exit price mirrors placeSellOrder: sell YES at bid, sell NO at ask
-    // (selling NO contracts = buying back YES, so you pay the ask to close)
-    const realisticExitPrice = pos.side === "YES"
-      ? (currentBid > 0 ? currentBid : currentMid)
-      : (currentAsk > 0 ? currentAsk : currentMid);
+    // Exit price mirrors executable side-space exits used above.
+    const realisticExitPrice = executableExitPrice;
 
     const simMinsLeft = pos.closeTs > 0 ? (pos.closeTs - now) / 60_000 : 999;
     if      (simMinsLeft < 2)                        toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
