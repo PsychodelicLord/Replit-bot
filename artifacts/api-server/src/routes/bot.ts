@@ -178,21 +178,25 @@ router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
 // ─── Momentum Bot routes ────────────────────────────────────────────────────
 router.get("/bot/momentum/status", (_req, res): void => {
   const state = getMomentumBotState();
+  const toMomentumStatus = (allTime?: { allTimeWins?: number; allTimeLosses?: number; allTimePnlCents?: number }) =>
+    GetMomentumBotStatusResponse.parse({
+      ...state,
+      allTimeWins: allTime?.allTimeWins ?? 0,
+      allTimeLosses: allTime?.allTimeLosses ?? 0,
+      allTimePnlCents: allTime?.allTimePnlCents ?? 0,
+    });
+
   db.select({
     allTimeWins:    sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} > 0) as int)`,
     allTimeLosses:  sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} < 0) as int)`,
     allTimePnlCents: sql<number>`cast(coalesce(sum(${tradesTable.pnlCents}), 0) as int)`,
   }).from(tradesTable).where(sql`${tradesTable.status} = 'closed'`)
     .then(([row]) => {
-      res.json(GetMomentumBotStatusResponse.parse({
-        ...state,
-        allTimeWins:     row?.allTimeWins     ?? 0,
-        allTimeLosses:   row?.allTimeLosses   ?? 0,
-        allTimePnlCents: row?.allTimePnlCents ?? 0,
-      }));
+      res.json(toMomentumStatus(row));
     })
     .catch(() => {
-      res.json(GetMomentumBotStatusResponse.parse(state));
+      // Keep endpoint stable even if DB aggregate query fails.
+      res.json(toMomentumStatus());
     });
 });
 
