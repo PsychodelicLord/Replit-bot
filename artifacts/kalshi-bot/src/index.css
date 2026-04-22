@@ -217,45 +217,6 @@
   perspective: 400px;
 }
 
-.coin-face {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  backface-visibility: hidden;
-  background: radial-gradient(circle at 35% 35%, rgba(255,255,255,0.18), transparent 70%),
-    conic-gradient(from 0deg, #334155 0%, #1e293b 40%, #334155 60%, #1e293b 100%);
-  border: 2px solid rgba(255,255,255,0.12);
-  box-shadow: 0 0 20px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
-}
-
-.coin-back {
-  transform: rotateY(180deg);
-}
-
-.coin-label {
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-}
-
-.coin-label-yes { color: #34d399; text-shadow: 0 0 8px rgba(52,211,153,0.6); }
-.coin-label-no  { color: #fb923c; text-shadow: 0 0 8px rgba(251,146,60,0.6); }
-
-@keyframes coinFlip {
-  0%   { transform: rotateY(0deg); }
-  100% { transform: rotateY(1440deg); }
-}
-
-.coin-flipping {
-  animation: coinFlip 1.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-}
-
-.coin-yes .coin-face { border-color: rgba(52,211,153,0.4); box-shadow: 0 0 20px rgba(52,211,153,0.2), inset 0 1px 0 rgba(255,255,255,0.1); }
-.coin-no  .coin-face { border-color: rgba(251,146,60,0.4);  box-shadow: 0 0 20px rgba(251,146,60,0.2),  inset 0 1px 0 rgba(255,255,255,0.1); }
-
 /* Scanline overlay for terminal feel */
 body::before {
   content: '';
