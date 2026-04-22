@@ -1,7 +1,6 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, clearStuckPositions } from "../lib/kalshi-bot";
+import { getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport, getPaperStats } from "../lib/momentumBot";
-import { getOutcomeBotState, startOutcomeBot, stopOutcomeBot, updateOutcomeBotConfig, resetOutcomeStats, getOutcomeMarketStates, getOutcomeOpenPositions } from "../lib/outcomeBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
 import {
@@ -16,12 +15,9 @@ import {
   ListTradesResponse,
   ListTradesQueryParams,
   GetTradeStatsResponse,
-  ManualTradeBody,
   ManualTradeResponse,
-  MomentumBotAutoBody,
-  MomentumBotStatus,
-  OutcomeBotToggleBody,
-  OutcomeBotStatus,
+  SetMomentumBotAutoBody,
+  GetMomentumBotStatusResponse,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -29,21 +25,22 @@ const router: IRouter = Router();
 /** Returns true only when running on Railway (the live deployment).
  *  Prevents the local dev server from accidentally placing real trades. */
 function isProductionDeployment(): boolean {
-  return !!(process.env.RAILWAY_ENVIRONMENT || process.env.COINFLIP_AUTO_START === "true");
+  return !!process.env.RAILWAY_ENVIRONMENT;
 }
 
-function serializeState(s: ReturnType<typeof getBotState>) {
+function serializeMomentumState(s = getMomentumBotState()) {
+  const core = getBotState();
   return {
-    running: s.running,
-    startedAt: s.startedAt,
-    marketsScanned: s.marketsScanned,
-    tradesAttempted: s.tradesAttempted,
-    tradesSucceeded: s.tradesSucceeded,
-    totalPnlCents: s.totalPnlCents,
-    dailyPnlCents: s.dailyPnlCents,
-    openPositionCount: s.openPositionCount,
-    balanceCents: s.balanceCents,
-    stoppedReason: s.stoppedReason,
+    running: s.enabled,
+    startedAt: null,
+    marketsScanned: 0,
+    tradesAttempted: 0,
+    tradesSucceeded: 0,
+    totalPnlCents: s.totalPnlCents ?? 0,
+    dailyPnlCents: s.sessionPnlCents ?? 0,
+    openPositionCount: s.simulatorMode ? (s.simOpenTradeCount ?? 0) : s.openTradeCount,
+    balanceCents: core.balanceCents,
+    stoppedReason: s.stopReason ?? null,
   };
 }
 
@@ -63,21 +60,22 @@ router.patch("/bot/config", async (req, res): Promise<void> => {
 });
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
-  res.json(GetBotStatusResponse.parse(serializeState(getBotState())));
+  res.json(GetBotStatusResponse.parse(serializeMomentumState()));
 });
 
 router.post("/bot/start", async (_req, res): Promise<void> => {
-  if (!isProductionDeployment()) {
+  const momentum = getMomentumBotState();
+  if (!isProductionDeployment() && !momentum.simulatorMode) {
     res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
     return;
   }
-  const s = await startBot();
-  res.json(StartBotResponse.parse(serializeState(s)));
+  const s = startMomentumBot();
+  res.json(StartBotResponse.parse(serializeMomentumState(s)));
 });
 
 router.post("/bot/stop", async (_req, res): Promise<void> => {
-  const s = await stopBot();
-  res.json(StopBotResponse.parse(serializeState(s)));
+  const s = stopMomentumBot("Stopped via /api/bot/stop");
+  res.json(StopBotResponse.parse(serializeMomentumState(s)));
 });
 
 router.get("/logs", async (req, res): Promise<void> => {
@@ -126,20 +124,23 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
 
   const totalTrades = all.length;
   const openTrades = all.filter((t) => t.status === "open").length;
-  const closedTrades = all.filter((t) => t.status === "closed");
-  const wins = closedTrades.filter((t) => (t.pnlCents ?? 0) > 0);
-  const losses = closedTrades.filter((t) => (t.pnlCents ?? 0) < 0);
+  // Count every settled trade record that has a concrete P&L, not only status==="closed".
+  // This prevents dashboard bias when losses are recorded under other final statuses
+  // (e.g. expired/cancelled/manual reconciliation rows).
+  const settledTradesRows = all.filter((t) => t.status !== "open" && t.pnlCents != null);
+  const wins = settledTradesRows.filter((t) => (t.pnlCents ?? 0) > 0);
+  const losses = settledTradesRows.filter((t) => (t.pnlCents ?? 0) < 0);
   const winningTrades = wins.length;
   const losingTrades = losses.length;
-  const totalPnlCents = closedTrades.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
+  const totalPnlCents = settledTradesRows.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
   const totalWinCents = wins.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
   const totalLossCents = Math.abs(losses.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0));
   const todayPnlCents = all
-    .filter((t) => t.closedAt && new Date(t.closedAt) >= todayStart && t.pnlCents != null)
+    .filter((t) => t.status !== "open" && t.closedAt && new Date(t.closedAt) >= todayStart && t.pnlCents != null)
     .reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
-  const settledTrades = winningTrades + losingTrades;
-  const winRate = settledTrades > 0 ? winningTrades / settledTrades : 0;
-  const avgPnlCents = settledTrades > 0 ? totalPnlCents / settledTrades : 0;
+  const settledCount = winningTrades + losingTrades;
+  const winRate = settledCount > 0 ? winningTrades / settledCount : 0;
+  const avgPnlCents = settledCount > 0 ? totalPnlCents / settledCount : 0;
 
   res.json(GetTradeStatsResponse.parse({
     totalTrades,
@@ -156,14 +157,10 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
 });
 
 router.post("/bot/manual-trade", async (req, res): Promise<void> => {
-  const parsed = ManualTradeBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-  const { ticker, side, limitCents, quantity } = parsed.data;
-  const result = await manualTrade(ticker, side, limitCents, quantity ?? 1);
-  res.json(ManualTradeResponse.parse(result));
+  res.status(410).json(ManualTradeResponse.parse({
+    success: false,
+    message: "Manual trade path disabled. ACTIVE TRADE PATHS: 1 (signal -> gate -> execute -> update state).",
+  }));
 });
 
 router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
@@ -180,7 +177,7 @@ router.get("/bot/momentum/status", (_req, res): void => {
     allTimePnlCents: sql<number>`cast(coalesce(sum(${tradesTable.pnlCents}), 0) as int)`,
   }).from(tradesTable).where(sql`${tradesTable.status} = 'closed'`)
     .then(([row]) => {
-      res.json(MomentumBotStatus.parse({
+      res.json(GetMomentumBotStatusResponse.parse({
         ...state,
         allTimeWins:     row?.allTimeWins     ?? 0,
         allTimeLosses:   row?.allTimeLosses   ?? 0,
@@ -188,7 +185,7 @@ router.get("/bot/momentum/status", (_req, res): void => {
       }));
     })
     .catch(() => {
-      res.json(MomentumBotStatus.parse(state));
+      res.json(GetMomentumBotStatusResponse.parse(state));
     });
 });
 
@@ -202,7 +199,7 @@ router.get("/bot/momentum/debug", async (_req, res): Promise<void> => {
 });
 
 router.post("/bot/momentum/reset-sim", (_req, res): void => {
-  res.json(MomentumBotStatus.parse(resetSimStats()));
+  res.json(GetMomentumBotStatusResponse.parse(resetSimStats()));
 });
 
 router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
@@ -228,7 +225,7 @@ router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
 
 router.post("/bot/momentum/reset-all", async (_req, res): Promise<void> => {
   const state = await resetAllStats();
-  res.json(MomentumBotStatus.parse(state));
+  res.json(GetMomentumBotStatusResponse.parse(state));
 });
 
 // Live execution quality report — purely observational, real trades only
@@ -238,7 +235,7 @@ router.get("/bot/momentum/live-performance", (_req, res): void => {
 
 router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
   try {
-    const parsed = MomentumBotAutoBody.safeParse(req.body);
+    const parsed = SetMomentumBotAutoBody.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
 
     const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents, allowedCoins } = parsed.data;
@@ -267,52 +264,11 @@ router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
     });
 
     const state = enabled ? startMomentumBot() : stopMomentumBot();
-    res.json(MomentumBotStatus.parse(state));
+    res.json(GetMomentumBotStatusResponse.parse(state));
   } catch (err) {
     console.error("[momentum/auto] unexpected error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
   }
-});
-
-// ─── Outcome Bot routes ──────────────────────────────────────────────────────
-
-router.get("/bot/outcome/status", (_req, res): void => {
-  const s = getOutcomeBotState();
-  const positions   = getOutcomeOpenPositions();
-  const mktStates   = getOutcomeMarketStates();
-  try {
-    res.json(OutcomeBotStatus.parse({ ...s, openPositions: positions, marketStates: mktStates }));
-  } catch {
-    res.json({ ...s, openPositions: positions, marketStates: mktStates });
-  }
-});
-
-router.post("/bot/outcome/toggle", (req, res): void => {
-  try {
-    const parsed = OutcomeBotToggleBody.safeParse(req.body);
-    if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
-
-    const { enabled, betCostCents } = parsed.data;
-    if (betCostCents !== undefined) updateOutcomeBotConfig({ betCostCents });
-
-    const s = enabled ? startOutcomeBot() : stopOutcomeBot();
-    res.json(OutcomeBotStatus.parse({ ...s, openPositions: getOutcomeOpenPositions(), marketStates: getOutcomeMarketStates() }));
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
-  }
-});
-
-router.post("/bot/outcome/reset", (_req, res): void => {
-  res.json(resetOutcomeStats());
-});
-
-router.get("/bot/outcome/emergency-stop", (req, res): void => {
-  if (req.query.confirm !== "yes") {
-    res.status(400).json({ error: "Add ?confirm=yes to confirm", hint: "/api/bot/outcome/emergency-stop?confirm=yes" });
-    return;
-  }
-  const s = stopOutcomeBot("Emergency stop via URL");
-  res.json({ ok: true, enabled: s.enabled, status: s.status });
 });
 
 // Emergency stop — requires ?confirm=yes to prevent accidental triggers from browser history/refresh

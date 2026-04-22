@@ -584,30 +584,6 @@ async function checkSafetyLimits(): Promise<boolean> {
   return true;
 }
 
-// Lightweight check for coin flip — same limits but never stops the main bot
-async function checkSafetyLimitsPassive(): Promise<{ ok: boolean; reason?: string }> {
-  const balanceCheck = await assertSafeToEnterTrade({
-    stopBotOnFloorHit: false,
-    context: "coin-flip gate",
-  });
-  if (!balanceCheck.ok) return balanceCheck;
-
-  await refreshDailyPnl();
-
-  const { balanceFloorCents, dailyProfitTargetCents, dailyLossLimitCents } = botConfig;
-
-  if (balanceFloorCents > 0 && state.balanceCents <= balanceFloorCents) {
-    return { ok: false, reason: `Balance floor hit (${formatUsd(state.balanceCents)} ≤ ${formatUsd(balanceFloorCents)})` };
-  }
-  if (dailyProfitTargetCents > 0 && state.dailyPnlCents >= dailyProfitTargetCents) {
-    return { ok: false, reason: `Daily profit target already reached` };
-  }
-  if (dailyLossLimitCents > 0 && state.dailyPnlCents <= -dailyLossLimitCents) {
-    return { ok: false, reason: `Daily loss limit hit` };
-  }
-  return { ok: true };
-}
-
 // ─── Market types ────────────────────────────────────────────────────────────
 interface KalshiMarket {
   ticker: string;
@@ -957,9 +933,11 @@ async function executeSell(
     ? (sellResp?.order?.yes_price ?? 0)
     : (sellResp?.order?.no_price  ?? 0);
   const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
-  const gross     = fillPrice - pos.entryPriceCents;
-  const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-  const netPnl    = gross - fee;
+  // P&L is per-contract delta multiplied by contract count.
+  const grossPerContract = fillPrice - pos.entryPriceCents;
+  const grossTotal       = grossPerContract * pos.contractCount;
+  const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+  const netPnl           = grossTotal - fee;
 
   const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
   if (idx >= 0) openPositions.splice(idx, 1);
@@ -1021,7 +999,9 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
     const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
       positions?: Array<{ ticker_name?: string; position?: number; market_exposure?: number }>
     };
-    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0);
+    // Treat ANY non-zero exposure as an open position.
+    // Some APIs encode NO exposure as negative quantity; filtering only >0 can miss it.
+    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) !== 0);
 
     logger.info({ count: positions.length }, "syncPortfolioFromKalshi: Kalshi positions found");
 
@@ -1159,9 +1139,10 @@ export async function retryOpenPositions(): Promise<void> {
               // Sell confirmed filled — commit removal
               const rawPrice  = pos.side === "YES" ? (or.order?.yes_price ?? 0) : (or.order?.no_price ?? 0);
               const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pos.entryPriceCents;
-              const gross     = fillPrice - pos.entryPriceCents;
-              const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-              const netPnl    = gross - fee;
+              const grossPerContract = fillPrice - pos.entryPriceCents;
+              const grossTotal       = grossPerContract * pos.contractCount;
+              const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+              const netPnl           = grossTotal - fee;
               const idxP = openPositions.findIndex(p => p.tradeId === pos.tradeId);
               if (idxP >= 0) openPositions.splice(idxP, 1);
               openMarkets.delete(pos.marketId);
@@ -1242,9 +1223,10 @@ export async function retryOpenPositions(): Promise<void> {
                 const rawFp = pos.side === "YES" ? (sellFill.yes_price ?? 0) : (sellFill.no_price ?? 0);
                 if (rawFp > 0) {
                   sellPriceCents = Math.round(rawFp * 100);
-                  const gross    = sellPriceCents - pos.entryPriceCents;
-                  const fee      = Math.floor(botConfig.feeRate * Math.max(0, gross));
-                  pnlCents       = gross - fee;
+                  const grossPerContract = sellPriceCents - pos.entryPriceCents;
+                  const grossTotal       = grossPerContract * pos.contractCount;
+                  const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+                  pnlCents               = grossTotal - fee;
                 }
               }
             } catch (_) { /* fill lookup failed — use zero */ }
@@ -1285,8 +1267,11 @@ export async function retryOpenPositions(): Promise<void> {
           const settled    = m?.status === "settled" || m?.status === "finalized";
           const ourSideWon = settled && m?.result?.toLowerCase() === pos.side.toLowerCase();
           const pnlCents   = ourSideWon
-            ? (() => { const g = 100 - pos.entryPriceCents; return g - Math.floor(botConfig.feeRate * g); })()
-            : -pos.entryPriceCents;
+            ? (() => {
+                const grossTotal = (100 - pos.entryPriceCents) * pos.contractCount;
+                return grossTotal - Math.floor(botConfig.feeRate * grossTotal);
+              })()
+            : -(pos.entryPriceCents * pos.contractCount);
 
           const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
           if (idx >= 0) openPositions.splice(idx, 1);
@@ -1329,9 +1314,12 @@ export async function retryOpenPositions(): Promise<void> {
           continue;
         }
 
-        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL)
-        if (currentBid > 0 && grossProfit <= -3) {
-          await executeSell(pos, currentBid, `stop-loss (${grossProfit}¢)`);
+        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL).
+        // If bid is 0, treat executable exit as 1¢ to avoid getting stuck unprotected.
+        const slExecutablePrice = currentBid > 0 ? currentBid : 1;
+        const slGrossProfit = slExecutablePrice - pos.entryPriceCents;
+        if (slGrossProfit <= -3) {
+          await executeSell(pos, slExecutablePrice, `stop-loss (${slGrossProfit}¢)`);
           continue;
         }
 
@@ -1376,6 +1364,11 @@ export function getBotState(): BotState {
 }
 
 export async function startBot(): Promise<BotState> {
+  // Legacy bot pipeline is intentionally retired.
+  // Single active execution path is momentumBot: signal -> gate -> execute -> update state.
+  logger.warn("legacy startBot() invocation blocked; use momentum bot controls");
+  return getBotState();
+
   if (state.running) return getBotState();
   if (!API_KEY_ID || !PRIVATE_KEY_PEM) {
     throw new Error("KALSHI_API_KEY and KALSHI_PRIVATE_KEY must be set");
@@ -1484,17 +1477,33 @@ export async function manualTrade(
   limitCents: number,
   quantity: number,
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
+  logger.warn({ ticker, side, limitCents, quantity }, "legacy manualTrade() invocation blocked");
+  return {
+    success: false,
+    message: "Manual trade path disabled. ACTIVE TRADE PATHS: 1 (signal -> gate -> execute -> update state).",
+  };
+
+  let gateLocked = false;
   try {
+    const lock = await acquireTradeEntryGate(ticker, "manual_trade");
+    if (!lock.allowed) {
+      return { success: false, message: lock.reason ?? `Trade gate blocked ${ticker}` };
+    }
+    gateLocked = true;
     const balanceGate = await assertSafeToEnterTrade({
       stopBotOnFloorHit: true,
       context: `manual trade ${ticker}`,
     });
     if (!balanceGate.ok) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_balance_blocked");
       return { success: false, message: balanceGate.reason ?? "Balance safety gate blocked manual trade" };
     }
 
     const cooldownRemainingMs = getMarketReentryCooldownRemainingMs(ticker);
     if (cooldownRemainingMs > 0) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_cooldown_blocked");
       return {
         success: false,
         message: `Cooldown active for ${ticker} (${Math.ceil(cooldownRemainingMs / 1000)}s remaining)`,
@@ -1503,6 +1512,8 @@ export async function manualTrade(
 
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     if (!resp.market) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_market_not_found");
       return { success: false, message: `Market not found: ${ticker}` };
     }
     const { title, close_time } = resp.market;
@@ -1553,291 +1564,10 @@ export async function manualTrade(
     const msg = String(err);
     await botLog("error", `🎯 Manual trade failed on ${ticker}: ${msg}`);
     return { success: false, message: msg };
-  }
-}
-
-// ─── Coin-flip auto mode ──────────────────────────────────────────────────────
-interface CoinFlipAutoState {
-  enabled: boolean;
-  intervalSecs: number;
-  nextFlipAt: number | null;
-  lastResult: { success: boolean; message: string; side?: "YES" | "NO" } | null;
-}
-
-const coinFlipAuto: CoinFlipAutoState = {
-  enabled: false,
-  intervalSecs: 900,
-  nextFlipAt: null,
-  lastResult: null,
-};
-
-let coinFlipTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Returns ms until 30s into the next :00/:15/:30/:45 UTC cycle boundary. */
-function msToNextCycleStart(): number {
-  const now = Date.now();
-  const CYCLE_MS = 15 * 60_000;
-  const remainder = now % CYCLE_MS;
-  const msToNextBoundary = CYCLE_MS - remainder;
-  // Fire 30s after the boundary — Kalshi has new markets live by then
-  return msToNextBoundary + 30_000;
-}
-
-function scheduleCoinFlip(retryDelaySecs?: number) {
-  if (coinFlipTimer) clearTimeout(coinFlipTimer);
-  if (!coinFlipAuto.enabled) return;
-
-  let delay: number;
-  if (retryDelaySecs !== undefined) {
-    delay = retryDelaySecs * 1000;
-  } else {
-    // If we're early enough in the current cycle, fire right away (2s grace)
-    const CYCLE_MS = 15 * 60_000;
-    const minsUntilCycleEnd = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
-    if (minsUntilCycleEnd > botConfig.minMinutesRemaining + 1) {
-      delay = 2_000; // fire in 2 seconds
-    } else {
-      delay = msToNextCycleStart(); // wait for the next cycle
-    }
-  }
-
-  coinFlipAuto.nextFlipAt = Date.now() + delay;
-  coinFlipTimer = setTimeout(async () => {
-    if (!coinFlipAuto.enabled) return;
-    try {
-      const result = await coinFlipTrade();
-      coinFlipAuto.lastResult = { success: result.success, message: result.message, side: result.side };
-      await botLog("info", `🪙 Auto-flip: ${result.message}`);
-      if (!result.success && result.message.includes("No markets")) {
-        // Retry mid-cycle if there's still enough time, otherwise wait for next cycle
-        const CYCLE_MS = 15 * 60_000;
-        const minsLeft = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
-        if (minsLeft > botConfig.minMinutesRemaining + 2) {
-          scheduleCoinFlip(30); // retry in 30s — still enough time
-        } else {
-          scheduleCoinFlip(); // too late in cycle — wait for next cycle start
-        }
-      } else {
-        scheduleCoinFlip();
-      }
-    } catch (err) {
-      coinFlipAuto.lastResult = { success: false, message: String(err) };
-      scheduleCoinFlip();
-    }
-  }, delay);
-}
-
-export function startCoinFlipAuto(intervalSecs: number): CoinFlipAutoState {
-  coinFlipAuto.enabled = true;
-  coinFlipAuto.intervalSecs = intervalSecs;
-  scheduleCoinFlip();
-  return { ...coinFlipAuto };
-}
-
-export function stopCoinFlipAuto(): CoinFlipAutoState {
-  coinFlipAuto.enabled = false;
-  coinFlipAuto.nextFlipAt = null;
-  if (coinFlipTimer) { clearTimeout(coinFlipTimer); coinFlipTimer = null; }
-  return { ...coinFlipAuto };
-}
-
-export function getCoinFlipAutoState(): CoinFlipAutoState {
-  return { ...coinFlipAuto };
-}
-
-// ─── Coin-flip trade ──────────────────────────────────────────────────────────
-export interface CoinFlipResult {
-  success: boolean;
-  message: string;
-  ticker?: string;
-  title?: string;
-  side?: "YES" | "NO";
-  priceCents?: number;
-  tradeId?: number;
-}
-
-export async function coinFlipTrade(): Promise<CoinFlipResult> {
-  if (tradeMutex) {
-    return { success: false, message: "Another trade is in progress — coin flip blocked." };
-  }
-  tradeMutex = true;
-  try {
-    // Check safety limits without stopping the main bot
-    const safety = await checkSafetyLimitsPassive();
-    if (!safety.ok) {
-      return { success: false, message: `Coin flip blocked — ${safety.reason}` };
-    }
-
-    // Respect max open positions — try DB for accuracy, fall back to in-memory if DB is down
-    let effectiveOpen = openMarkets.size;
-    let occupiedTickers = new Set<string>([...openMarkets]);
-    try {
-      const openRows = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-      effectiveOpen = Math.max(openMarkets.size, openRows.length);
-      occupiedTickers = new Set<string>([...openMarkets, ...openRows.map(t => t.marketId)]);
-    } catch (dbErr) {
-      logger.warn({ err: dbErr }, "coinFlipTrade: DB open-positions check failed — using in-memory state only");
-    }
-    if (effectiveOpen >= botConfig.maxOpenPositions) {
-      return { success: false, message: `Max open positions (${botConfig.maxOpenPositions}) already reached — coin flip blocked.` };
-    }
-
-    const now = Date.now();
-
-    // Query each enabled coin's series directly — avoids pagination/ordering issues with the
-    // general /markets endpoint that can return 200 non-crypto results before reaching BTC/ETH
-    const enabledCoins = botConfig.cryptoCoins.length > 0
-      ? botConfig.cryptoCoins
-      : ["BTC", "ETH", "SOL", "DOGE"];
-
-    const allMarkets: KalshiMarket[] = [];
-    for (const coin of enabledCoins) {
-      const seriesPrefixes = CRYPTO_COIN_SERIES[coin.toUpperCase()] ?? [];
-      for (const series of seriesPrefixes) {
-        try {
-          const resp = await kalshiFetch("GET", `/markets?status=open&series_ticker=${series}&limit=50`) as { markets?: KalshiMarket[] };
-          allMarkets.push(...(resp.markets ?? []));
-        } catch (_) { /* skip if series not found */ }
-      }
-    }
-
-    // Coin flip only enters markets with >minMinutesRemaining left — no upper cap since we queried
-    // the series directly so we know they're 15-min markets
-    let timeOk = 0;
-    const eligible = allMarkets.filter((m) => {
-      if (!m.close_time) return false;
-      const mins = (new Date(m.close_time).getTime() - now) / 60_000;
-      if (mins <= botConfig.minMinutesRemaining) return false;
-      timeOk++;
-      return true;
-    });
-
-    // Deduplicate by ticker (same market may appear from multiple series queries)
-    const seen = new Set<string>();
-    const uniqueEligible = eligible.filter(m => {
-      if (seen.has(m.ticker)) return false;
-      seen.add(m.ticker);
-      return true;
-    });
-
-    const sample = allMarkets.slice(0, 3).map(m =>
-      `${m.ticker}(${((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1)}min)`
-    ).join(", ");
-    await botLog("info",
-      `🔍 Coin flip scan: ${allMarkets.length} series markets fetched, ${timeOk} in time window, ${uniqueEligible.length} eligible | sample: ${sample || "none"}`,
-    );
-
-    if (uniqueEligible.length === 0) {
-      return { success: false, message: `No markets found — fetched ${allMarkets.length} from ${enabledCoins.join("/")} series, ${timeOk} in time window` };
-    }
-
-    // Flip the coin ONCE — this is the side we will trade.
-    // We then search for a market where this side has a live quote within the price cap.
-    // The coin is never re-flipped; we just find the right market for the chosen side.
-    const coinYes = Math.random() < 0.5;
-    const chosenSide: "YES" | "NO" = coinYes ? "YES" : "NO";
-    const maxAsk = Math.min(botConfig.maxEntryPriceCents, 99);
-
-    // Shuffle eligible markets and try each in turn until one fits
-    const shuffled = [...uniqueEligible].sort(() => Math.random() - 0.5);
-
-    let market!: KalshiMarket;
-    let side!: "YES" | "NO";
-    let ask!: number;
-    let minutesLeft!: number;
-
-    let triedAll = 0;
-    for (const candidate of shuffled) {
-      // Skip markets already held — each open position must be on a different market
-      if (occupiedTickers.has(candidate.ticker)) continue;
-      if (isMarketInReentryCooldown(candidate.ticker)) continue;
-
-      triedAll++;
-      const detailResp = await kalshiFetch("GET", `/markets/${candidate.ticker}`) as { market?: KalshiMarket };
-      const m = detailResp.market ?? candidate;
-
-      const freshMins = (new Date(m.close_time).getTime() - Date.now()) / 60_000;
-      if (freshMins <= botConfig.minMinutesRemaining) continue; // stale — expired
-
-      const yesAsk = priceCents(m, "yes_ask");
-      const noAsk  = priceCents(m, "no_ask");
-      const tryAsk = chosenSide === "YES" ? yesAsk : noAsk;
-
-      if (tryAsk <= 0) {
-        await botLog("info", `Coin flip: landed ${chosenSide} on ${candidate.ticker} but no quote — trying next market`);
-        continue;
-      }
-
-      if (tryAsk > maxAsk) {
-        await botLog("info", `Coin flip: ${candidate.ticker} ${chosenSide} ask ${tryAsk}¢ exceeds max ${maxAsk}¢ — skipping`);
-        continue;
-      }
-
-      market = m;
-      side = chosenSide;
-      ask = tryAsk;
-      minutesLeft = freshMins;
-      break;
-    }
-
-    if (!market) {
-      return { success: false, message: `No tradeable markets — checked ${triedAll} markets, none with a live quote in the time window` };
-    }
-
-    const { ticker, title } = market;
-
-    // Add 1¢ buffer above ask to cross the spread, but never exceed the user's price cap
-    const orderPriceCents = Math.min(ask + 1, maxAsk);
-
-    const buyResp = await kalshiFetch("POST", "/portfolio/orders",
-      buildOrderPayload(ticker, `coinflip-${Date.now()}`, "limit", "buy", side, 1, orderPriceCents),
-    ) as { order?: { order_id?: string } };
-
-    const buyOrderId = buyResp?.order?.order_id ?? null;
-    const provisId   = -Date.now();
-
-    // ── Register IMMEDIATELY in memory — sell monitor works even if DB is down ─
-    const posRef = registerOpenPosition({
-      tradeId:         provisId,
-      marketId:        ticker,
-      side,
-      entryPriceCents: ask,
-      contractCount:   1,
-      enteredAt:       Date.now(),
-      buyOrderId,
-    });
-    state.tradesAttempted++;
-    state.tradesSucceeded++;
-
-    await botLog("info",
-      `🪙 Coin flip: landed ${side} — bought 1x ${side} on "${title}" at ${ask}¢`,
-      { buyOrderId, ticker, side, ask },
-    );
-
-    // ── DB write fire-and-forget — swap provisional ID when it completes ────────
-    db.insert(tradesTable).values({
-      marketId: ticker, marketTitle: title ?? ticker, side,
-      buyPriceCents: ask, contractCount: 1, feeCents: 0, status: "open",
-      kalshiBuyOrderId: buyOrderId, minutesRemaining: minutesLeft,
-    }).returning().then(([trade]) => {
-      posRef.tradeId = trade.id; // direct ref — works even if removed from openPositions
-    }).catch(err => logger.warn({ err }, "coinFlip: DB write failed — position tracked in memory only"));
-
-    return {
-      success: true,
-      message: `Flipped ${side}! Bought 1x ${side} on "${title}" at ${ask}¢ — watching for profit.`,
-      ticker,
-      title,
-      side,
-      priceCents: ask,
-      tradeId: provisId,
-    };
-  } catch (err) {
-    const msg = String(err);
-    await botLog("error", `🪙 Coin flip trade failed: ${msg}`);
-    return { success: false, message: msg };
   } finally {
-    tradeMutex = false;
+    if (gateLocked) {
+      releaseTradeEntryGate(ticker, "manual_trade_done");
+    }
   }
 }
 
@@ -1855,8 +1585,197 @@ export async function clearStuckPositions(): Promise<{ cleared: number }> {
     await botLog("warn", `🧹 Trade ${trade.id} force-cleared via dashboard reset`, { tradeId: trade.id });
   }
   state.openPositionCount = 0;
-  // Reset last result and retry immediately so the button disappears and next flip fires in 5s
-  coinFlipAuto.lastResult = null;
-  if (coinFlipAuto.enabled) scheduleCoinFlip(5);
   return { cleared: openTrades.length };
+}
+
+// ─── Shared position gate (exchange-backed) for all bots ──────────────────────
+const POSITION_SYNC_MS = 5_000;
+let lastPositionSyncAt = 0;
+let lastPositionSyncOkAt = 0;
+let lastPositionSyncError: string | null = null;
+const exchangeOpenAssets = new Set<string>(); // asset labels, e.g. BTC/ETH/SOL
+const entryInProgressAssets = new Set<string>(); // asset-level in-flight entry lock
+
+function assetLabel(ticker: string): string {
+  const up = ticker.toUpperCase();
+  const aliases: Array<{ asset: string; keys: string[] }> = [
+    { asset: "BTC", keys: ["BTC", "BITCOIN", "KXBTC"] },
+    { asset: "ETH", keys: ["ETH", "ETHEREUM", "KXETH"] },
+    { asset: "SOL", keys: ["SOL", "SOLANA", "KXSOL"] },
+    { asset: "DOGE", keys: ["DOGE", "DOGECOIN", "KXDOGE"] },
+    { asset: "XRP", keys: ["XRP", "RIPPLE", "KXXRP"] },
+    { asset: "ADA", keys: ["ADA", "CARDANO", "KXADA"] },
+    { asset: "MATIC", keys: ["MATIC", "POLYGON", "KXMATIC"] },
+    { asset: "BNB", keys: ["BNB", "KXBNB"] },
+  ];
+  for (const a of aliases) {
+    if (a.keys.some(k => up.includes(k))) return a.asset;
+  }
+  return up;
+}
+
+function hasFreshPositionSnapshot(): boolean {
+  if (lastPositionSyncOkAt <= 0) return false;
+  return Date.now() - lastPositionSyncOkAt <= POSITION_SYNC_MS * 3;
+}
+
+async function refreshExchangeOpenAssets(force = false): Promise<boolean> {
+  const now = Date.now();
+  if (!force && now - lastPositionSyncAt < POSITION_SYNC_MS) {
+    return hasFreshPositionSnapshot();
+  }
+  lastPositionSyncAt = now;
+  try {
+    const pr = await kalshiFetch("GET", "/portfolio/positions") as {
+      positions?: Array<{ ticker_name?: string; position?: number }>
+    };
+    exchangeOpenAssets.clear();
+    for (const p of pr.positions ?? []) {
+      // Non-zero exposure means this asset is still open (positive or negative).
+      if ((p.position ?? 0) === 0) continue;
+      const ticker = p.ticker_name ?? "";
+      if (!ticker) continue;
+      exchangeOpenAssets.add(assetLabel(ticker));
+    }
+    lastPositionSyncOkAt = Date.now();
+    lastPositionSyncError = null;
+    return true;
+  } catch (err) {
+    lastPositionSyncError = String(err);
+    logger.warn({ err }, "position gate: exchange sync failed");
+    return false;
+  }
+}
+
+export interface SharedTradeGateStatus {
+  asset: string;
+  openPosition: boolean;
+  entryLocked: boolean;
+  exchangeSyncOk: boolean;
+  lastError: string | null;
+}
+
+function readTradeGateStatus(assetOrTicker: string): SharedTradeGateStatus {
+  const asset = assetLabel(assetOrTicker);
+  return {
+    asset,
+    openPosition: exchangeOpenAssets.has(asset),
+    entryLocked: entryInProgressAssets.has(asset),
+    exchangeSyncOk: hasFreshPositionSnapshot(),
+    lastError: lastPositionSyncError,
+  };
+}
+
+export async function getSharedTradeGateStatus(assetOrTicker: string): Promise<SharedTradeGateStatus> {
+  const syncOk = await refreshExchangeOpenAssets();
+  const status = readTradeGateStatus(assetOrTicker);
+  return { ...status, exchangeSyncOk: syncOk || status.exchangeSyncOk };
+}
+
+export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
+  const asset = assetLabel(assetOrTicker);
+  const exchangeSyncOk = await refreshExchangeOpenAssets();
+  const status = readTradeGateStatus(asset);
+  logger.info(
+    { asset: status.asset, openPosition: status.openPosition, entryLocked: status.entryLocked, exchangeSyncOk, lastError: status.lastError },
+    `[TRADE GATE] asset=${status.asset}, openPosition=${status.openPosition}, entryLocked=${status.entryLocked}`,
+  );
+  if (!exchangeSyncOk && !status.exchangeSyncOk) {
+    return { ok: false, reason: "exchange_sync_unavailable", status: { ...status, exchangeSyncOk: false } };
+  }
+  if (status.openPosition) {
+    return { ok: false, reason: "has_open_position", status };
+  }
+  if (status.entryLocked) {
+    return { ok: false, reason: "entry_in_progress", status };
+  }
+  return { ok: true, status };
+}
+
+export interface TradeEntryGateResult {
+  allowed: boolean;
+  asset: string;
+  openPosition: boolean;
+  entryLocked: boolean;
+  reason?: string;
+}
+
+export async function acquireTradeEntryGate(assetOrTicker: string, _context?: string): Promise<TradeEntryGateResult> {
+  const check = await canEnterAssetTrade(assetOrTicker);
+  const asset = check.status.asset;
+  if (!check.ok) {
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: check.status.entryLocked,
+      reason: check.reason,
+    };
+  }
+
+  if (entryInProgressAssets.has(asset)) {
+    logger.info(
+      { asset, openPosition: check.status.openPosition, entryLocked: true },
+      `[TRADE GATE] asset=${asset}, openPosition=${check.status.openPosition}, entryLocked=true`,
+    );
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: true,
+      reason: "entry_in_progress",
+    };
+  }
+
+  entryInProgressAssets.add(asset);
+  logger.info(
+    { asset, openPosition: check.status.openPosition, entryLocked: true },
+    `[TRADE GATE] asset=${asset}, openPosition=${check.status.openPosition}, entryLocked=true`,
+  );
+  return {
+    allowed: true,
+    asset,
+    openPosition: check.status.openPosition,
+    entryLocked: true,
+  };
+}
+
+export function releaseTradeEntryGate(assetOrTicker: string, _context?: string): void {
+  entryInProgressAssets.delete(assetLabel(assetOrTicker));
+}
+
+export function hasOpenPositionFromExchange(assetOrTicker: string): boolean {
+  return exchangeOpenAssets.has(assetLabel(assetOrTicker));
+}
+
+export function isAssetEntryLocked(assetOrTicker: string): boolean {
+  return entryInProgressAssets.has(assetLabel(assetOrTicker));
+}
+
+export function acquireAssetEntryLock(assetOrTicker: string): boolean {
+  const asset = assetLabel(assetOrTicker);
+  if (entryInProgressAssets.has(asset)) return false;
+  entryInProgressAssets.add(asset);
+  return true;
+}
+
+export function releaseAssetEntryLock(assetOrTicker: string): void {
+  entryInProgressAssets.delete(assetLabel(assetOrTicker));
+}
+
+export function setExchangeOpenPositionsSnapshot(assets: Set<string>): void {
+  exchangeOpenAssets.clear();
+  for (const a of assets) {
+    exchangeOpenAssets.add(assetLabel(a));
+  }
+  lastPositionSyncOkAt = Date.now();
+  lastPositionSyncError = null;
+}
+
+export function noteOpenedAssetPosition(assetOrTicker: string): void {
+  exchangeOpenAssets.add(assetLabel(assetOrTicker));
+}
+
+export function noteClosedAssetPosition(assetOrTicker: string): void {
+  exchangeOpenAssets.delete(assetLabel(assetOrTicker));
 }

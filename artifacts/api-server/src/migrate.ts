@@ -11,7 +11,8 @@ export async function runMigrations(): Promise<void> {
         side            TEXT NOT NULL,
         buy_price_cents  INTEGER NOT NULL,
         sell_price_cents INTEGER,
-        contract_count  INTEGER NOT NULL,
+        contract_count  REAL NOT NULL,
+        contract_count_fp TEXT,
         fee_cents       INTEGER NOT NULL DEFAULT 0,
         pnl_cents       INTEGER,
         status          TEXT NOT NULL DEFAULT 'open',
@@ -31,6 +32,15 @@ export async function runMigrations(): Promise<void> {
         data       TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
+    `);
+
+    await db.execute(sql`
+      ALTER TABLE trades
+      ALTER COLUMN contract_count TYPE REAL
+      USING contract_count::real
+    `);
+    await db.execute(sql`
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS contract_count_fp TEXT
     `);
 
     await db.execute(sql`
