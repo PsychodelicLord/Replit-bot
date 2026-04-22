@@ -9,20 +9,6 @@ export interface HealthStatus {
   status: string;
 }
 
-export interface ManualTradeBody {
-  ticker: string;
-  side: "YES" | "NO";
-  limitCents: number;
-  quantity?: number;
-}
-
-export interface ManualTradeResult {
-  success: boolean;
-  tradeId?: number;
-  orderId?: string;
-  message: string;
-}
-
 export interface BotConfig {
   /** Only enter if ask price per contract is at or below this (cents) */
   maxEntryPriceCents: number;
@@ -48,6 +34,8 @@ export interface BotConfig {
   dailyProfitTargetCents: number;
   /** Auto-stop when daily loss reaches this (cents, 0 = disabled) */
   dailyLossLimitCents: number;
+  /** Place limit sell order when this many minutes remain (e.g. 7) */
+  exitWindowMins: number;
 }
 
 export interface BotConfigUpdate {
@@ -63,6 +51,7 @@ export interface BotConfigUpdate {
   balanceFloorCents?: number;
   dailyProfitTargetCents?: number;
   dailyLossLimitCents?: number;
+  exitWindowMins?: number;
 }
 
 export interface BotStatus {
@@ -78,6 +67,196 @@ export interface BotStatus {
   balanceCents: number;
   /** @nullable */
   stoppedReason: string | null;
+}
+
+export type ManualTradeBodySide =
+  (typeof ManualTradeBodySide)[keyof typeof ManualTradeBodySide];
+
+export const ManualTradeBodySide = {
+  YES: "YES",
+  NO: "NO",
+} as const;
+
+export interface ManualTradeBody {
+  /** @minLength 1 */
+  ticker: string;
+  side: ManualTradeBodySide;
+  /**
+   * @minimum 1
+   * @maximum 99
+   */
+  limitCents: number;
+  /**
+   * @minimum 1
+   * @maximum 500
+   */
+  quantity?: number;
+}
+
+export interface ManualTradeResult {
+  success: boolean;
+  tradeId?: number;
+  orderId?: string;
+  message: string;
+}
+
+export interface MomentumBotAutoBody {
+  enabled: boolean;
+  /** @minimum 0 */
+  balanceFloorCents?: number;
+  /** @minimum 0 */
+  maxSessionLossCents?: number;
+  /** @minimum 0 */
+  consecutiveLossLimit?: number;
+  /** @minimum 1 */
+  betCostCents?: number;
+  simulatorMode?: boolean;
+  /**
+   * @minimum 1
+   * @maximum 99
+   */
+  priceMin?: number;
+  /**
+   * @minimum 1
+   * @maximum 99
+   */
+  priceMax?: number;
+  /**
+   * @minimum 1
+   * @maximum 99
+   */
+  tpCents?: number;
+  /**
+   * @minimum 1
+   * @maximum 99
+   */
+  slCents?: number;
+  /**
+   * @minimum 10000
+   * @maximum 300000
+   */
+  staleMs?: number;
+  /**
+   * @minimum 0
+   * @maximum 99
+   */
+  tpAbsoluteCents?: number;
+  /** @minimum 0 */
+  sessionProfitTargetCents?: number;
+  allowedCoins?: string[];
+}
+
+export type MomentumBotHealthScoreLabel =
+  (typeof MomentumBotHealthScoreLabel)[keyof typeof MomentumBotHealthScoreLabel];
+
+export const MomentumBotHealthScoreLabel = {
+  Healthy: "Healthy",
+  Fragile: "Fragile",
+  Broken: "Broken",
+  Pending: "Pending",
+} as const;
+
+export interface MomentumBotHealthScore {
+  total: number;
+  label: MomentumBotHealthScoreLabel;
+  tradesInBuffer: number;
+  winRate: number;
+  netEV: number;
+  avgWin: number;
+  avgLoss: number;
+  staleRate: number;
+  evScore: number;
+  stabilityScore: number;
+  ratioScore: number;
+  staleScore: number;
+  execScore: number;
+}
+
+export type MomentumBotStatusStatus =
+  (typeof MomentumBotStatusStatus)[keyof typeof MomentumBotStatusStatus];
+
+export const MomentumBotStatusStatus = {
+  DISABLED: "DISABLED",
+  WAITING_FOR_SETUP: "WAITING_FOR_SETUP",
+  IN_TRADE: "IN_TRADE",
+  PAUSED: "PAUSED",
+} as const;
+
+export interface MomentumBotStatus {
+  enabled: boolean;
+  autoMode: boolean;
+  status: MomentumBotStatusStatus;
+  openTradeCount: number;
+  /** @nullable */
+  lastDecision: string | null;
+  /** @nullable */
+  lastDecisionAt: string | null;
+  totalWins: number;
+  totalLosses: number;
+  totalPnlCents: number;
+  sessionPnlCents: number;
+  sessionWins: number;
+  sessionLosses: number;
+  consecutiveLosses: number;
+  /** @nullable */
+  pausedUntilMs: number | null;
+  /** @nullable */
+  pauseReason: string | null;
+  /** @nullable */
+  stopReason: string | null;
+  balanceFloorCents: number;
+  maxSessionLossCents: number;
+  consecutiveLossLimit: number;
+  betCostCents: number;
+  simulatorMode: boolean;
+  simPnlCents: number;
+  simWins: number;
+  simLosses: number;
+  simOpenTradeCount: number;
+  priceMin: number;
+  priceMax: number;
+  tpCents: number;
+  slCents: number;
+  staleMs: number;
+  tpAbsoluteCents: number;
+  sessionProfitTargetCents: number;
+  /** @nullable */
+  startingBalanceCents: number | null;
+  allTimeWins: number;
+  allTimeLosses: number;
+  allTimePnlCents: number;
+  healthScore: MomentumBotHealthScore | null;
+  allowedCoins: string[];
+}
+
+export interface PaperTradeRecord {
+  id: number;
+  coin: string;
+  side: string;
+  entryPrice: number;
+  exitPrice: number;
+  pnlCents: number;
+  exitReason: string;
+  closedAt: string;
+}
+
+export interface TimeOfDayBucket {
+  label: string;
+  wins: number;
+  losses: number;
+  pnlCents: number;
+}
+
+export interface PaperStats {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRatePct: number;
+  totalPnlCents: number;
+  evPerTradeCents: number;
+  maxDrawdownCents: number;
+  timeOfDay: TimeOfDayBucket[];
+  recentTrades: PaperTradeRecord[];
 }
 
 export interface Trade {
@@ -111,6 +290,9 @@ export interface TradeStats {
   losingTrades: number;
   openTrades: number;
   totalPnlCents: number;
+  totalWinCents: number;
+  totalLossCents: number;
+  todayPnlCents: number;
   winRate: number;
   avgPnlCents: number;
 }
@@ -136,160 +318,3 @@ export type ListTradesParams = {
 export type GetBotLogsParams = {
   limit?: number;
 };
-
-export interface CoinFlipResult {
-  success: boolean;
-  message: string;
-  ticker?: string;
-  title?: string;
-  side?: "YES" | "NO";
-  priceCents?: number;
-  tradeId?: number;
-}
-
-export interface CoinFlipAutoBody {
-  enabled: boolean;
-  intervalSecs?: number;
-}
-
-export interface CoinFlipAutoStatus {
-  enabled: boolean;
-  intervalSecs: number;
-  nextFlipAt: number | null;
-}
-
-export interface OutcomeBotOpenPosition {
-  posId:           string;
-  marketId:        string;
-  marketTitle:     string;
-  side:            "YES" | "NO";
-  entryPriceCents: number;
-  entryYesPrice:   number;
-  contractCount:   number;
-  peakPnlCents:    number;
-  trailingActive:  boolean;
-  lastYesPrice:    number;
-  msRemaining:     number;
-  enteredAt:       number;
-}
-
-export interface OutcomeBotMarketState {
-  state:       "TRENDING" | "BREAKOUT" | "EMERGING" | "NO_TRADE";
-  direction?:  "UP" | "DOWN";
-  moveCents?:  number;
-  reason:      string;
-  samples:     number;
-  latestPrice?: number;
-}
-
-export interface OutcomeBotStatus {
-  enabled:        boolean;
-  status:         "DISABLED" | "SCANNING" | "IN_TRADE";
-  lastDecision:   string | null;
-  lastDecisionAt: string | null;
-  openTradeCount: number;
-  simWins:        number;
-  simLosses:      number;
-  simPnlCents:    number;
-  noEdgeCount:    number;
-  betCostCents:   number;
-  openPositions?: OutcomeBotOpenPosition[];
-  marketStates?:  Record<string, OutcomeBotMarketState>;
-}
-
-export interface PaperTradeRecord {
-  id:         number;
-  coin:       string;
-  side:       string;
-  entryPrice: number;
-  exitPrice:  number;
-  pnlCents:   number;
-  exitReason: string;
-  closedAt:   string;
-}
-
-export interface TimeOfDayBucket {
-  label:    string;
-  wins:     number;
-  losses:   number;
-  pnlCents: number;
-}
-
-export interface PaperStats {
-  totalTrades:      number;
-  wins:             number;
-  losses:           number;
-  winRatePct:       number;
-  totalPnlCents:    number;
-  evPerTradeCents:  number;
-  maxDrawdownCents: number;
-  timeOfDay:        TimeOfDayBucket[];
-  recentTrades:     PaperTradeRecord[];
-}
-
-export interface OutcomeBotToggleBody {
-  enabled:       boolean;
-  betCostCents?: number;
-}
-
-export interface MomentumBotAutoBody {
-  enabled: boolean;
-  balanceFloorCents?: number;
-  maxSessionLossCents?: number;
-  consecutiveLossLimit?: number;
-  betCostCents?: number;
-  simulatorMode?: boolean;
-  priceMin?: number;
-  priceMax?: number;
-  tpCents?: number;
-  slCents?: number;
-  staleMs?: number;
-  tpAbsoluteCents?: number;
-  sessionProfitTargetCents?: number;
-  allowedCoins?: string[];
-}
-
-export interface MomentumBotStatus {
-  enabled: boolean;
-  autoMode: boolean;
-  status: "DISABLED" | "WAITING_FOR_SETUP" | "IN_TRADE" | "PAUSED";
-  openTradeCount: number;
-  lastDecision: string | null;
-  lastDecisionAt: string | null;
-  totalWins: number;
-  totalLosses: number;
-  sessionPnlCents: number;
-  consecutiveLosses: number;
-  pausedUntilMs: number | null;
-  pauseReason: string | null;
-  balanceFloorCents: number;
-  maxSessionLossCents: number;
-  consecutiveLossLimit: number;
-  betCostCents?: number;
-  simulatorMode?: boolean;
-  simPnlCents?: number;
-  simWins?: number;
-  simLosses?: number;
-  simOpenTradeCount?: number;
-  priceMin?: number;
-  priceMax?: number;
-  allTimeWins?: number;
-  allTimeLosses?: number;
-  allTimePnlCents?: number;
-  healthScore?: {
-    total: number;
-    label: "Healthy" | "Fragile" | "Broken" | "Pending";
-    tradesInBuffer: number;
-    winRate: number;
-    netEV: number;
-    avgWin: number;
-    avgLoss: number;
-    staleRate: number;
-    evScore: number;
-    stabilityScore: number;
-    ratioScore: number;
-    staleScore: number;
-    execScore: number;
-  } | null;
-  allowedCoins?: string[];
-}

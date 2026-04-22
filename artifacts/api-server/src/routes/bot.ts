@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, clearStuckPositions } from "../lib/kalshi-bot";
+import { getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport, getPaperStats } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
@@ -15,10 +15,9 @@ import {
   ListTradesResponse,
   ListTradesQueryParams,
   GetTradeStatsResponse,
-  ManualTradeBody,
   ManualTradeResponse,
-  MomentumBotAutoBody,
-  MomentumBotStatus,
+  SetMomentumBotAutoBody,
+  GetMomentumBotStatusResponse,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -29,18 +28,19 @@ function isProductionDeployment(): boolean {
   return !!process.env.RAILWAY_ENVIRONMENT;
 }
 
-function serializeState(s: ReturnType<typeof getBotState>) {
+function serializeMomentumState(s = getMomentumBotState()) {
+  const core = getBotState();
   return {
-    running: s.running,
-    startedAt: s.startedAt,
-    marketsScanned: s.marketsScanned,
-    tradesAttempted: s.tradesAttempted,
-    tradesSucceeded: s.tradesSucceeded,
-    totalPnlCents: s.totalPnlCents,
-    dailyPnlCents: s.dailyPnlCents,
-    openPositionCount: s.openPositionCount,
-    balanceCents: s.balanceCents,
-    stoppedReason: s.stoppedReason,
+    running: s.enabled,
+    startedAt: null,
+    marketsScanned: 0,
+    tradesAttempted: 0,
+    tradesSucceeded: 0,
+    totalPnlCents: s.totalPnlCents ?? 0,
+    dailyPnlCents: s.sessionPnlCents ?? 0,
+    openPositionCount: s.simulatorMode ? (s.simOpenTradeCount ?? 0) : s.openTradeCount,
+    balanceCents: core.balanceCents,
+    stoppedReason: s.stopReason ?? null,
   };
 }
 
@@ -60,21 +60,22 @@ router.patch("/bot/config", async (req, res): Promise<void> => {
 });
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
-  res.json(GetBotStatusResponse.parse(serializeState(getBotState())));
+  res.json(GetBotStatusResponse.parse(serializeMomentumState()));
 });
 
 router.post("/bot/start", async (_req, res): Promise<void> => {
-  if (!isProductionDeployment()) {
+  const momentum = getMomentumBotState();
+  if (!isProductionDeployment() && !momentum.simulatorMode) {
     res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
     return;
   }
-  const s = await startBot();
-  res.json(StartBotResponse.parse(serializeState(s)));
+  const s = startMomentumBot();
+  res.json(StartBotResponse.parse(serializeMomentumState(s)));
 });
 
 router.post("/bot/stop", async (_req, res): Promise<void> => {
-  const s = await stopBot();
-  res.json(StopBotResponse.parse(serializeState(s)));
+  const s = stopMomentumBot("Stopped via /api/bot/stop");
+  res.json(StopBotResponse.parse(serializeMomentumState(s)));
 });
 
 router.get("/logs", async (req, res): Promise<void> => {
@@ -153,14 +154,10 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
 });
 
 router.post("/bot/manual-trade", async (req, res): Promise<void> => {
-  const parsed = ManualTradeBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-  const { ticker, side, limitCents, quantity } = parsed.data;
-  const result = await manualTrade(ticker, side, limitCents, quantity ?? 1);
-  res.json(ManualTradeResponse.parse(result));
+  res.status(410).json(ManualTradeResponse.parse({
+    success: false,
+    message: "Manual trade path disabled. ACTIVE TRADE PATHS: 1 (signal -> gate -> execute -> update state).",
+  }));
 });
 
 router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
@@ -177,7 +174,7 @@ router.get("/bot/momentum/status", (_req, res): void => {
     allTimePnlCents: sql<number>`cast(coalesce(sum(${tradesTable.pnlCents}), 0) as int)`,
   }).from(tradesTable).where(sql`${tradesTable.status} = 'closed'`)
     .then(([row]) => {
-      res.json(MomentumBotStatus.parse({
+      res.json(GetMomentumBotStatusResponse.parse({
         ...state,
         allTimeWins:     row?.allTimeWins     ?? 0,
         allTimeLosses:   row?.allTimeLosses   ?? 0,
@@ -185,7 +182,7 @@ router.get("/bot/momentum/status", (_req, res): void => {
       }));
     })
     .catch(() => {
-      res.json(MomentumBotStatus.parse(state));
+      res.json(GetMomentumBotStatusResponse.parse(state));
     });
 });
 
@@ -199,7 +196,7 @@ router.get("/bot/momentum/debug", async (_req, res): Promise<void> => {
 });
 
 router.post("/bot/momentum/reset-sim", (_req, res): void => {
-  res.json(MomentumBotStatus.parse(resetSimStats()));
+  res.json(GetMomentumBotStatusResponse.parse(resetSimStats()));
 });
 
 router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
@@ -225,7 +222,7 @@ router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
 
 router.post("/bot/momentum/reset-all", async (_req, res): Promise<void> => {
   const state = await resetAllStats();
-  res.json(MomentumBotStatus.parse(state));
+  res.json(GetMomentumBotStatusResponse.parse(state));
 });
 
 // Live execution quality report — purely observational, real trades only
@@ -235,7 +232,7 @@ router.get("/bot/momentum/live-performance", (_req, res): void => {
 
 router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
   try {
-    const parsed = MomentumBotAutoBody.safeParse(req.body);
+    const parsed = SetMomentumBotAutoBody.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
 
     const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents, allowedCoins } = parsed.data;
@@ -264,7 +261,7 @@ router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
     });
 
     const state = enabled ? startMomentumBot() : stopMomentumBot();
-    res.json(MomentumBotStatus.parse(state));
+    res.json(GetMomentumBotStatusResponse.parse(state));
   } catch (err) {
     console.error("[momentum/auto] unexpected error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });

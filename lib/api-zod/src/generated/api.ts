@@ -181,6 +181,372 @@ export const StopBotResponse = zod.object({
 });
 
 /**
+ * @summary Manual trade endpoint (consolidated safety response)
+ */
+
+export const manualTradeBodyLimitCentsMax = 99;
+
+export const manualTradeBodyQuantityMax = 500;
+
+export const ManualTradeBody = zod.object({
+  ticker: zod.string().min(1),
+  side: zod.enum(["YES", "NO"]),
+  limitCents: zod.number().min(1).max(manualTradeBodyLimitCentsMax),
+  quantity: zod.number().min(1).max(manualTradeBodyQuantityMax).optional(),
+});
+
+export const ManualTradeResponse = zod.object({
+  success: zod.boolean(),
+  tradeId: zod.number().optional(),
+  orderId: zod.string().optional(),
+  message: zod.string(),
+});
+
+/**
+ * @summary Get Momentum Bot status
+ */
+export const GetMomentumBotStatusResponse = zod.object({
+  enabled: zod.boolean(),
+  autoMode: zod.boolean(),
+  status: zod.enum(["DISABLED", "WAITING_FOR_SETUP", "IN_TRADE", "PAUSED"]),
+  openTradeCount: zod.number(),
+  lastDecision: zod.string().nullable(),
+  lastDecisionAt: zod.string().nullable(),
+  totalWins: zod.number(),
+  totalLosses: zod.number(),
+  totalPnlCents: zod.number(),
+  sessionPnlCents: zod.number(),
+  sessionWins: zod.number(),
+  sessionLosses: zod.number(),
+  consecutiveLosses: zod.number(),
+  pausedUntilMs: zod.number().nullable(),
+  pauseReason: zod.string().nullable(),
+  stopReason: zod.string().nullable(),
+  balanceFloorCents: zod.number(),
+  maxSessionLossCents: zod.number(),
+  consecutiveLossLimit: zod.number(),
+  betCostCents: zod.number(),
+  simulatorMode: zod.boolean(),
+  simPnlCents: zod.number(),
+  simWins: zod.number(),
+  simLosses: zod.number(),
+  simOpenTradeCount: zod.number(),
+  priceMin: zod.number(),
+  priceMax: zod.number(),
+  tpCents: zod.number(),
+  slCents: zod.number(),
+  staleMs: zod.number(),
+  tpAbsoluteCents: zod.number(),
+  sessionProfitTargetCents: zod.number(),
+  startingBalanceCents: zod.number().nullable(),
+  allTimeWins: zod.number(),
+  allTimeLosses: zod.number(),
+  allTimePnlCents: zod.number(),
+  healthScore: zod.union([
+    zod.object({
+      total: zod.number(),
+      label: zod.enum(["Healthy", "Fragile", "Broken", "Pending"]),
+      tradesInBuffer: zod.number(),
+      winRate: zod.number(),
+      netEV: zod.number(),
+      avgWin: zod.number(),
+      avgLoss: zod.number(),
+      staleRate: zod.number(),
+      evScore: zod.number(),
+      stabilityScore: zod.number(),
+      ratioScore: zod.number(),
+      staleScore: zod.number(),
+      execScore: zod.number(),
+    }),
+    zod.null(),
+  ]),
+  allowedCoins: zod.array(zod.string()),
+});
+
+/**
+ * @summary Set Momentum Bot auto mode / risk config
+ */
+export const setMomentumBotAutoBodyBalanceFloorCentsMin = 0;
+
+export const setMomentumBotAutoBodyMaxSessionLossCentsMin = 0;
+
+export const setMomentumBotAutoBodyConsecutiveLossLimitMin = 0;
+
+export const setMomentumBotAutoBodyPriceMinMax = 99;
+
+export const setMomentumBotAutoBodyPriceMaxMax = 99;
+
+export const setMomentumBotAutoBodyTpCentsMax = 99;
+
+export const setMomentumBotAutoBodySlCentsMax = 99;
+
+export const setMomentumBotAutoBodyStaleMsMin = 10000;
+export const setMomentumBotAutoBodyStaleMsMax = 300000;
+
+export const setMomentumBotAutoBodyTpAbsoluteCentsMin = 0;
+export const setMomentumBotAutoBodyTpAbsoluteCentsMax = 99;
+
+export const setMomentumBotAutoBodySessionProfitTargetCentsMin = 0;
+
+export const SetMomentumBotAutoBody = zod.object({
+  enabled: zod.boolean(),
+  balanceFloorCents: zod
+    .number()
+    .min(setMomentumBotAutoBodyBalanceFloorCentsMin)
+    .optional(),
+  maxSessionLossCents: zod
+    .number()
+    .min(setMomentumBotAutoBodyMaxSessionLossCentsMin)
+    .optional(),
+  consecutiveLossLimit: zod
+    .number()
+    .min(setMomentumBotAutoBodyConsecutiveLossLimitMin)
+    .optional(),
+  betCostCents: zod.number().min(1).optional(),
+  simulatorMode: zod.boolean().optional(),
+  priceMin: zod
+    .number()
+    .min(1)
+    .max(setMomentumBotAutoBodyPriceMinMax)
+    .optional(),
+  priceMax: zod
+    .number()
+    .min(1)
+    .max(setMomentumBotAutoBodyPriceMaxMax)
+    .optional(),
+  tpCents: zod.number().min(1).max(setMomentumBotAutoBodyTpCentsMax).optional(),
+  slCents: zod.number().min(1).max(setMomentumBotAutoBodySlCentsMax).optional(),
+  staleMs: zod
+    .number()
+    .min(setMomentumBotAutoBodyStaleMsMin)
+    .max(setMomentumBotAutoBodyStaleMsMax)
+    .optional(),
+  tpAbsoluteCents: zod
+    .number()
+    .min(setMomentumBotAutoBodyTpAbsoluteCentsMin)
+    .max(setMomentumBotAutoBodyTpAbsoluteCentsMax)
+    .optional(),
+  sessionProfitTargetCents: zod
+    .number()
+    .min(setMomentumBotAutoBodySessionProfitTargetCentsMin)
+    .optional(),
+  allowedCoins: zod.array(zod.string()).optional(),
+});
+
+export const SetMomentumBotAutoResponse = zod.object({
+  enabled: zod.boolean(),
+  autoMode: zod.boolean(),
+  status: zod.enum(["DISABLED", "WAITING_FOR_SETUP", "IN_TRADE", "PAUSED"]),
+  openTradeCount: zod.number(),
+  lastDecision: zod.string().nullable(),
+  lastDecisionAt: zod.string().nullable(),
+  totalWins: zod.number(),
+  totalLosses: zod.number(),
+  totalPnlCents: zod.number(),
+  sessionPnlCents: zod.number(),
+  sessionWins: zod.number(),
+  sessionLosses: zod.number(),
+  consecutiveLosses: zod.number(),
+  pausedUntilMs: zod.number().nullable(),
+  pauseReason: zod.string().nullable(),
+  stopReason: zod.string().nullable(),
+  balanceFloorCents: zod.number(),
+  maxSessionLossCents: zod.number(),
+  consecutiveLossLimit: zod.number(),
+  betCostCents: zod.number(),
+  simulatorMode: zod.boolean(),
+  simPnlCents: zod.number(),
+  simWins: zod.number(),
+  simLosses: zod.number(),
+  simOpenTradeCount: zod.number(),
+  priceMin: zod.number(),
+  priceMax: zod.number(),
+  tpCents: zod.number(),
+  slCents: zod.number(),
+  staleMs: zod.number(),
+  tpAbsoluteCents: zod.number(),
+  sessionProfitTargetCents: zod.number(),
+  startingBalanceCents: zod.number().nullable(),
+  allTimeWins: zod.number(),
+  allTimeLosses: zod.number(),
+  allTimePnlCents: zod.number(),
+  healthScore: zod.union([
+    zod.object({
+      total: zod.number(),
+      label: zod.enum(["Healthy", "Fragile", "Broken", "Pending"]),
+      tradesInBuffer: zod.number(),
+      winRate: zod.number(),
+      netEV: zod.number(),
+      avgWin: zod.number(),
+      avgLoss: zod.number(),
+      staleRate: zod.number(),
+      evScore: zod.number(),
+      stabilityScore: zod.number(),
+      ratioScore: zod.number(),
+      staleScore: zod.number(),
+      execScore: zod.number(),
+    }),
+    zod.null(),
+  ]),
+  allowedCoins: zod.array(zod.string()),
+});
+
+/**
+ * @summary Reset Momentum simulator stats
+ */
+export const ResetMomentumSimResponse = zod.object({
+  enabled: zod.boolean(),
+  autoMode: zod.boolean(),
+  status: zod.enum(["DISABLED", "WAITING_FOR_SETUP", "IN_TRADE", "PAUSED"]),
+  openTradeCount: zod.number(),
+  lastDecision: zod.string().nullable(),
+  lastDecisionAt: zod.string().nullable(),
+  totalWins: zod.number(),
+  totalLosses: zod.number(),
+  totalPnlCents: zod.number(),
+  sessionPnlCents: zod.number(),
+  sessionWins: zod.number(),
+  sessionLosses: zod.number(),
+  consecutiveLosses: zod.number(),
+  pausedUntilMs: zod.number().nullable(),
+  pauseReason: zod.string().nullable(),
+  stopReason: zod.string().nullable(),
+  balanceFloorCents: zod.number(),
+  maxSessionLossCents: zod.number(),
+  consecutiveLossLimit: zod.number(),
+  betCostCents: zod.number(),
+  simulatorMode: zod.boolean(),
+  simPnlCents: zod.number(),
+  simWins: zod.number(),
+  simLosses: zod.number(),
+  simOpenTradeCount: zod.number(),
+  priceMin: zod.number(),
+  priceMax: zod.number(),
+  tpCents: zod.number(),
+  slCents: zod.number(),
+  staleMs: zod.number(),
+  tpAbsoluteCents: zod.number(),
+  sessionProfitTargetCents: zod.number(),
+  startingBalanceCents: zod.number().nullable(),
+  allTimeWins: zod.number(),
+  allTimeLosses: zod.number(),
+  allTimePnlCents: zod.number(),
+  healthScore: zod.union([
+    zod.object({
+      total: zod.number(),
+      label: zod.enum(["Healthy", "Fragile", "Broken", "Pending"]),
+      tradesInBuffer: zod.number(),
+      winRate: zod.number(),
+      netEV: zod.number(),
+      avgWin: zod.number(),
+      avgLoss: zod.number(),
+      staleRate: zod.number(),
+      evScore: zod.number(),
+      stabilityScore: zod.number(),
+      ratioScore: zod.number(),
+      staleScore: zod.number(),
+      execScore: zod.number(),
+    }),
+    zod.null(),
+  ]),
+  allowedCoins: zod.array(zod.string()),
+});
+
+/**
+ * @summary Reset all Momentum stats
+ */
+export const ResetMomentumAllResponse = zod.object({
+  enabled: zod.boolean(),
+  autoMode: zod.boolean(),
+  status: zod.enum(["DISABLED", "WAITING_FOR_SETUP", "IN_TRADE", "PAUSED"]),
+  openTradeCount: zod.number(),
+  lastDecision: zod.string().nullable(),
+  lastDecisionAt: zod.string().nullable(),
+  totalWins: zod.number(),
+  totalLosses: zod.number(),
+  totalPnlCents: zod.number(),
+  sessionPnlCents: zod.number(),
+  sessionWins: zod.number(),
+  sessionLosses: zod.number(),
+  consecutiveLosses: zod.number(),
+  pausedUntilMs: zod.number().nullable(),
+  pauseReason: zod.string().nullable(),
+  stopReason: zod.string().nullable(),
+  balanceFloorCents: zod.number(),
+  maxSessionLossCents: zod.number(),
+  consecutiveLossLimit: zod.number(),
+  betCostCents: zod.number(),
+  simulatorMode: zod.boolean(),
+  simPnlCents: zod.number(),
+  simWins: zod.number(),
+  simLosses: zod.number(),
+  simOpenTradeCount: zod.number(),
+  priceMin: zod.number(),
+  priceMax: zod.number(),
+  tpCents: zod.number(),
+  slCents: zod.number(),
+  staleMs: zod.number(),
+  tpAbsoluteCents: zod.number(),
+  sessionProfitTargetCents: zod.number(),
+  startingBalanceCents: zod.number().nullable(),
+  allTimeWins: zod.number(),
+  allTimeLosses: zod.number(),
+  allTimePnlCents: zod.number(),
+  healthScore: zod.union([
+    zod.object({
+      total: zod.number(),
+      label: zod.enum(["Healthy", "Fragile", "Broken", "Pending"]),
+      tradesInBuffer: zod.number(),
+      winRate: zod.number(),
+      netEV: zod.number(),
+      avgWin: zod.number(),
+      avgLoss: zod.number(),
+      staleRate: zod.number(),
+      evScore: zod.number(),
+      stabilityScore: zod.number(),
+      ratioScore: zod.number(),
+      staleScore: zod.number(),
+      execScore: zod.number(),
+    }),
+    zod.null(),
+  ]),
+  allowedCoins: zod.array(zod.string()),
+});
+
+/**
+ * @summary Get Momentum paper-trade analytics
+ */
+export const GetMomentumPaperStatsResponse = zod.object({
+  totalTrades: zod.number(),
+  wins: zod.number(),
+  losses: zod.number(),
+  winRatePct: zod.number(),
+  totalPnlCents: zod.number(),
+  evPerTradeCents: zod.number(),
+  maxDrawdownCents: zod.number(),
+  timeOfDay: zod.array(
+    zod.object({
+      label: zod.string(),
+      wins: zod.number(),
+      losses: zod.number(),
+      pnlCents: zod.number(),
+    }),
+  ),
+  recentTrades: zod.array(
+    zod.object({
+      id: zod.number(),
+      coin: zod.string(),
+      side: zod.string(),
+      entryPrice: zod.number(),
+      exitPrice: zod.number(),
+      pnlCents: zod.number(),
+      exitReason: zod.string(),
+      closedAt: zod.string(),
+    }),
+  ),
+});
+
+/**
  * @summary List all trades
  */
 export const listTradesQueryLimitDefault = 100;
@@ -229,206 +595,12 @@ export const GetTradeStatsResponse = zod.object({
 });
 
 /**
- * @summary Manual trade — buy a specific market at a limit price
- */
-export const ManualTradeBody = zod.object({
-  ticker: zod.string().min(1),
-  side: zod.enum(["YES", "NO"]),
-  limitCents: zod.number().int().min(1).max(99),
-  quantity: zod.number().int().min(1).max(500).optional(),
-});
-
-export const ManualTradeResponse = zod.object({
-  success: zod.boolean(),
-  tradeId: zod.number().optional(),
-  orderId: zod.string().optional(),
-  message: zod.string(),
-});
-
-/**
- * @summary Coin-flip auto mode — toggle automatic flipping
- */
-export const CoinFlipAutoBody = zod.object({
-  enabled: zod.boolean(),
-  intervalSecs: zod.number().int().min(10).max(3600).optional(),
-});
-
-export const CoinFlipAutoStatus = zod.object({
-  enabled: zod.boolean(),
-  intervalSecs: zod.number(),
-  nextFlipAt: zod.number().nullable(),
-  lastResult: zod.object({ success: zod.boolean(), message: zod.string(), side: zod.enum(["YES", "NO"]).optional() }).nullable().optional(),
-});
-
-/**
- * @summary Coin-flip trade — pick a random eligible market, flip YES/NO, enter
- */
-export const CoinFlipResponse = zod.object({
-  success: zod.boolean(),
-  message: zod.string(),
-  ticker: zod.string().optional(),
-  title: zod.string().optional(),
-  side: zod.enum(["YES", "NO"]).optional(),
-  priceCents: zod.number().optional(),
-  tradeId: zod.number().optional(),
-});
-
-/**
- * @summary Momentum Bot — toggle auto mode / update risk config
- */
-export const MomentumBotAutoBody = zod.object({
-  enabled: zod.boolean(),
-  balanceFloorCents:    zod.number().int().min(0).optional(),
-  maxSessionLossCents:  zod.number().int().min(0).optional(),
-  consecutiveLossLimit: zod.number().int().min(0).optional(),
-  betCostCents:         zod.number().int().min(1).optional(),
-  simulatorMode:        zod.boolean().optional(),
-  priceMin:             zod.number().int().min(1).max(99).optional(),
-  priceMax:             zod.number().int().min(1).max(99).optional(),
-  tpCents:              zod.number().int().min(1).max(99).optional(),
-  slCents:              zod.number().int().min(1).max(99).optional(),
-  staleMs:              zod.number().int().min(10000).max(300000).optional(),
-  tpAbsoluteCents:          zod.number().int().min(0).max(99).optional(),
-  sessionProfitTargetCents: zod.number().int().min(0).optional(),
-  allowedCoins:             zod.array(zod.string()).optional(),
-});
-
-export const MomentumBotStatus = zod.object({
-  enabled:             zod.boolean(),
-  autoMode:            zod.boolean(),
-  status:              zod.enum(["DISABLED", "WAITING_FOR_SETUP", "IN_TRADE", "PAUSED"]),
-  openTradeCount:      zod.number(),
-  lastDecision:        zod.string().nullable(),
-  lastDecisionAt:      zod.string().nullable(),
-  totalWins:           zod.number(),
-  totalLosses:         zod.number(),
-  sessionPnlCents:     zod.number(),
-  sessionWins:         zod.number(),
-  sessionLosses:       zod.number(),
-  consecutiveLosses:   zod.number(),
-  pausedUntilMs:       zod.number().nullable(),
-  pauseReason:         zod.string().nullable(),
-  balanceFloorCents:   zod.number(),
-  maxSessionLossCents: zod.number(),
-  consecutiveLossLimit:zod.number(),
-  betCostCents:        zod.number(),
-  simulatorMode:       zod.boolean(),
-  simPnlCents:         zod.number(),
-  simWins:             zod.number(),
-  simLosses:           zod.number(),
-  simOpenTradeCount:   zod.number(),
-  priceMin:            zod.number(),
-  priceMax:            zod.number(),
-  tpCents:             zod.number().optional(),
-  slCents:             zod.number().optional(),
-  staleMs:             zod.number().optional(),
-  tpAbsoluteCents:          zod.number().optional(),
-  sessionProfitTargetCents: zod.number().optional(),
-  startingBalanceCents: zod.number().nullable().optional(),
-  allTimeWins:         zod.number().optional(),
-  allTimeLosses:       zod.number().optional(),
-  allTimePnlCents:     zod.number().optional(),
-  healthScore: zod.object({
-    total:            zod.number(),
-    label:            zod.enum(["Healthy", "Fragile", "Broken", "Pending"]),
-    tradesInBuffer:   zod.number(),
-    winRate:          zod.number(),
-    netEV:            zod.number(),
-    avgWin:           zod.number(),
-    avgLoss:          zod.number(),
-    staleRate:        zod.number(),
-    evScore:          zod.number(),
-    stabilityScore:   zod.number(),
-    ratioScore:       zod.number(),
-    staleScore:       zod.number(),
-    execScore:        zod.number(),
-  }).nullable().optional(),
-  allowedCoins: zod.array(zod.string()).optional(),
-});
-
-/**
  * @summary Get recent bot logs
  */
 export const getBotLogsQueryLimitDefault = 50;
 
-// ─── Outcome Bot ────────────────────────────────────────────────────────────
-
-export const OutcomeBotToggleBody = zod.object({
-  enabled:      zod.boolean(),
-  betCostCents: zod.number().int().min(1).optional(),
-});
-
-export const OutcomeBotOpenPosition = zod.object({
-  posId:           zod.string(),
-  marketId:        zod.string(),
-  marketTitle:     zod.string(),
-  side:            zod.enum(["YES", "NO"]),
-  entryPriceCents: zod.number(),
-  entryYesPrice:   zod.number(),
-  contractCount:   zod.number(),
-  peakPnlCents:    zod.number(),
-  trailingActive:  zod.boolean(),
-  lastYesPrice:    zod.number(),
-  msRemaining:     zod.number(),
-  enteredAt:       zod.number(),
-});
-
-export const OutcomeBotMarketState = zod.object({
-  state:       zod.enum(["TRENDING", "BREAKOUT", "EMERGING", "NO_TRADE"]),
-  direction:   zod.enum(["UP", "DOWN"]).optional(),
-  moveCents:   zod.number().optional(),
-  reason:      zod.string(),
-  samples:     zod.number(),
-  latestPrice: zod.number().optional(),
-});
-
-export const OutcomeBotStatus = zod.object({
-  enabled:        zod.boolean(),
-  status:         zod.enum(["DISABLED", "SCANNING", "IN_TRADE"]),
-  lastDecision:   zod.string().nullable(),
-  lastDecisionAt: zod.string().nullable(),
-  openTradeCount: zod.number(),
-  simWins:        zod.number(),
-  simLosses:      zod.number(),
-  simPnlCents:    zod.number(),
-  noEdgeCount:    zod.number(),
-  betCostCents:   zod.number(),
-  openPositions:  zod.array(OutcomeBotOpenPosition).optional(),
-  marketStates:   zod.record(zod.string(), OutcomeBotMarketState).optional(),
-});
-
 export const GetBotLogsQueryParams = zod.object({
   limit: zod.coerce.number().default(getBotLogsQueryLimitDefault),
-});
-
-export const PaperTradeRecord = zod.object({
-  id:         zod.number(),
-  coin:       zod.string(),
-  side:       zod.string(),
-  entryPrice: zod.number(),
-  exitPrice:  zod.number(),
-  pnlCents:   zod.number(),
-  exitReason: zod.string(),
-  closedAt:   zod.string(),
-});
-
-export const TimeOfDayBucket = zod.object({
-  label:    zod.string(),
-  wins:     zod.number(),
-  losses:   zod.number(),
-  pnlCents: zod.number(),
-});
-
-export const PaperStats = zod.object({
-  totalTrades:      zod.number(),
-  wins:             zod.number(),
-  losses:           zod.number(),
-  winRatePct:       zod.number(),
-  totalPnlCents:    zod.number(),
-  evPerTradeCents:  zod.number(),
-  maxDrawdownCents: zod.number(),
-  timeOfDay:        zod.array(TimeOfDayBucket),
-  recentTrades:     zod.array(PaperTradeRecord),
 });
 
 export const GetBotLogsResponse = zod.object({

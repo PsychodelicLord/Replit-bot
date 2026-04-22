@@ -19,4 +19,5 @@ export interface BotConfigUpdate {
   balanceFloorCents?: number;
   dailyProfitTargetCents?: number;
   dailyLossLimitCents?: number;
+  exitWindowMins?: number;
 }

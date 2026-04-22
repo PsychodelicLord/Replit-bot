@@ -584,30 +584,6 @@ async function checkSafetyLimits(): Promise<boolean> {
   return true;
 }
 
-// Lightweight check for coin flip — same limits but never stops the main bot
-async function checkSafetyLimitsPassive(): Promise<{ ok: boolean; reason?: string }> {
-  const balanceCheck = await assertSafeToEnterTrade({
-    stopBotOnFloorHit: false,
-    context: "coin-flip gate",
-  });
-  if (!balanceCheck.ok) return balanceCheck;
-
-  await refreshDailyPnl();
-
-  const { balanceFloorCents, dailyProfitTargetCents, dailyLossLimitCents } = botConfig;
-
-  if (balanceFloorCents > 0 && state.balanceCents <= balanceFloorCents) {
-    return { ok: false, reason: `Balance floor hit (${formatUsd(state.balanceCents)} ≤ ${formatUsd(balanceFloorCents)})` };
-  }
-  if (dailyProfitTargetCents > 0 && state.dailyPnlCents >= dailyProfitTargetCents) {
-    return { ok: false, reason: `Daily profit target already reached` };
-  }
-  if (dailyLossLimitCents > 0 && state.dailyPnlCents <= -dailyLossLimitCents) {
-    return { ok: false, reason: `Daily loss limit hit` };
-  }
-  return { ok: true };
-}
-
 // ─── Market types ────────────────────────────────────────────────────────────
 interface KalshiMarket {
   ticker: string;
@@ -1386,6 +1362,11 @@ export function getBotState(): BotState {
 }
 
 export async function startBot(): Promise<BotState> {
+  // Legacy bot pipeline is intentionally retired.
+  // Single active execution path is momentumBot: signal -> gate -> execute -> update state.
+  logger.warn("legacy startBot() invocation blocked; use momentum bot controls");
+  return getBotState();
+
   if (state.running) return getBotState();
   if (!API_KEY_ID || !PRIVATE_KEY_PEM) {
     throw new Error("KALSHI_API_KEY and KALSHI_PRIVATE_KEY must be set");
@@ -1494,6 +1475,12 @@ export async function manualTrade(
   limitCents: number,
   quantity: number,
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
+  logger.warn({ ticker, side, limitCents, quantity }, "legacy manualTrade() invocation blocked");
+  return {
+    success: false,
+    message: "Manual trade path disabled. ACTIVE TRADE PATHS: 1 (signal -> gate -> execute -> update state).",
+  };
+
   let gateLocked = false;
   try {
     const lock = await acquireTradeEntryGate(ticker, "manual_trade");

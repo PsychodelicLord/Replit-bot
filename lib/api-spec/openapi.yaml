@@ -96,6 +96,96 @@ paths:
               schema:
                 $ref: "#/components/schemas/BotStatus"
 
+  /bot/manual-trade:
+    post:
+      operationId: manualTrade
+      tags: [bot]
+      summary: Manual trade endpoint (consolidated safety response)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualTradeBody"
+      responses:
+        "200":
+          description: Manual trade response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManualTradeResult"
+
+  /bot/momentum/status:
+    get:
+      operationId: getMomentumBotStatus
+      tags: [bot]
+      summary: Get Momentum Bot status
+      responses:
+        "200":
+          description: Momentum bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MomentumBotStatus"
+
+  /bot/momentum/auto:
+    post:
+      operationId: setMomentumBotAuto
+      tags: [bot]
+      summary: Set Momentum Bot auto mode / risk config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MomentumBotAutoBody"
+      responses:
+        "200":
+          description: Updated Momentum bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MomentumBotStatus"
+
+  /bot/momentum/reset-sim:
+    post:
+      operationId: resetMomentumSim
+      tags: [bot]
+      summary: Reset Momentum simulator stats
+      responses:
+        "200":
+          description: Momentum bot status after reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MomentumBotStatus"
+
+  /bot/momentum/reset-all:
+    post:
+      operationId: resetMomentumAll
+      tags: [bot]
+      summary: Reset all Momentum stats
+      responses:
+        "200":
+          description: Momentum bot status after full reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MomentumBotStatus"
+
+  /bot/momentum/paper-stats:
+    get:
+      operationId: getMomentumPaperStats
+      tags: [bot]
+      summary: Get Momentum paper-trade analytics
+      responses:
+        "200":
+          description: Paper-trading stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaperStats"
+
   /trades:
     get:
       operationId: listTrades
@@ -205,6 +295,9 @@ components:
         dailyLossLimitCents:
           type: integer
           description: Auto-stop when daily loss reaches this (cents, 0 = disabled)
+        exitWindowMins:
+          type: integer
+          description: Place limit sell order when this many minutes remain (e.g. 7)
       required:
         - maxEntryPriceCents
         - minNetProfitCents
@@ -218,6 +311,7 @@ components:
         - balanceFloorCents
         - dailyProfitTargetCents
         - dailyLossLimitCents
+        - exitWindowMins
 
     BotConfigUpdate:
       type: object
@@ -249,6 +343,8 @@ components:
         dailyProfitTargetCents:
           type: integer
         dailyLossLimitCents:
+          type: integer
+        exitWindowMins:
           type: integer
 
     BotStatus:
@@ -285,6 +381,347 @@ components:
         - openPositionCount
         - balanceCents
         - stoppedReason
+
+    ManualTradeBody:
+      type: object
+      properties:
+        ticker:
+          type: string
+          minLength: 1
+        side:
+          type: string
+          enum: [YES, NO]
+        limitCents:
+          type: integer
+          minimum: 1
+          maximum: 99
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 500
+      required:
+        - ticker
+        - side
+        - limitCents
+
+    ManualTradeResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        tradeId:
+          type: integer
+        orderId:
+          type: string
+        message:
+          type: string
+      required:
+        - success
+        - message
+
+    MomentumBotAutoBody:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        balanceFloorCents:
+          type: integer
+          minimum: 0
+        maxSessionLossCents:
+          type: integer
+          minimum: 0
+        consecutiveLossLimit:
+          type: integer
+          minimum: 0
+        betCostCents:
+          type: integer
+          minimum: 1
+        simulatorMode:
+          type: boolean
+        priceMin:
+          type: integer
+          minimum: 1
+          maximum: 99
+        priceMax:
+          type: integer
+          minimum: 1
+          maximum: 99
+        tpCents:
+          type: integer
+          minimum: 1
+          maximum: 99
+        slCents:
+          type: integer
+          minimum: 1
+          maximum: 99
+        staleMs:
+          type: integer
+          minimum: 10000
+          maximum: 300000
+        tpAbsoluteCents:
+          type: integer
+          minimum: 0
+          maximum: 99
+        sessionProfitTargetCents:
+          type: integer
+          minimum: 0
+        allowedCoins:
+          type: array
+          items:
+            type: string
+      required:
+        - enabled
+
+    MomentumBotHealthScore:
+      type: object
+      properties:
+        total:
+          type: number
+        label:
+          type: string
+          enum: [Healthy, Fragile, Broken, Pending]
+        tradesInBuffer:
+          type: number
+        winRate:
+          type: number
+        netEV:
+          type: number
+        avgWin:
+          type: number
+        avgLoss:
+          type: number
+        staleRate:
+          type: number
+        evScore:
+          type: number
+        stabilityScore:
+          type: number
+        ratioScore:
+          type: number
+        staleScore:
+          type: number
+        execScore:
+          type: number
+      required:
+        - total
+        - label
+        - tradesInBuffer
+        - winRate
+        - netEV
+        - avgWin
+        - avgLoss
+        - staleRate
+        - evScore
+        - stabilityScore
+        - ratioScore
+        - staleScore
+        - execScore
+
+    MomentumBotStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        autoMode:
+          type: boolean
+        status:
+          type: string
+          enum: [DISABLED, WAITING_FOR_SETUP, IN_TRADE, PAUSED]
+        openTradeCount:
+          type: integer
+        lastDecision:
+          type: ["string", "null"]
+        lastDecisionAt:
+          type: ["string", "null"]
+        totalWins:
+          type: integer
+        totalLosses:
+          type: integer
+        totalPnlCents:
+          type: integer
+        sessionPnlCents:
+          type: integer
+        sessionWins:
+          type: integer
+        sessionLosses:
+          type: integer
+        consecutiveLosses:
+          type: integer
+        pausedUntilMs:
+          type: ["integer", "null"]
+        pauseReason:
+          type: ["string", "null"]
+        stopReason:
+          type: ["string", "null"]
+        balanceFloorCents:
+          type: integer
+        maxSessionLossCents:
+          type: integer
+        consecutiveLossLimit:
+          type: integer
+        betCostCents:
+          type: integer
+        simulatorMode:
+          type: boolean
+        simPnlCents:
+          type: integer
+        simWins:
+          type: integer
+        simLosses:
+          type: integer
+        simOpenTradeCount:
+          type: integer
+        priceMin:
+          type: integer
+        priceMax:
+          type: integer
+        tpCents:
+          type: integer
+        slCents:
+          type: integer
+        staleMs:
+          type: integer
+        tpAbsoluteCents:
+          type: integer
+        sessionProfitTargetCents:
+          type: integer
+        startingBalanceCents:
+          type: ["integer", "null"]
+        allTimeWins:
+          type: integer
+        allTimeLosses:
+          type: integer
+        allTimePnlCents:
+          type: integer
+        healthScore:
+          anyOf:
+            - $ref: "#/components/schemas/MomentumBotHealthScore"
+            - type: "null"
+        allowedCoins:
+          type: array
+          items:
+            type: string
+      required:
+        - enabled
+        - autoMode
+        - status
+        - openTradeCount
+        - lastDecision
+        - lastDecisionAt
+        - totalWins
+        - totalLosses
+        - totalPnlCents
+        - sessionPnlCents
+        - sessionWins
+        - sessionLosses
+        - consecutiveLosses
+        - pausedUntilMs
+        - pauseReason
+        - stopReason
+        - balanceFloorCents
+        - maxSessionLossCents
+        - consecutiveLossLimit
+        - betCostCents
+        - simulatorMode
+        - simPnlCents
+        - simWins
+        - simLosses
+        - simOpenTradeCount
+        - priceMin
+        - priceMax
+        - tpCents
+        - slCents
+        - staleMs
+        - tpAbsoluteCents
+        - sessionProfitTargetCents
+        - startingBalanceCents
+        - allTimeWins
+        - allTimeLosses
+        - allTimePnlCents
+        - healthScore
+        - allowedCoins
+
+    PaperTradeRecord:
+      type: object
+      properties:
+        id:
+          type: integer
+        coin:
+          type: string
+        side:
+          type: string
+        entryPrice:
+          type: integer
+        exitPrice:
+          type: integer
+        pnlCents:
+          type: integer
+        exitReason:
+          type: string
+        closedAt:
+          type: string
+      required:
+        - id
+        - coin
+        - side
+        - entryPrice
+        - exitPrice
+        - pnlCents
+        - exitReason
+        - closedAt
+
+    TimeOfDayBucket:
+      type: object
+      properties:
+        label:
+          type: string
+        wins:
+          type: integer
+        losses:
+          type: integer
+        pnlCents:
+          type: integer
+      required:
+        - label
+        - wins
+        - losses
+        - pnlCents
+
+    PaperStats:
+      type: object
+      properties:
+        totalTrades:
+          type: integer
+        wins:
+          type: integer
+        losses:
+          type: integer
+        winRatePct:
+          type: number
+        totalPnlCents:
+          type: integer
+        evPerTradeCents:
+          type: number
+        maxDrawdownCents:
+          type: integer
+        timeOfDay:
+          type: array
+          items:
+            $ref: "#/components/schemas/TimeOfDayBucket"
+        recentTrades:
+          type: array
+          items:
+            $ref: "#/components/schemas/PaperTradeRecord"
+      required:
+        - totalTrades
+        - wins
+        - losses
+        - winRatePct
+        - totalPnlCents
+        - evPerTradeCents
+        - maxDrawdownCents
+        - timeOfDay
+        - recentTrades
 
     Trade:
       type: object
@@ -356,6 +793,12 @@ components:
           type: integer
         totalPnlCents:
           type: integer
+        totalWinCents:
+          type: integer
+        totalLossCents:
+          type: integer
+        todayPnlCents:
+          type: integer
         winRate:
           type: number
         avgPnlCents:
@@ -366,6 +809,9 @@ components:
         - losingTrades
         - openTrades
         - totalPnlCents
+        - totalWinCents
+        - totalLossCents
+        - todayPnlCents
         - winRate
         - avgPnlCents
 

@@ -31,4 +31,6 @@ export interface BotConfig {
   dailyProfitTargetCents: number;
   /** Auto-stop when daily loss reaches this (cents, 0 = disabled) */
   dailyLossLimitCents: number;
+  /** Place limit sell order when this many minutes remain (e.g. 7) */
+  exitWindowMins: number;
 }

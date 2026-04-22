@@ -20,9 +20,6 @@ import type {
   BotConfig,
   BotConfigUpdate,
   BotStatus,
-  CoinFlipAutoBody,
-  CoinFlipAutoStatus,
-  CoinFlipResult,
   GetBotLogsParams,
   HealthStatus,
   ListTradesParams,
@@ -31,6 +28,7 @@ import type {
   ManualTradeResult,
   MomentumBotAutoBody,
   MomentumBotStatus,
+  PaperStats,
   TradeList,
   TradeStats,
 } from "./api.schemas";
@@ -514,6 +512,490 @@ export const useStopBot = <
 };
 
 /**
+ * @summary Manual trade endpoint (consolidated safety response)
+ */
+export const getManualTradeUrl = () => {
+  return `/api/bot/manual-trade`;
+};
+
+export const manualTrade = async (
+  manualTradeBody: ManualTradeBody,
+  options?: RequestInit,
+): Promise<ManualTradeResult> => {
+  return customFetch<ManualTradeResult>(getManualTradeUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(manualTradeBody),
+  });
+};
+
+export const getManualTradeMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof manualTrade>>,
+    TError,
+    { data: BodyType<ManualTradeBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof manualTrade>>,
+  TError,
+  { data: BodyType<ManualTradeBody> },
+  TContext
+> => {
+  const mutationKey = ["manualTrade"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof manualTrade>>,
+    { data: BodyType<ManualTradeBody> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return manualTrade(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ManualTradeMutationResult = NonNullable<
+  Awaited<ReturnType<typeof manualTrade>>
+>;
+export type ManualTradeMutationBody = BodyType<ManualTradeBody>;
+export type ManualTradeMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Manual trade endpoint (consolidated safety response)
+ */
+export const useManualTrade = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof manualTrade>>,
+    TError,
+    { data: BodyType<ManualTradeBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof manualTrade>>,
+  TError,
+  { data: BodyType<ManualTradeBody> },
+  TContext
+> => {
+  return useMutation(getManualTradeMutationOptions(options));
+};
+
+/**
+ * @summary Get Momentum Bot status
+ */
+export const getGetMomentumBotStatusUrl = () => {
+  return `/api/bot/momentum/status`;
+};
+
+export const getMomentumBotStatus = async (
+  options?: RequestInit,
+): Promise<MomentumBotStatus> => {
+  return customFetch<MomentumBotStatus>(getGetMomentumBotStatusUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetMomentumBotStatusQueryKey = () => {
+  return [`/api/bot/momentum/status`] as const;
+};
+
+export const getGetMomentumBotStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getMomentumBotStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMomentumBotStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetMomentumBotStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getMomentumBotStatus>>
+  > = ({ signal }) => getMomentumBotStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getMomentumBotStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetMomentumBotStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getMomentumBotStatus>>
+>;
+export type GetMomentumBotStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Get Momentum Bot status
+ */
+
+export function useGetMomentumBotStatus<
+  TData = Awaited<ReturnType<typeof getMomentumBotStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMomentumBotStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetMomentumBotStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Set Momentum Bot auto mode / risk config
+ */
+export const getSetMomentumBotAutoUrl = () => {
+  return `/api/bot/momentum/auto`;
+};
+
+export const setMomentumBotAuto = async (
+  momentumBotAutoBody: MomentumBotAutoBody,
+  options?: RequestInit,
+): Promise<MomentumBotStatus> => {
+  return customFetch<MomentumBotStatus>(getSetMomentumBotAutoUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(momentumBotAutoBody),
+  });
+};
+
+export const getSetMomentumBotAutoMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof setMomentumBotAuto>>,
+    TError,
+    { data: BodyType<MomentumBotAutoBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof setMomentumBotAuto>>,
+  TError,
+  { data: BodyType<MomentumBotAutoBody> },
+  TContext
+> => {
+  const mutationKey = ["setMomentumBotAuto"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof setMomentumBotAuto>>,
+    { data: BodyType<MomentumBotAutoBody> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return setMomentumBotAuto(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SetMomentumBotAutoMutationResult = NonNullable<
+  Awaited<ReturnType<typeof setMomentumBotAuto>>
+>;
+export type SetMomentumBotAutoMutationBody = BodyType<MomentumBotAutoBody>;
+export type SetMomentumBotAutoMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Set Momentum Bot auto mode / risk config
+ */
+export const useSetMomentumBotAuto = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof setMomentumBotAuto>>,
+    TError,
+    { data: BodyType<MomentumBotAutoBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof setMomentumBotAuto>>,
+  TError,
+  { data: BodyType<MomentumBotAutoBody> },
+  TContext
+> => {
+  return useMutation(getSetMomentumBotAutoMutationOptions(options));
+};
+
+/**
+ * @summary Reset Momentum simulator stats
+ */
+export const getResetMomentumSimUrl = () => {
+  return `/api/bot/momentum/reset-sim`;
+};
+
+export const resetMomentumSim = async (
+  options?: RequestInit,
+): Promise<MomentumBotStatus> => {
+  return customFetch<MomentumBotStatus>(getResetMomentumSimUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getResetMomentumSimMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof resetMomentumSim>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof resetMomentumSim>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["resetMomentumSim"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof resetMomentumSim>>,
+    void
+  > = () => {
+    return resetMomentumSim(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ResetMomentumSimMutationResult = NonNullable<
+  Awaited<ReturnType<typeof resetMomentumSim>>
+>;
+
+export type ResetMomentumSimMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Reset Momentum simulator stats
+ */
+export const useResetMomentumSim = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof resetMomentumSim>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof resetMomentumSim>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getResetMomentumSimMutationOptions(options));
+};
+
+/**
+ * @summary Reset all Momentum stats
+ */
+export const getResetMomentumAllUrl = () => {
+  return `/api/bot/momentum/reset-all`;
+};
+
+export const resetMomentumAll = async (
+  options?: RequestInit,
+): Promise<MomentumBotStatus> => {
+  return customFetch<MomentumBotStatus>(getResetMomentumAllUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getResetMomentumAllMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof resetMomentumAll>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof resetMomentumAll>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["resetMomentumAll"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof resetMomentumAll>>,
+    void
+  > = () => {
+    return resetMomentumAll(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ResetMomentumAllMutationResult = NonNullable<
+  Awaited<ReturnType<typeof resetMomentumAll>>
+>;
+
+export type ResetMomentumAllMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Reset all Momentum stats
+ */
+export const useResetMomentumAll = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof resetMomentumAll>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof resetMomentumAll>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getResetMomentumAllMutationOptions(options));
+};
+
+/**
+ * @summary Get Momentum paper-trade analytics
+ */
+export const getGetMomentumPaperStatsUrl = () => {
+  return `/api/bot/momentum/paper-stats`;
+};
+
+export const getMomentumPaperStats = async (
+  options?: RequestInit,
+): Promise<PaperStats> => {
+  return customFetch<PaperStats>(getGetMomentumPaperStatsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetMomentumPaperStatsQueryKey = () => {
+  return [`/api/bot/momentum/paper-stats`] as const;
+};
+
+export const getGetMomentumPaperStatsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getMomentumPaperStats>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMomentumPaperStats>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetMomentumPaperStatsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getMomentumPaperStats>>
+  > = ({ signal }) => getMomentumPaperStats({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getMomentumPaperStats>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetMomentumPaperStatsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getMomentumPaperStats>>
+>;
+export type GetMomentumPaperStatsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Get Momentum paper-trade analytics
+ */
+
+export function useGetMomentumPaperStats<
+  TData = Awaited<ReturnType<typeof getMomentumPaperStats>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMomentumPaperStats>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetMomentumPaperStatsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
  * @summary List all trades
  */
 export const getListTradesUrl = (params?: ListTradesParams) => {
@@ -753,146 +1235,6 @@ export type GetBotLogsQueryError = ErrorType<unknown>;
  * @summary Get recent bot logs
  */
 
-/**
- * @summary Manual trade — place a limit buy order on a specific market
- */
-export const postManualTrade = async (
-  body: ManualTradeBody,
-  options?: RequestInit,
-): Promise<ManualTradeResult> => {
-  return customFetch<ManualTradeResult>(`/api/bot/manual-trade`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(body),
-  });
-};
-
-export type PostManualTradeMutationResult = NonNullable<Awaited<ReturnType<typeof postManualTrade>>>;
-export type PostManualTradeMutationError = ErrorType<unknown>;
-
-export function useManualTrade<
-  TError = ErrorType<unknown>,
-  TContext = unknown,
->(options?: {
-  mutation?: UseMutationOptions<
-    Awaited<ReturnType<typeof postManualTrade>>,
-    TError,
-    { data: ManualTradeBody },
-    TContext
-  >;
-  request?: SecondParameter<typeof customFetch>;
-}): UseMutationResult<
-  Awaited<ReturnType<typeof postManualTrade>>,
-  TError,
-  { data: ManualTradeBody },
-  TContext
-> {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationFn: MutationFunction<
-    Awaited<ReturnType<typeof postManualTrade>>,
-    { data: ManualTradeBody }
-  > = ({ data }) => postManualTrade(data, requestOptions);
-  return useMutation<
-    Awaited<ReturnType<typeof postManualTrade>>,
-    TError,
-    { data: ManualTradeBody },
-    TContext
-  >({ mutationFn, ...mutationOptions });
-}
-
-/**
- * @summary Get coin-flip auto mode status
- */
-export const getCoinFlipAutoUrl = () => `/api/bot/coin-flip/auto`;
-
-export const getCoinFlipAuto = async (options?: RequestInit): Promise<CoinFlipAutoStatus> =>
-  customFetch<CoinFlipAutoStatus>(getCoinFlipAutoUrl(), { ...options, method: "GET" });
-
-export const getGetCoinFlipAutoQueryKey = () => [`/api/bot/coin-flip/auto`] as const;
-
-export function useGetCoinFlipAuto<
-  TData = Awaited<ReturnType<typeof getCoinFlipAuto>>,
-  TError = ErrorType<unknown>,
->(options?: {
-  query?: UseQueryOptions<Awaited<ReturnType<typeof getCoinFlipAuto>>, TError, TData>;
-  request?: SecondParameter<typeof customFetch>;
-}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getGetCoinFlipAutoQueryKey();
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoinFlipAuto>>> = ({ signal }) =>
-    getCoinFlipAuto({ signal, ...requestOptions });
-  const query = useQuery({ queryKey, queryFn, ...queryOptions }) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return { ...query, queryKey };
-}
-
-/**
- * @summary Set coin-flip auto mode
- */
-export const postSetCoinFlipAuto = async (body: CoinFlipAutoBody, options?: RequestInit): Promise<CoinFlipAutoStatus> =>
-  customFetch<CoinFlipAutoStatus>(`/api/bot/coin-flip/auto`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(body),
-  });
-
-export function useSetCoinFlipAuto<TError = ErrorType<unknown>, TContext = unknown>(options?: {
-  mutation?: UseMutationOptions<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, TError, { data: CoinFlipAutoBody }, TContext>;
-  request?: SecondParameter<typeof customFetch>;
-}): UseMutationResult<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, TError, { data: CoinFlipAutoBody }, TContext> {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, { data: CoinFlipAutoBody }> =
-    ({ data }) => postSetCoinFlipAuto(data, requestOptions);
-  return useMutation<Awaited<ReturnType<typeof postSetCoinFlipAuto>>, TError, { data: CoinFlipAutoBody }, TContext>({ mutationFn, ...mutationOptions });
-}
-
-/**
- * @summary Coin-flip trade — pick a random eligible market, flip YES/NO, enter
- */
-export const postCoinFlipTrade = async (
-  options?: RequestInit,
-): Promise<CoinFlipResult> => {
-  return customFetch<CoinFlipResult>(`/api/bot/coin-flip`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-  });
-};
-
-export type PostCoinFlipTradeMutationResult = NonNullable<Awaited<ReturnType<typeof postCoinFlipTrade>>>;
-export type PostCoinFlipTradeMutationError = ErrorType<unknown>;
-
-export function useCoinFlipTrade<
-  TError = ErrorType<unknown>,
-  TContext = unknown,
->(options?: {
-  mutation?: UseMutationOptions<
-    Awaited<ReturnType<typeof postCoinFlipTrade>>,
-    TError,
-    void,
-    TContext
-  >;
-  request?: SecondParameter<typeof customFetch>;
-}): UseMutationResult<
-  Awaited<ReturnType<typeof postCoinFlipTrade>>,
-  TError,
-  void,
-  TContext
-> {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationFn: MutationFunction<
-    Awaited<ReturnType<typeof postCoinFlipTrade>>,
-    void
-  > = () => postCoinFlipTrade(requestOptions);
-  return useMutation<
-    Awaited<ReturnType<typeof postCoinFlipTrade>>,
-    TError,
-    void,
-    TContext
-  >({ mutationFn, ...mutationOptions });
-}
-
 export function useGetBotLogs<
   TData = Awaited<ReturnType<typeof getBotLogs>>,
   TError = ErrorType<unknown>,
@@ -914,50 +1256,4 @@ export function useGetBotLogs<
   };
 
   return { ...query, queryKey: queryOptions.queryKey };
-}
-
-/**
- * @summary Get Momentum Bot status
- */
-export const getMomentumBotStatusUrl = () => `/api/bot/momentum/status`;
-
-export const getMomentumBotStatus = async (options?: RequestInit): Promise<MomentumBotStatus> =>
-  customFetch<MomentumBotStatus>(getMomentumBotStatusUrl(), { ...options, method: "GET" });
-
-export const getGetMomentumBotStatusQueryKey = () => [`/api/bot/momentum/status`] as const;
-
-export function useGetMomentumBotStatus<
-  TData = Awaited<ReturnType<typeof getMomentumBotStatus>>,
-  TError = ErrorType<unknown>,
->(options?: {
-  query?: UseQueryOptions<Awaited<ReturnType<typeof getMomentumBotStatus>>, TError, TData>;
-  request?: SecondParameter<typeof customFetch>;
-}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getGetMomentumBotStatusQueryKey();
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getMomentumBotStatus>>> = ({ signal }) =>
-    getMomentumBotStatus({ signal, ...requestOptions });
-  const query = useQuery({ queryKey, queryFn, ...queryOptions }) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return { ...query, queryKey };
-}
-
-/**
- * @summary Set Momentum Bot auto mode / risk config
- */
-export const postSetMomentumBotAuto = async (body: MomentumBotAutoBody, options?: RequestInit): Promise<MomentumBotStatus> =>
-  customFetch<MomentumBotStatus>(`/api/bot/momentum/auto`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(body),
-  });
-
-export function useSetMomentumBotAuto<TError = ErrorType<unknown>, TContext = unknown>(options?: {
-  mutation?: UseMutationOptions<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, TError, { data: MomentumBotAutoBody }, TContext>;
-  request?: SecondParameter<typeof customFetch>;
-}): UseMutationResult<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, TError, { data: MomentumBotAutoBody }, TContext> {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, { data: MomentumBotAutoBody }> =
-    ({ data }) => postSetMomentumBotAuto(data, requestOptions);
-  return useMutation<Awaited<ReturnType<typeof postSetMomentumBotAuto>>, TError, { data: MomentumBotAutoBody }, TContext>({ mutationFn, ...mutationOptions });
 }
