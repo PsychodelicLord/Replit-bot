@@ -33,6 +33,7 @@ app.use(express.urlencoded({ extended: true }));
 
 const BOT_ADMIN_TOKEN = (process.env["BOT_ADMIN_TOKEN"] ?? "").trim();
 const isProductionDeployment = !!process.env["RAILWAY_ENVIRONMENT"];
+const disableBotAdminAuth = (process.env["DISABLE_BOT_ADMIN_AUTH"] ?? "").toLowerCase() === "true";
 const PROTECTED_API_PREFIXES = [
   "/bot/start",
   "/bot/stop",
@@ -46,6 +47,7 @@ const PROTECTED_API_PREFIXES = [
 
 const requireBotAdminToken: RequestHandler = (req, res, next) => {
   if (!isProductionDeployment) return next();
+  if (disableBotAdminAuth) return next();
   const pathOnly = req.path.split("?")[0];
   const method = req.method.toUpperCase();
   const needsAuth = PROTECTED_API_PREFIXES.some((prefix) => pathOnly.startsWith(prefix));
