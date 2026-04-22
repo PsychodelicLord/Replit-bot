@@ -957,9 +957,11 @@ async function executeSell(
     ? (sellResp?.order?.yes_price ?? 0)
     : (sellResp?.order?.no_price  ?? 0);
   const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
-  const gross     = fillPrice - pos.entryPriceCents;
-  const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-  const netPnl    = gross - fee;
+  // P&L is per-contract delta multiplied by contract count.
+  const grossPerContract = fillPrice - pos.entryPriceCents;
+  const grossTotal       = grossPerContract * pos.contractCount;
+  const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+  const netPnl           = grossTotal - fee;
 
   const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
   if (idx >= 0) openPositions.splice(idx, 1);
@@ -1159,9 +1161,10 @@ export async function retryOpenPositions(): Promise<void> {
               // Sell confirmed filled — commit removal
               const rawPrice  = pos.side === "YES" ? (or.order?.yes_price ?? 0) : (or.order?.no_price ?? 0);
               const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pos.entryPriceCents;
-              const gross     = fillPrice - pos.entryPriceCents;
-              const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-              const netPnl    = gross - fee;
+              const grossPerContract = fillPrice - pos.entryPriceCents;
+              const grossTotal       = grossPerContract * pos.contractCount;
+              const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+              const netPnl           = grossTotal - fee;
               const idxP = openPositions.findIndex(p => p.tradeId === pos.tradeId);
               if (idxP >= 0) openPositions.splice(idxP, 1);
               openMarkets.delete(pos.marketId);
@@ -1242,9 +1245,10 @@ export async function retryOpenPositions(): Promise<void> {
                 const rawFp = pos.side === "YES" ? (sellFill.yes_price ?? 0) : (sellFill.no_price ?? 0);
                 if (rawFp > 0) {
                   sellPriceCents = Math.round(rawFp * 100);
-                  const gross    = sellPriceCents - pos.entryPriceCents;
-                  const fee      = Math.floor(botConfig.feeRate * Math.max(0, gross));
-                  pnlCents       = gross - fee;
+                  const grossPerContract = sellPriceCents - pos.entryPriceCents;
+                  const grossTotal       = grossPerContract * pos.contractCount;
+                  const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+                  pnlCents               = grossTotal - fee;
                 }
               }
             } catch (_) { /* fill lookup failed — use zero */ }
@@ -1285,8 +1289,11 @@ export async function retryOpenPositions(): Promise<void> {
           const settled    = m?.status === "settled" || m?.status === "finalized";
           const ourSideWon = settled && m?.result?.toLowerCase() === pos.side.toLowerCase();
           const pnlCents   = ourSideWon
-            ? (() => { const g = 100 - pos.entryPriceCents; return g - Math.floor(botConfig.feeRate * g); })()
-            : -pos.entryPriceCents;
+            ? (() => {
+                const grossTotal = (100 - pos.entryPriceCents) * pos.contractCount;
+                return grossTotal - Math.floor(botConfig.feeRate * grossTotal);
+              })()
+            : -(pos.entryPriceCents * pos.contractCount);
 
           const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
           if (idx >= 0) openPositions.splice(idx, 1);
@@ -1329,9 +1336,12 @@ export async function retryOpenPositions(): Promise<void> {
           continue;
         }
 
-        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL)
-        if (currentBid > 0 && grossProfit <= -3) {
-          await executeSell(pos, currentBid, `stop-loss (${grossProfit}¢)`);
+        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL).
+        // If bid is 0, treat executable exit as 1¢ to avoid getting stuck unprotected.
+        const slExecutablePrice = currentBid > 0 ? currentBid : 1;
+        const slGrossProfit = slExecutablePrice - pos.entryPriceCents;
+        if (slGrossProfit <= -3) {
+          await executeSell(pos, slExecutablePrice, `stop-loss (${slGrossProfit}¢)`);
           continue;
         }
 
