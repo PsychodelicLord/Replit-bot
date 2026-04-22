@@ -124,20 +124,23 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
 
   const totalTrades = all.length;
   const openTrades = all.filter((t) => t.status === "open").length;
-  const closedTrades = all.filter((t) => t.status === "closed");
-  const wins = closedTrades.filter((t) => (t.pnlCents ?? 0) > 0);
-  const losses = closedTrades.filter((t) => (t.pnlCents ?? 0) < 0);
+  // Count every settled trade record that has a concrete P&L, not only status==="closed".
+  // This prevents dashboard bias when losses are recorded under other final statuses
+  // (e.g. expired/cancelled/manual reconciliation rows).
+  const settledTradesRows = all.filter((t) => t.status !== "open" && t.pnlCents != null);
+  const wins = settledTradesRows.filter((t) => (t.pnlCents ?? 0) > 0);
+  const losses = settledTradesRows.filter((t) => (t.pnlCents ?? 0) < 0);
   const winningTrades = wins.length;
   const losingTrades = losses.length;
-  const totalPnlCents = closedTrades.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
+  const totalPnlCents = settledTradesRows.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
   const totalWinCents = wins.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
   const totalLossCents = Math.abs(losses.reduce((acc, t) => acc + (t.pnlCents ?? 0), 0));
   const todayPnlCents = all
-    .filter((t) => t.closedAt && new Date(t.closedAt) >= todayStart && t.pnlCents != null)
+    .filter((t) => t.status !== "open" && t.closedAt && new Date(t.closedAt) >= todayStart && t.pnlCents != null)
     .reduce((acc, t) => acc + (t.pnlCents ?? 0), 0);
-  const settledTrades = winningTrades + losingTrades;
-  const winRate = settledTrades > 0 ? winningTrades / settledTrades : 0;
-  const avgPnlCents = settledTrades > 0 ? totalPnlCents / settledTrades : 0;
+  const settledCount = winningTrades + losingTrades;
+  const winRate = settledCount > 0 ? winningTrades / settledCount : 0;
+  const avgPnlCents = settledCount > 0 ? totalPnlCents / settledCount : 0;
 
   res.json(GetTradeStatsResponse.parse({
     totalTrades,
