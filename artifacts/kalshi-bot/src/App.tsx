@@ -15,6 +15,11 @@ const queryClient = new QueryClient({
   },
 });
 
+setAuthTokenGetter(() => {
+  const token = import.meta.env.VITE_BOT_ADMIN_TOKEN;
+  return token && token.trim().length > 0 ? token : null;
+});
+
 function Router() {
   return (
     <Switch>
@@ -25,11 +30,6 @@ function Router() {
 }
 
 function App() {
-  setAuthTokenGetter(() => {
-    const token = import.meta.env.VITE_BOT_ADMIN_TOKEN;
-    return token && token.trim().length > 0 ? token : null;
-  });
-
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
