@@ -26,6 +26,9 @@ import {
   releaseTradeEntryGate,
   getSharedTradeGateStatus,
   setExchangeOpenPositionsSnapshot,
+  noteOpenedAssetPosition,
+  noteClosedAssetPosition,
+  canonicalizeAssetLabel,
 } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
@@ -64,6 +67,7 @@ const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 const ENTRY_CHECK_COOLDOWN_MS = 10_000; // short per-asset duplicate-entry cooldown
 const EXCHANGE_POSITION_SYNC_MS = 5_000; // refresh exchange open positions frequently
 const SIGNAL_TO_EXEC_MAX_DELAY_MS = 8_000; // skip entries if signal is already too old
+const POST_ENTRY_LOCK_HOLD_MS = 20_000; // keep distributed lock briefly after open to cover exchange-sync lag
 
 const FEE_RATE = 0.07;
 
@@ -446,10 +450,7 @@ function isMomentumMarket(ticker: string): boolean {
 }
 
 function coinLabel(ticker: string): string {
-  for (const coin of ALLOWED_COINS) {
-    if (ticker.toUpperCase().includes(coin)) return coin;
-  }
-  return ticker;
+  return canonicalizeAssetLabel(ticker);
 }
 
 function isCryptoMomentumTicker(ticker: string): boolean {
@@ -1305,6 +1306,7 @@ export async function executeMomentumTrade(
   };
 
   openPositions.push(pos);
+  noteOpenedAssetPosition(ticker);
   state.openTradeCount = openPositions.length;
   state.status = "IN_TRADE";
 
@@ -1561,6 +1563,7 @@ async function runSellMonitor(): Promise<void> {
     if (pos.contractCount <= 0) {
       const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
       if (idx >= 0) openPositions.splice(idx, 1);
+    noteClosedAssetPosition(pos.marketId);
       state.openTradeCount = openPositions.length;
       console.warn(`[GHOST PURGE] Removed 0-contract ghost position: ${pos.marketId} ${pos.side} tradeId:${pos.tradeId}`);
       dbLog("warn", `[MOMENTUM] GHOST PURGE: removed 0-contract position ${pos.marketId} (${pos.side}) — no loss recorded (order never filled)`);
@@ -2082,6 +2085,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         continue;
       }
 
+      let keepDistributedLockMs = 0;
       try {
         const executeResult = await executeMomentumTrade(
           market.ticker,
@@ -2100,6 +2104,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         );
         if (executeResult.status === "trade_opened") {
           setLastTradeNow(marketCoin);
+          keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
         }
         // Reserve this bet so the next candidate's balance check sees the correct available balance,
         // even if Kalshi's API hasn't updated yet.
@@ -2108,7 +2113,11 @@ export async function scanMomentumMarkets(): Promise<void> {
         }
         console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
       } finally {
-        releaseTradeEntryGate(marketCoin, "momentum_scan_execute_finally");
+        releaseTradeEntryGate(
+          marketCoin,
+          "momentum_scan_execute_finally",
+          { keepDistributedLockMs: keepDistributedLockMs },
+        );
       }
     }
   }
