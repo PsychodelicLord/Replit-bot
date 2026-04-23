@@ -1859,8 +1859,16 @@ async function acquireAtomicTradeLock(asset: string): Promise<{ ok: boolean; acq
   try {
     await db.execute(
       sql`
-        INSERT INTO trade_locks (asset, owner_id, state, intent_created_at, created_at, updated_at)
-        VALUES (${asset}, ${ENTRY_LOCK_OWNER_ID}, 'locked', NOW(), NOW(), NOW())
+        INSERT INTO trade_locks (asset, owner_id, state, intent_created_at, expires_at, created_at, updated_at)
+        VALUES (
+          ${asset},
+          ${ENTRY_LOCK_OWNER_ID},
+          'locked',
+          NOW(),
+          NOW() + (${ENTRY_LOCK_TTL_MS} * INTERVAL '1 millisecond'),
+          NOW(),
+          NOW()
+        )
       `,
     );
     return { ok: true, acquired: true, error: null };
@@ -1880,7 +1888,10 @@ async function markTradeIntent(asset: string): Promise<{ ok: boolean; error: str
     await db.execute(
       sql`
         UPDATE trade_locks
-        SET state = 'intent', intent_created_at = NOW(), updated_at = NOW()
+        SET state = 'intent',
+            intent_created_at = NOW(),
+            expires_at = NOW() + (${INTENT_WINDOW_MS} * INTERVAL '1 millisecond'),
+            updated_at = NOW()
         WHERE asset = ${asset}
           AND owner_id = ${ENTRY_LOCK_OWNER_ID}
       `,
