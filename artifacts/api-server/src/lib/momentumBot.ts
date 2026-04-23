@@ -129,6 +129,16 @@ interface MomentumDecision {
   centsPerSec: number;    // velocity: moveCents / (moveMs / 1000)
 }
 
+type MarketPriceSource = "orderbook" | "market_hint" | "market_detail";
+
+interface OrderBookSnapshot {
+  bid: number;
+  ask: number;
+  spread: number;
+  mid: number;
+  source: MarketPriceSource;
+}
+
 // ─── State ─────────────────────────────────────────────────────────────────
 export interface MomentumBotState {
   enabled: boolean;
@@ -744,7 +754,7 @@ async function fetchMarketOrderBook(
   ticker: string,
   hintAskCents?: number,
   hintBidCents?: number,
-): Promise<{ bid: number; ask: number; spread: number; mid: number } | null> {
+): Promise<OrderBookSnapshot | null> {
   try {
     const resp = await kalshiFetch("GET", `/markets/${ticker}/orderbook`) as {
       // New format (Kalshi API ≥ 2025): prices in 0.0–1.0 dollar scale
@@ -776,14 +786,14 @@ async function fetchMarketOrderBook(
       const bid = bestYesBid > 0 ? bestYesBid : Math.max(0, ask - 2);
       const spread = ask - bid;
       const mid = Math.round((ask + bid) / 2);
-      if (ask > 0 && bid > 0) return { bid, ask, spread, mid };
+      if (ask > 0 && bid > 0) return { bid, ask, spread, mid, source: "orderbook" };
     }
 
     // Orderbook empty — use market-list price hints if provided
     if (hintAskCents && hintBidCents && hintAskCents > 0 && hintBidCents > 0) {
       const spread = hintAskCents - hintBidCents;
       const mid = Math.round((hintAskCents + hintBidCents) / 2);
-      return { bid: hintBidCents, ask: hintAskCents, spread, mid };
+      return { bid: hintBidCents, ask: hintAskCents, spread, mid, source: "market_hint" };
     }
 
     // Last resort: individual market detail (has yes_ask_dollars / yes_bid_dollars)
@@ -796,7 +806,7 @@ async function fetchMarketOrderBook(
       const bid = m.yes_bid_dollars ? Math.round(m.yes_bid_dollars * 100) : Math.max(0, ask - 2);
       const spread = ask - bid;
       const mid = Math.round((ask + bid) / 2);
-      if (ask > 0 && bid > 0) return { bid, ask, spread, mid };
+      if (ask > 0 && bid > 0) return { bid, ask, spread, mid, source: "market_detail" };
     }
 
     return null;
@@ -1779,15 +1789,24 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) {
+      console.log(
+        `[SCAN SKIP NO_PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — no bid/ask from orderbook, hints, or detail`,
+      );
       log(`[SCAN] ${coinLabel(market.ticker)} — no orderbook data, skipping`);
       continue;
     }
 
     const { bid, ask, spread, mid } = ob;
     if (ask <= 0 || bid <= 0) {
+      console.log(
+        `[SCAN SKIP NO_PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — non-tradable price snapshot source:${ob.source} ask:${ask} bid:${bid}`,
+      );
       console.log(`[SCAN] ${coinLabel(market.ticker)} — zero prices (ask:${ask} bid:${bid}), skipping`);
       continue;
     }
+    console.log(
+      `[SCAN INCLUDE PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — source:${ob.source} ask:${ask} bid:${bid} spread:${spread} mid:${mid}`,
+    );
     // Hard skip only if price is well outside configurable range (with ±5¢ buffer for momentum continuation)
     const pMin = state.priceMin;
     const pMax = state.priceMax;
