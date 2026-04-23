@@ -1662,6 +1662,108 @@ export function canonicalizeAssetLabel(assetOrTicker: string): string {
   return assetLabel(assetOrTicker);
 }
 
+interface ParsedExchangePositionRow {
+  ticker: string;
+  asset: string;
+  hasExposure: boolean;
+}
+
+interface ParsedExchangePositions {
+  rows: ParsedExchangePositionRow[];
+  rawCount: number;
+  openCount: number;
+  suspiciousCount: number;
+  suspicious: boolean;
+}
+
+function parseMaybeNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number.parseFloat(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function hasOwn(obj: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function parseExchangePositionsPayload(positionsPayload: unknown): ParsedExchangePositions {
+  const rows = Array.isArray(positionsPayload) ? positionsPayload : [];
+  const parsedRows: ParsedExchangePositionRow[] = [];
+  let openCount = 0;
+  let suspiciousCount = 0;
+
+  for (const rowRaw of rows) {
+    if (!rowRaw || typeof rowRaw !== "object") {
+      suspiciousCount++;
+      continue;
+    }
+    const row = rowRaw as Record<string, unknown>;
+    const tickerRaw = row.ticker_name ?? row.ticker;
+    const ticker = typeof tickerRaw === "string" ? tickerRaw.trim() : "";
+    const rawNumbers = [
+      row.position,
+      row.position_fp,
+      row.market_exposure,
+      row.market_exposure_cents,
+    ];
+    const parsedNumbers = rawNumbers
+      .map(parseMaybeNumber)
+      .filter((v): v is number => v !== null);
+    const hasKnownNumericField =
+      hasOwn(row, "position") ||
+      hasOwn(row, "position_fp") ||
+      hasOwn(row, "market_exposure") ||
+      hasOwn(row, "market_exposure_cents");
+    const hasUnparseableNumeric =
+      rawNumbers.some((v) => v !== undefined && v !== null && String(v).trim() !== "" && parseMaybeNumber(v) === null);
+    const hasNonZeroExposure = parsedNumbers.some((v) => v !== 0);
+
+    if (hasNonZeroExposure && ticker) {
+      openCount++;
+      parsedRows.push({ ticker, asset: assetLabel(ticker), hasExposure: true });
+    }
+
+    const suspiciousRow =
+      hasUnparseableNumeric ||
+      (ticker && !hasKnownNumericField) ||
+      (ticker && hasKnownNumericField && parsedNumbers.length === 0) ||
+      (hasNonZeroExposure && !ticker);
+
+    if (suspiciousRow) suspiciousCount++;
+  }
+
+  return {
+    rows: parsedRows,
+    rawCount: rows.length,
+    openCount,
+    suspiciousCount,
+    suspicious: rows.length > 0 && suspiciousCount > 0,
+  };
+}
+
+export function parseExchangePositionRows(positionsPayload: unknown): {
+  ok: boolean;
+  reason?: string;
+  rows: ParsedExchangePositionRow[];
+} {
+  const parsed = parseExchangePositionsPayload(positionsPayload);
+  if (parsed.suspicious) {
+    return {
+      ok: false,
+      reason: `rows=${parsed.rawCount} suspicious=${parsed.suspiciousCount}`,
+      rows: [],
+    };
+  }
+  return { ok: true, rows: parsed.rows };
+}
+
 function hasFreshPositionSnapshot(): boolean {
   if (lastPositionSyncOkAt <= 0) return false;
   return Date.now() - lastPositionSyncOkAt <= POSITION_SYNC_MS * 3;
@@ -1675,15 +1777,22 @@ async function refreshExchangeOpenAssets(force = false): Promise<boolean> {
   lastPositionSyncAt = now;
   try {
     const pr = await kalshiFetch("GET", "/portfolio/positions") as {
-      positions?: Array<{ ticker_name?: string; position?: number }>
+      positions?: unknown;
     };
+    const parsed = parseExchangePositionsPayload(pr.positions);
+    if (parsed.suspicious) {
+      lastPositionSyncError = `positions payload parse anomaly: rows=${parsed.rawCount} suspicious=${parsed.suspiciousCount}`;
+      logger.warn(
+        { rawCount: parsed.rawCount, suspiciousCount: parsed.suspiciousCount, openCount: parsed.openCount },
+        "position gate: refusing to trust unparseable positions payload",
+      );
+      return false;
+    }
     exchangeOpenAssets.clear();
-    for (const p of pr.positions ?? []) {
-      // Non-zero exposure means this asset is still open (positive or negative).
-      if ((p.position ?? 0) === 0) continue;
-      const ticker = p.ticker_name ?? "";
-      if (!ticker) continue;
-      exchangeOpenAssets.add(assetLabel(ticker));
+    for (const row of parsed.rows) {
+      if (row.hasExposure) {
+        exchangeOpenAssets.add(row.asset);
+      }
     }
     lastPositionSyncOkAt = Date.now();
     lastPositionSyncError = null;

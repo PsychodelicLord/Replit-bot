@@ -29,6 +29,7 @@ import {
   noteOpenedAssetPosition,
   noteClosedAssetPosition,
   canonicalizeAssetLabel,
+  parseExchangePositionRows,
 } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
@@ -577,15 +578,17 @@ async function refreshLiveOpenPositionsFromExchange(force = false): Promise<bool
   lastExchangeSyncMs = now;
 
   try {
-    const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
-      positions?: Array<{ ticker_name?: string; position?: number }>
-    };
+    const posResp = await kalshiFetch("GET", "/portfolio/positions");
+    const parsed = parseExchangePositionRows((posResp as Record<string, unknown>)?.positions);
+    if (!parsed.ok) {
+      lastExchangeSyncError = `position payload parse failed: ${parsed.reason}`;
+      warn(`[ENTRY CHECK] Exchange position sync parse failed: ${parsed.reason}`);
+      return false;
+    }
     const freshAssets = new Set<string>();
-    for (const p of posResp.positions ?? []) {
-      const qty = p.position ?? 0;
-      const ticker = p.ticker_name ?? "";
-      if (!ticker || qty === 0) continue;
-      freshAssets.add(coinLabel(ticker));
+    for (const row of parsed.rows) {
+      if (!row.hasExposure) continue;
+      freshAssets.add(coinLabel(row.ticker));
     }
     setExchangeOpenPositionsSnapshot(freshAssets);
     lastExchangeSyncOkAt = Date.now();
