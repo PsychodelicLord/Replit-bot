@@ -1636,6 +1636,7 @@ let lastPositionSyncError: string | null = null;
 const exchangeOpenAssets = new Set<string>(); // asset labels, e.g. BTC/ETH/SOL
 const ENTRY_LOCK_TTL_MS = 45_000;
 const GLOBAL_MAX_OPEN_POSITIONS = 2;
+const ASSET_POST_EXIT_COOLDOWN_MS = 75_000;
 const ENTRY_LOCK_OWNER_ID = `${process.pid}-${crypto.randomUUID()}`;
 const INTENT_WINDOW_MS = 30_000;
 const ENTRY_CONFIRM_WINDOW_MS = 20_000;
@@ -1986,6 +1987,35 @@ async function getGlobalOpenPositionCount(): Promise<{ ok: boolean; count: numbe
   }
 }
 
+async function getAssetPostExitCooldownRemainingMs(asset: string): Promise<{ ok: boolean; remainingMs: number; error: string | null }> {
+  try {
+    const rows = await db
+      .select({
+        closedAt: tradesTable.closedAt,
+      })
+      .from(tradesTable)
+      .where(
+        and(
+          ne(tradesTable.status, "open"),
+          sql`${tradesTable.closedAt} IS NOT NULL`,
+          sql`UPPER(${tradesTable.marketId}) LIKE '%' || UPPER(${asset}) || '%'`,
+        ),
+      )
+      .orderBy(sql`${tradesTable.closedAt} DESC`)
+      .limit(1);
+    const closedAt = rows[0]?.closedAt ?? null;
+    if (!closedAt) {
+      return { ok: true, remainingMs: 0, error: null };
+    }
+    const remainingMs = closedAt.getTime() + ASSET_POST_EXIT_COOLDOWN_MS - Date.now();
+    return { ok: true, remainingMs: Math.max(0, remainingMs), error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "position gate: post-exit cooldown query failed");
+    return { ok: false, remainingMs: 0, error: message };
+  }
+}
+
 export interface SharedTradeGateStatus {
   asset: string;
   openPosition: boolean;
@@ -2049,12 +2079,13 @@ export async function canEnterAssetTrade(
   }
   const lockAfterCleanup = await getTradeLockRow(asset);
   const globalCount = await getGlobalOpenPositionCount();
+  const cooldown = await getAssetPostExitCooldownRemainingMs(asset);
   const status = readTradeGateStatus(asset, lockAfterCleanup.state, lockAfterCleanup.ownerId);
   const allowLockOwnerId = options?.allowLockOwnerId ?? null;
   const lockHeldByOther =
     status.lockOwnerId !== null && status.lockOwnerId !== allowLockOwnerId;
   const effectiveExchangeSyncOk = exchangeSyncOk || status.exchangeSyncOk;
-  const lastError = lockAfterCleanup.error ?? globalCount.error ?? status.lastError;
+  const lastError = lockAfterCleanup.error ?? globalCount.error ?? cooldown.error ?? status.lastError;
   logger.info(
     {
       asset: status.asset,
@@ -2064,6 +2095,7 @@ export async function canEnterAssetTrade(
       lockOwnerId: status.lockOwnerId,
       lockHeldByOther,
       globalOpenPositions: globalCount.count,
+      postExitCooldownMs: cooldown.remainingMs,
       exchangeSyncOk: effectiveExchangeSyncOk,
       lastError,
     },
@@ -2077,6 +2109,16 @@ export async function canEnterAssetTrade(
   }
   if (!globalCount.ok) {
     return { ok: false, reason: "position_count_unavailable", status: { ...status, lastError } };
+  }
+  if (!cooldown.ok) {
+    return { ok: false, reason: "post_exit_cooldown_unavailable", status: { ...status, lastError } };
+  }
+  if (cooldown.remainingMs > 0) {
+    return {
+      ok: false,
+      reason: `post_exit_cooldown_${Math.ceil(cooldown.remainingMs / 1000)}s`,
+      status,
+    };
   }
   if (globalCount.count >= GLOBAL_MAX_OPEN_POSITIONS) {
     return { ok: false, reason: "max_positions_reached", status };
