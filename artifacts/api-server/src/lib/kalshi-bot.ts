@@ -2020,7 +2020,10 @@ export async function getSharedTradeGateStatus(assetOrTicker: string): Promise<S
   };
 }
 
-export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
+export async function canEnterAssetTrade(
+  assetOrTicker: string,
+  options?: { allowLockOwnerId?: string },
+): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
   const asset = assetLabel(assetOrTicker);
   const exchangeSyncOk = await refreshExchangeOpenAssets();
   const lock = await getTradeLockRow(asset);
@@ -2034,6 +2037,9 @@ export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: b
   const lockAfterCleanup = await getTradeLockRow(asset);
   const globalCount = await getGlobalOpenPositionCount();
   const status = readTradeGateStatus(asset, lockAfterCleanup.state, lockAfterCleanup.ownerId);
+  const allowLockOwnerId = options?.allowLockOwnerId ?? null;
+  const lockHeldByOther =
+    status.lockOwnerId !== null && status.lockOwnerId !== allowLockOwnerId;
   const effectiveExchangeSyncOk = exchangeSyncOk || status.exchangeSyncOk;
   const lastError = lockAfterCleanup.error ?? globalCount.error ?? status.lastError;
   logger.info(
@@ -2043,6 +2049,7 @@ export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: b
       entryLocked: status.entryLocked,
       lockState: status.lockState,
       lockOwnerId: status.lockOwnerId,
+      lockHeldByOther,
       globalOpenPositions: globalCount.count,
       exchangeSyncOk: effectiveExchangeSyncOk,
       lastError,
@@ -2064,7 +2071,7 @@ export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: b
   if (status.openPosition) {
     return { ok: false, reason: "has_open_position", status };
   }
-  if (status.entryLocked) {
+  if (lockHeldByOther) {
     return { ok: false, reason: "entry_in_progress", status };
   }
   return { ok: true, status };
@@ -2125,7 +2132,8 @@ export async function acquireTradeEntryGate(assetOrTicker: string, _context?: st
     };
   }
 
-  const check = await canEnterAssetTrade(asset);
+  // After lock + intent marker, allow this owner to continue through validation.
+  const check = await canEnterAssetTrade(asset, { allowLockOwnerId: ENTRY_LOCK_OWNER_ID });
   if (!check.ok) {
     await finalizeTradeIntent(asset, "rolled_back");
     await releaseAtomicTradeLock(asset);
