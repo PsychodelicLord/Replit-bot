@@ -58,6 +58,26 @@ export async function runMigrations(): Promise<void> {
       DELETE FROM trade_entry_locks
       WHERE expires_at <= NOW()
     `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS trade_locks (
+        asset             TEXT PRIMARY KEY,
+        owner_id          TEXT NOT NULL,
+        state             TEXT NOT NULL DEFAULT 'locked',
+        intent_id         TEXT,
+        intent_payload    TEXT,
+        intent_created_at TIMESTAMPTZ,
+        expires_at        TIMESTAMPTZ NOT NULL,
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS trade_locks_expires_at_idx
+      ON trade_locks (expires_at)
+    `);
+    await db.execute(sql`
+      DELETE FROM trade_locks
+      WHERE expires_at <= NOW()
+    `);
 
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS momentum_settings (

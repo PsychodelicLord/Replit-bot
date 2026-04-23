@@ -22,7 +22,7 @@ import {
   refreshBalance,
   setTradeClosedHook,
   canEnterAssetTrade,
-  acquireTradeEntryGate,
+  tryEnterTrade,
   releaseTradeEntryGate,
   getSharedTradeGateStatus,
   setExchangeOpenPositionsSnapshot,
@@ -2077,7 +2077,10 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      const entryLock = await acquireTradeEntryGate(marketCoin, "momentum_scan_execute");
+      const entryLock = await tryEnterTrade(marketCoin, {
+        assetOrTicker: marketCoin,
+        context: "momentum_scan_execute",
+      });
       if (!entryLock.allowed) {
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${entryLock.reason ?? "trade_gate_blocked"} (final pre-entry check)`);
         continue;
@@ -2089,6 +2092,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       }
 
       let keepDistributedLockMs = 0;
+      let finalLockState: "confirmed" | "rolled_back" = "rolled_back";
       try {
         const executeResult = await executeMomentumTrade(
           market.ticker,
@@ -2108,6 +2112,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         if (executeResult.status === "trade_opened") {
           setLastTradeNow(marketCoin);
           keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
+          finalLockState = "confirmed";
         }
         // Reserve this bet so the next candidate's balance check sees the correct available balance,
         // even if Kalshi's API hasn't updated yet.
@@ -2119,7 +2124,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         releaseTradeEntryGate(
           marketCoin,
           "momentum_scan_execute_finally",
-          { keepDistributedLockMs: keepDistributedLockMs },
+          { keepDistributedLockMs: keepDistributedLockMs, finalState: finalLockState },
         );
       }
     }

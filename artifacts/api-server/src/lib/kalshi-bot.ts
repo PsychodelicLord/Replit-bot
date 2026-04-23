@@ -1634,11 +1634,11 @@ let lastPositionSyncAt = 0;
 let lastPositionSyncOkAt = 0;
 let lastPositionSyncError: string | null = null;
 const exchangeOpenAssets = new Set<string>(); // asset labels, e.g. BTC/ETH/SOL
-const entryInProgressAssets = new Set<string>(); // asset-level in-flight entry lock
 const ENTRY_LOCK_TTL_MS = 45_000;
 const GLOBAL_MAX_OPEN_POSITIONS = 2;
 const ENTRY_LOCK_OWNER_ID = `${process.pid}-${crypto.randomUUID()}`;
-const heldDistributedEntryLocks = new Set<string>(); // assets with DB lock held by this process
+const INTENT_WINDOW_MS = 30_000;
+const ENTRY_CONFIRM_WINDOW_MS = 20_000;
 
 function assetLabel(ticker: string): string {
   const up = ticker.toUpperCase();
@@ -1811,101 +1811,140 @@ function extractQueryRows<T extends Record<string, unknown>>(result: unknown): T
   return Array.isArray(maybeRows) ? maybeRows : [];
 }
 
-interface DistributedEntryLockState {
+async function getTradeLockRow(asset: string): Promise<{
   ok: boolean;
-  locked: boolean;
-  ownedBySelf: boolean;
+  exists: boolean;
   ownerId: string | null;
+  intentStartedAt: Date | null;
+  state: string | null;
   error: string | null;
-}
-
-async function getDistributedEntryLockState(asset: string): Promise<DistributedEntryLockState> {
+}> {
   try {
     const result = await db.execute(
       sql`
-        SELECT owner_id
-        FROM trade_entry_locks
+        SELECT owner_id, intent_started_at, state
+        FROM trade_locks
         WHERE asset = ${asset}
-          AND expires_at > NOW()
         LIMIT 1
       `,
     );
-    const rows = extractQueryRows<{ owner_id: string | null }>(result);
-    const ownerId = rows[0]?.owner_id ?? null;
-    const ownedBySelf = ownerId === ENTRY_LOCK_OWNER_ID;
+    const rows = extractQueryRows<{
+      owner_id: string | null;
+      intent_started_at: Date | string | null;
+      state: string | null;
+    }>(result);
+    if (rows.length === 0) {
+      return { ok: true, exists: false, ownerId: null, intentStartedAt: null, state: null, error: null };
+    }
+    const row = rows[0]!;
+    const startedAt = row.intent_started_at
+      ? (row.intent_started_at instanceof Date ? row.intent_started_at : new Date(row.intent_started_at))
+      : null;
     return {
       ok: true,
-      // Treat any active distributed lock as locked, even if owned by this process.
-      // This allows us to intentionally keep a short post-entry lock window that
-      // blocks re-entry across ALL instances (including the same process).
-      locked: ownerId !== null,
-      ownedBySelf,
-      ownerId,
+      exists: true,
+      ownerId: row.owner_id ?? null,
+      intentStartedAt: startedAt,
+      state: row.state ?? null,
       error: null,
     };
   } catch (err) {
     const message = String(err);
-    logger.warn({ err, asset }, "position gate: distributed entry lock state query failed");
-    return { ok: false, locked: true, ownedBySelf: false, ownerId: null, error: message };
+    logger.warn({ err, asset }, "trade lock: failed reading lock row");
+    return { ok: false, exists: true, ownerId: null, intentStartedAt: null, state: null, error: message };
   }
 }
 
-async function acquireDistributedEntryLock(asset: string): Promise<{ ok: boolean; acquired: boolean; error: string | null }> {
-  const expiresAt = new Date(Date.now() + ENTRY_LOCK_TTL_MS);
+async function acquireAtomicTradeLock(asset: string): Promise<{ ok: boolean; acquired: boolean; error: string | null }> {
   try {
-    const result = await db.execute(
+    await db.execute(
       sql`
-        INSERT INTO trade_entry_locks (asset, owner_id, expires_at, updated_at)
-        VALUES (${asset}, ${ENTRY_LOCK_OWNER_ID}, ${expiresAt}, NOW())
-        ON CONFLICT (asset) DO UPDATE
-        SET owner_id = EXCLUDED.owner_id,
-            expires_at = EXCLUDED.expires_at,
-            updated_at = NOW()
-        WHERE trade_entry_locks.expires_at <= NOW()
-          OR trade_entry_locks.owner_id = EXCLUDED.owner_id
-        RETURNING owner_id
+        INSERT INTO trade_locks (asset, owner_id, state, intent_started_at, created_at, updated_at)
+        VALUES (${asset}, ${ENTRY_LOCK_OWNER_ID}, 'locked', NOW(), NOW(), NOW())
       `,
     );
-    const rows = extractQueryRows<{ owner_id: string | null }>(result);
-    const ownerId = rows[0]?.owner_id ?? null;
-    return { ok: true, acquired: ownerId === ENTRY_LOCK_OWNER_ID, error: null };
+    return { ok: true, acquired: true, error: null };
   } catch (err) {
     const message = String(err);
-    logger.warn({ err, asset }, "position gate: distributed entry lock acquisition failed");
+    const conflict = message.includes("duplicate key value");
+    if (conflict) {
+      return { ok: true, acquired: false, error: null };
+    }
+    logger.warn({ err, asset }, "trade lock: acquisition failed");
     return { ok: false, acquired: false, error: message };
   }
 }
 
-async function releaseDistributedEntryLock(asset: string): Promise<void> {
+async function markTradeIntent(asset: string): Promise<{ ok: boolean; error: string | null }> {
   try {
     await db.execute(
       sql`
-        DELETE FROM trade_entry_locks
+        UPDATE trade_locks
+        SET state = 'intent', intent_started_at = NOW(), updated_at = NOW()
         WHERE asset = ${asset}
           AND owner_id = ${ENTRY_LOCK_OWNER_ID}
       `,
     );
+    return { ok: true, error: null };
   } catch (err) {
-    logger.warn({ err, asset }, "position gate: distributed entry lock release failed");
+    const message = String(err);
+    logger.warn({ err, asset }, "trade lock: intent marker update failed");
+    return { ok: false, error: message };
   }
 }
 
-async function extendDistributedEntryLock(asset: string, holdMs: number): Promise<void> {
-  const safeHoldMs = Math.max(0, Math.floor(holdMs));
-  if (safeHoldMs <= 0) return;
-  const expiresAt = new Date(Date.now() + safeHoldMs);
+async function releaseAtomicTradeLock(asset: string): Promise<void> {
   try {
     await db.execute(
       sql`
-        UPDATE trade_entry_locks
-        SET expires_at = GREATEST(expires_at, ${expiresAt}),
-            updated_at = NOW()
+        DELETE FROM trade_locks
         WHERE asset = ${asset}
           AND owner_id = ${ENTRY_LOCK_OWNER_ID}
       `,
     );
   } catch (err) {
-    logger.warn({ err, asset, holdMs: safeHoldMs }, "position gate: distributed entry lock extension failed");
+    logger.warn({ err, asset }, "trade lock: release failed");
+  }
+}
+
+async function finalizeTradeIntent(asset: string, state: "confirmed" | "rolled_back"): Promise<void> {
+  try {
+    await db.execute(
+      sql`
+        UPDATE trade_locks
+        SET state = ${state}, updated_at = NOW()
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    );
+  } catch (err) {
+    logger.warn({ err, asset, state }, "trade lock: finalize state update failed");
+  }
+}
+
+async function cleanupStaleTradeLock(asset: string, lock: {
+  ownerId: string | null;
+  intentStartedAt: Date | null;
+  state: string | null;
+}): Promise<void> {
+  const startedMs = lock.intentStartedAt ? lock.intentStartedAt.getTime() : 0;
+  const staleIntent = startedMs > 0 && Date.now() - startedMs > INTENT_WINDOW_MS;
+  const staleUnknown = !lock.intentStartedAt && lock.state !== "confirmed";
+  if (!staleIntent && !staleUnknown) return;
+  try {
+    await db.execute(
+      sql`
+        DELETE FROM trade_locks
+        WHERE asset = ${asset}
+          AND owner_id = ${lock.ownerId ?? ""}
+      `,
+    );
+    logger.warn(
+      { asset, ownerId: lock.ownerId, state: lock.state, startedAt: lock.intentStartedAt?.toISOString() ?? null },
+      "trade lock: cleaned stale lock",
+    );
+  } catch (err) {
+    logger.warn({ err, asset }, "trade lock: stale cleanup failed");
   }
 }
 
@@ -1927,21 +1966,25 @@ export interface SharedTradeGateStatus {
   asset: string;
   openPosition: boolean;
   entryLocked: boolean;
-  entryLockedLocal: boolean;
-  entryLockedDistributed: boolean;
+  lockState: string | null;
+  lockOwnerId: string | null;
+  intentMarked: boolean;
   exchangeSyncOk: boolean;
   lastError: string | null;
 }
 
-function readTradeGateStatus(assetOrTicker: string, distributedLocked = false): SharedTradeGateStatus {
+function readTradeGateStatus(assetOrTicker: string, lockState: string | null, lockOwnerId: string | null): SharedTradeGateStatus {
   const asset = assetLabel(assetOrTicker);
-  const localLocked = entryInProgressAssets.has(asset);
+  const intentMarked =
+    lockState === "intent" ||
+    lockState === "confirmed";
   return {
     asset,
     openPosition: exchangeOpenAssets.has(asset),
-    entryLocked: localLocked || distributedLocked,
-    entryLockedLocal: localLocked,
-    entryLockedDistributed: distributedLocked,
+    entryLocked: lockOwnerId !== null,
+    lockState,
+    lockOwnerId,
+    intentMarked,
     exchangeSyncOk: hasFreshPositionSnapshot(),
     lastError: lastPositionSyncError,
   };
@@ -1950,30 +1993,45 @@ function readTradeGateStatus(assetOrTicker: string, distributedLocked = false): 
 export async function getSharedTradeGateStatus(assetOrTicker: string): Promise<SharedTradeGateStatus> {
   const syncOk = await refreshExchangeOpenAssets();
   const asset = assetLabel(assetOrTicker);
-  const distributed = await getDistributedEntryLockState(asset);
-  const status = readTradeGateStatus(asset, distributed.locked);
+  const lock = await getTradeLockRow(asset);
+  if (lock.ok && lock.exists) {
+    await cleanupStaleTradeLock(asset, {
+      ownerId: lock.ownerId,
+      intentStartedAt: lock.intentStartedAt,
+      state: lock.state,
+    });
+  }
+  const status = readTradeGateStatus(asset, lock.state, lock.ownerId);
   return {
     ...status,
     exchangeSyncOk: syncOk || status.exchangeSyncOk,
-    lastError: distributed.error ?? status.lastError,
+    lastError: lock.error ?? status.lastError,
   };
 }
 
 export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
   const asset = assetLabel(assetOrTicker);
   const exchangeSyncOk = await refreshExchangeOpenAssets();
-  const distributed = await getDistributedEntryLockState(asset);
+  const lock = await getTradeLockRow(asset);
+  if (lock.ok && lock.exists) {
+    await cleanupStaleTradeLock(asset, {
+      ownerId: lock.ownerId,
+      intentStartedAt: lock.intentStartedAt,
+      state: lock.state,
+    });
+  }
+  const lockAfterCleanup = await getTradeLockRow(asset);
   const globalCount = await getGlobalOpenPositionCount();
-  const status = readTradeGateStatus(asset, distributed.locked);
+  const status = readTradeGateStatus(asset, lockAfterCleanup.state, lockAfterCleanup.ownerId);
   const effectiveExchangeSyncOk = exchangeSyncOk || status.exchangeSyncOk;
-  const lastError = distributed.error ?? globalCount.error ?? status.lastError;
+  const lastError = lockAfterCleanup.error ?? globalCount.error ?? status.lastError;
   logger.info(
     {
       asset: status.asset,
       openPosition: status.openPosition,
       entryLocked: status.entryLocked,
-      entryLockedLocal: status.entryLockedLocal,
-      entryLockedDistributed: status.entryLockedDistributed,
+      lockState: status.lockState,
+      lockOwnerId: status.lockOwnerId,
       globalOpenPositions: globalCount.count,
       exchangeSyncOk: effectiveExchangeSyncOk,
       lastError,
@@ -1983,7 +2041,7 @@ export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: b
   if (!effectiveExchangeSyncOk) {
     return { ok: false, reason: "exchange_sync_unavailable", status: { ...status, exchangeSyncOk: false, lastError } };
   }
-  if (!distributed.ok) {
+  if (!lockAfterCleanup.ok) {
     return { ok: false, reason: "entry_lock_unavailable", status: { ...status, lastError } };
   }
   if (!globalCount.ok) {
@@ -1995,7 +2053,7 @@ export async function canEnterAssetTrade(assetOrTicker: string): Promise<{ ok: b
   if (status.openPosition) {
     return { ok: false, reason: "has_open_position", status };
   }
-  if (status.entryLockedLocal || status.entryLockedDistributed) {
+  if (status.entryLocked) {
     return { ok: false, reason: "entry_in_progress", status };
   }
   return { ok: true, status };
@@ -2006,101 +2064,105 @@ export interface TradeEntryGateResult {
   asset: string;
   openPosition: boolean;
   entryLocked: boolean;
-  entryLockedLocal: boolean;
-  entryLockedDistributed: boolean;
+  lockState: string | null;
+  lockOwnerId: string | null;
+  intentMarked: boolean;
   reason?: string;
 }
 
 export async function acquireTradeEntryGate(assetOrTicker: string, _context?: string): Promise<TradeEntryGateResult> {
-  const check = await canEnterAssetTrade(assetOrTicker);
-  const asset = check.status.asset;
+  const asset = assetLabel(assetOrTicker);
+  // Acquire DB atomic lock FIRST, before any async checks.
+  const lock = await acquireAtomicTradeLock(asset);
+  if (!lock.ok) {
+    return {
+      allowed: false,
+      asset,
+      openPosition: false,
+      entryLocked: true,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: false,
+      reason: "entry_lock_unavailable",
+    };
+  }
+  if (!lock.acquired) {
+    const current = await getTradeLockRow(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: false,
+      entryLocked: true,
+      lockState: current.state,
+      lockOwnerId: current.ownerId,
+      intentMarked: false,
+      reason: "entry_in_progress",
+    };
+  }
+  const intent = await markTradeIntent(asset);
+  if (!intent.ok) {
+    await releaseAtomicTradeLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: false,
+      entryLocked: false,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: false,
+      reason: "intent_marker_failed",
+    };
+  }
+
+  const check = await canEnterAssetTrade(asset);
   if (!check.ok) {
+    await finalizeTradeIntent(asset, "rolled_back");
+    await releaseAtomicTradeLock(asset);
     return {
       allowed: false,
       asset,
       openPosition: check.status.openPosition,
       entryLocked: check.status.entryLocked,
-      entryLockedLocal: check.status.entryLockedLocal,
-      entryLockedDistributed: check.status.entryLockedDistributed,
+      lockState: check.status.lockState,
+      lockOwnerId: check.status.lockOwnerId,
+      intentMarked: true,
       reason: check.reason,
     };
   }
 
-  if (entryInProgressAssets.has(asset)) {
-    logger.info(
-      { asset, openPosition: check.status.openPosition, entryLocked: true },
-      `[TRADE GATE] asset=${asset}, openPosition=${check.status.openPosition}, entryLocked=true`,
-    );
-    return {
-      allowed: false,
-      asset,
-      openPosition: check.status.openPosition,
-      entryLocked: true,
-      entryLockedLocal: true,
-      entryLockedDistributed: check.status.entryLockedDistributed,
-      reason: "entry_in_progress",
-    };
-  }
-
-  const distributedAcquire = await acquireDistributedEntryLock(asset);
-  if (!distributedAcquire.ok) {
-    return {
-      allowed: false,
-      asset,
-      openPosition: check.status.openPosition,
-      entryLocked: true,
-      entryLockedLocal: false,
-      entryLockedDistributed: true,
-      reason: "entry_lock_unavailable",
-    };
-  }
-  if (!distributedAcquire.acquired) {
-    return {
-      allowed: false,
-      asset,
-      openPosition: check.status.openPosition,
-      entryLocked: true,
-      entryLockedLocal: false,
-      entryLockedDistributed: true,
-      reason: "entry_in_progress",
-    };
-  }
-
-  heldDistributedEntryLocks.add(asset);
-  entryInProgressAssets.add(asset);
   const postAcquireSyncOk = await refreshExchangeOpenAssets(true);
   const postAcquireOpen = exchangeOpenAssets.has(asset);
   if (!postAcquireSyncOk && !hasFreshPositionSnapshot()) {
-    entryInProgressAssets.delete(asset);
-    heldDistributedEntryLocks.delete(asset);
-    void releaseDistributedEntryLock(asset);
+    await finalizeTradeIntent(asset, "rolled_back");
+    await releaseAtomicTradeLock(asset);
     return {
       allowed: false,
       asset,
       openPosition: postAcquireOpen,
       entryLocked: false,
-      entryLockedLocal: false,
-      entryLockedDistributed: false,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: true,
       reason: "exchange_sync_unavailable",
     };
   }
   if (postAcquireOpen) {
-    entryInProgressAssets.delete(asset);
-    heldDistributedEntryLocks.delete(asset);
-    void releaseDistributedEntryLock(asset);
+    await finalizeTradeIntent(asset, "rolled_back");
+    await releaseAtomicTradeLock(asset);
     return {
       allowed: false,
       asset,
       openPosition: true,
       entryLocked: false,
-      entryLockedLocal: false,
-      entryLockedDistributed: false,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: true,
       reason: "has_open_position",
     };
   }
 
   logger.info(
-    { asset, openPosition: false, entryLocked: true, entryLockedLocal: true, entryLockedDistributed: true },
+    { asset, openPosition: false, entryLocked: true, lockState: "intent", lockOwnerId: ENTRY_LOCK_OWNER_ID },
     `[TRADE GATE] asset=${asset}, openPosition=false, entryLocked=true`,
   );
   return {
@@ -2108,27 +2170,43 @@ export async function acquireTradeEntryGate(assetOrTicker: string, _context?: st
     asset,
     openPosition: false,
     entryLocked: true,
-    entryLockedLocal: true,
-    entryLockedDistributed: true,
+    lockState: "intent",
+    lockOwnerId: ENTRY_LOCK_OWNER_ID,
+    intentMarked: true,
   };
 }
 
 export function releaseTradeEntryGate(
   assetOrTicker: string,
   _context?: string,
-  options?: { keepDistributedLockMs?: number },
+  options?: { keepDistributedLockMs?: number; finalState?: "confirmed" | "rolled_back" },
 ): void {
   const asset = assetLabel(assetOrTicker);
-  entryInProgressAssets.delete(asset);
-  if (!heldDistributedEntryLocks.has(asset)) return;
+  const finalState = options?.finalState ?? "rolled_back";
   const keepMs = Math.max(0, Math.floor(options?.keepDistributedLockMs ?? 0));
   if (keepMs > 0) {
-    heldDistributedEntryLocks.delete(asset);
-    void extendDistributedEntryLock(asset, keepMs);
+    // Confirmation window: keep lock while waiting for external position propagation.
+    void db.execute(
+      sql`
+        UPDATE trade_locks
+        SET state = ${finalState},
+            intent_created_at = NOW(),
+            intent_expires_at = NOW() + (${keepMs} * INTERVAL '1 millisecond'),
+            updated_at = NOW()
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    ).then(() => {
+      setTimeout(() => {
+        void releaseAtomicTradeLock(asset);
+      }, keepMs);
+    }).catch((err) => {
+      logger.warn({ err, asset }, "trade lock: delayed release scheduling failed");
+      void releaseAtomicTradeLock(asset);
+    });
     return;
   }
-  heldDistributedEntryLocks.delete(asset);
-  void releaseDistributedEntryLock(asset);
+  void finalizeTradeIntent(asset, finalState).then(() => releaseAtomicTradeLock(asset));
 }
 
 export function hasOpenPositionFromExchange(assetOrTicker: string): boolean {
@@ -2136,18 +2214,24 @@ export function hasOpenPositionFromExchange(assetOrTicker: string): boolean {
 }
 
 export function isAssetEntryLocked(assetOrTicker: string): boolean {
-  return entryInProgressAssets.has(assetLabel(assetOrTicker));
+  return false;
 }
 
 export function acquireAssetEntryLock(assetOrTicker: string): boolean {
-  const asset = assetLabel(assetOrTicker);
-  if (entryInProgressAssets.has(asset)) return false;
-  entryInProgressAssets.add(asset);
-  return true;
+  return false;
 }
 
 export function releaseAssetEntryLock(assetOrTicker: string): void {
-  entryInProgressAssets.delete(assetLabel(assetOrTicker));
+  return;
+}
+
+export interface TradeEntrySignal {
+  assetOrTicker: string;
+  context?: string;
+}
+
+export async function tryEnterTrade(asset: string, signal: TradeEntrySignal): Promise<TradeEntryGateResult> {
+  return acquireTradeEntryGate(signal.assetOrTicker ?? asset, signal.context ?? "try_enter_trade");
 }
 
 export function setExchangeOpenPositionsSnapshot(assets: Set<string>): void {
