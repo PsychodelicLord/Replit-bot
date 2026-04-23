@@ -1856,15 +1856,28 @@ async function getTradeLockRow(asset: string): Promise<{
 }
 
 async function acquireAtomicTradeLock(asset: string): Promise<{ ok: boolean; acquired: boolean; error: string | null }> {
+  const token = `${ENTRY_LOCK_OWNER_ID}-${Date.now()}`;
   try {
     await db.execute(
       sql`
-        INSERT INTO trade_locks (asset, owner_id, state, intent_created_at, expires_at, created_at, updated_at)
+        INSERT INTO trade_locks (
+          asset,
+          owner_id,
+          lock_token,
+          state,
+          intent_created_at,
+          intent_expires_at,
+          expires_at,
+          created_at,
+          updated_at
+        )
         VALUES (
           ${asset},
           ${ENTRY_LOCK_OWNER_ID},
+          ${token},
           'locked',
           NOW(),
+          NOW() + (${ENTRY_LOCK_TTL_MS} * INTERVAL '1 millisecond'),
           NOW() + (${ENTRY_LOCK_TTL_MS} * INTERVAL '1 millisecond'),
           NOW(),
           NOW()
