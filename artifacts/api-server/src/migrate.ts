@@ -71,6 +71,47 @@ export async function runMigrations(): Promise<void> {
       )
     `);
     await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS owner_id TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'locked'
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_id TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_payload TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_created_at TIMESTAMPTZ
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    await db.execute(sql`
+      UPDATE trade_locks
+      SET owner_id = COALESCE(owner_id, lock_owner),
+          state = COALESCE(state, lock_status, 'locked'),
+          intent_created_at = COALESCE(intent_created_at, intent_started_at),
+          expires_at = COALESCE(expires_at, intent_expires_at, NOW() + INTERVAL '45 seconds'),
+          updated_at = COALESCE(updated_at, NOW())
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ALTER COLUMN owner_id SET NOT NULL
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ALTER COLUMN state SET NOT NULL
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ALTER COLUMN expires_at SET NOT NULL
+    `);
+    await db.execute(sql`
       CREATE INDEX IF NOT EXISTS trade_locks_expires_at_idx
       ON trade_locks (expires_at)
     `);

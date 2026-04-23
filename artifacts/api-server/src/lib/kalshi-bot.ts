@@ -1822,7 +1822,7 @@ async function getTradeLockRow(asset: string): Promise<{
   try {
     const result = await db.execute(
       sql`
-        SELECT owner_id, intent_started_at, state
+        SELECT owner_id, intent_created_at, state
         FROM trade_locks
         WHERE asset = ${asset}
         LIMIT 1
@@ -1830,15 +1830,15 @@ async function getTradeLockRow(asset: string): Promise<{
     );
     const rows = extractQueryRows<{
       owner_id: string | null;
-      intent_started_at: Date | string | null;
+      intent_created_at: Date | string | null;
       state: string | null;
     }>(result);
     if (rows.length === 0) {
       return { ok: true, exists: false, ownerId: null, intentStartedAt: null, state: null, error: null };
     }
     const row = rows[0]!;
-    const startedAt = row.intent_started_at
-      ? (row.intent_started_at instanceof Date ? row.intent_started_at : new Date(row.intent_started_at))
+    const startedAt = row.intent_created_at
+      ? (row.intent_created_at instanceof Date ? row.intent_created_at : new Date(row.intent_created_at))
       : null;
     return {
       ok: true,
@@ -1859,7 +1859,7 @@ async function acquireAtomicTradeLock(asset: string): Promise<{ ok: boolean; acq
   try {
     await db.execute(
       sql`
-        INSERT INTO trade_locks (asset, owner_id, state, intent_started_at, created_at, updated_at)
+        INSERT INTO trade_locks (asset, owner_id, state, intent_created_at, created_at, updated_at)
         VALUES (${asset}, ${ENTRY_LOCK_OWNER_ID}, 'locked', NOW(), NOW(), NOW())
       `,
     );
@@ -1880,7 +1880,7 @@ async function markTradeIntent(asset: string): Promise<{ ok: boolean; error: str
     await db.execute(
       sql`
         UPDATE trade_locks
-        SET state = 'intent', intent_started_at = NOW(), updated_at = NOW()
+        SET state = 'intent', intent_created_at = NOW(), updated_at = NOW()
         WHERE asset = ${asset}
           AND owner_id = ${ENTRY_LOCK_OWNER_ID}
       `,
