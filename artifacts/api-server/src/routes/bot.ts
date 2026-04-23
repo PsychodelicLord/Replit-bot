@@ -210,7 +210,13 @@ router.get("/bot/momentum/debug", async (_req, res): Promise<void> => {
 });
 
 router.post("/bot/momentum/reset-sim", (_req, res): void => {
-  res.json(GetMomentumBotStatusResponse.parse(resetSimStats()));
+  const state = resetSimStats();
+  res.json(GetMomentumBotStatusResponse.parse({
+    ...state,
+    allTimeWins: state.totalWins ?? 0,
+    allTimeLosses: state.totalLosses ?? 0,
+    allTimePnlCents: state.totalPnlCents ?? 0,
+  }));
 });
 
 router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
@@ -236,7 +242,12 @@ router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
 
 router.post("/bot/momentum/reset-all", async (_req, res): Promise<void> => {
   const state = await resetAllStats();
-  res.json(GetMomentumBotStatusResponse.parse(state));
+  res.json(GetMomentumBotStatusResponse.parse({
+    ...state,
+    allTimeWins: state.totalWins ?? 0,
+    allTimeLosses: state.totalLosses ?? 0,
+    allTimePnlCents: state.totalPnlCents ?? 0,
+  }));
 });
 
 // Live execution quality report — purely observational, real trades only
@@ -275,7 +286,12 @@ router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
     });
 
     const state = enabled ? startMomentumBot() : stopMomentumBot();
-    res.json(GetMomentumBotStatusResponse.parse(state));
+    res.json(GetMomentumBotStatusResponse.parse({
+      ...state,
+      allTimeWins: state.totalWins ?? 0,
+      allTimeLosses: state.totalLosses ?? 0,
+      allTimePnlCents: state.totalPnlCents ?? 0,
+    }));
   } catch (err) {
     console.error("[momentum/auto] unexpected error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
