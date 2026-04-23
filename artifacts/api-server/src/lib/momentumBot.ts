@@ -63,6 +63,7 @@ const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 const ENTRY_CHECK_COOLDOWN_MS = 10_000; // short per-asset duplicate-entry cooldown
 const EXCHANGE_POSITION_SYNC_MS = 5_000; // refresh exchange open positions frequently
+const SIGNAL_TO_EXEC_MAX_DELAY_MS = 8_000; // skip entries if signal is already too old
 
 const FEE_RATE = 0.07;
 
@@ -1740,6 +1741,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     decision: MomentumDecision;
     side: "YES" | "NO";
     score: number;
+    signalDetectedAtMs: number;
   };
   const candidates: Candidate[] = [];
   const plannedCoins = new Set(activePositions.map(p => coinLabel(p.marketId)));
@@ -1877,7 +1879,7 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)} | ${decision.reason}`);
     dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)}`);
-    candidates.push({ market, ob, decision, side, score });
+    candidates.push({ market, ob, decision, side, score, signalDetectedAtMs: Date.now() });
     plannedCoins.add(marketCoin);
   }
 
@@ -1910,6 +1912,16 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     const { market, ob, side, decision } = candidate;
     const marketCoin = coinLabel(market.ticker);
+    const nowMs = Date.now();
+    const signalAgeMs = Math.max(0, nowMs - candidate.signalDetectedAtMs);
+    const signalAgeSec = (signalAgeMs / 1000).toFixed(2);
+    const staleSignal = signalAgeMs > SIGNAL_TO_EXEC_MAX_DELAY_MS;
+    if (staleSignal) {
+      console.log(
+        `[EXECUTE SKIP] ${marketCoin} ${side} — stale_signal_${Math.ceil(signalAgeMs / 1000)}s (max:${Math.ceil(SIGNAL_TO_EXEC_MAX_DELAY_MS / 1000)}s)`,
+      );
+      continue;
+    }
     const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
     if (coinCooldownRemainingMs > 0) {
       console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin_cooldown_${Math.ceil(coinCooldownRemainingMs / 1000)}s`);
@@ -1935,7 +1947,9 @@ export async function scanMomentumMarkets(): Promise<void> {
         (lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS) || closeDedupRemainingMs > 0;
       const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
       console.log(`[TRADE GATE] asset=${marketCoin}, openPosition=${hasPosition}, entryLocked=${entryLocked}`);
-      console.log(`[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s, postExitCooldown=${Math.ceil(closeDedupRemainingMs / 1000)}s`);
+      console.log(
+        `[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s, postExitCooldown=${Math.ceil(closeDedupRemainingMs / 1000)}s, signalAge=${signalAgeSec}s`,
+      );
       if (hasPosition || entryLocked || dedupCooldownActive) {
         const reason = hasPosition
           ? "has_open_position"
@@ -1976,7 +1990,9 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     if (state.simulatorMode) {
       // ── Simulator: paper position, no real money ──────────────────────────
-      console.log(`[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢`);
+      console.log(
+        `[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢ signalAge:${signalAgeSec}s`,
+      );
       enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
@@ -2029,7 +2045,9 @@ export async function scanMomentumMarkets(): Promise<void> {
 
       // Log full active config snapshot so Railway logs always show exactly what was in effect
       console.log(`[CONFIG SNAPSHOT] betCostCents:${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}) priceRange:${state.priceMin}-${state.priceMax}¢ floor:${state.balanceFloorCents}¢ sim:${state.simulatorMode}`);
-      console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length}`);
+      console.log(
+        `[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length} signalAge:${signalAgeSec}s`,
+      );
       log(
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
