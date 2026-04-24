@@ -1012,10 +1012,12 @@ async function placeBuyOrder(
     client_order_id: clientOrderId,
     type:   "limit",
     action: "buy",
+    // Avoid implicit fill-or-kill behavior in thin books so entries can rest/cancel
+    // instead of hard failing with insufficient resting volume.
+    time_in_force: "good_till_canceled",
     side:   side.toLowerCase(),
     count: countMode.mode === "integer" ? safeCount : undefined,
     count_fp: countMode.mode === "fractional" ? safeCountFp : undefined,
-    buy_max_cost: betCostCents,
     yes_price: side === "YES" ? limitCents    : undefined,
     no_price:  side === "NO"  ? noPriceCents  : undefined,  // must be in NO-space, not YES-space
   };
