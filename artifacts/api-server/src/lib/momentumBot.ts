@@ -496,6 +496,11 @@ function setLastTradeNow(asset: string): void {
   lastTradeTimeByAssetMs.set(asset, Date.now());
 }
 
+function setLastDecision(message: string): void {
+  state.lastDecision = message;
+  state.lastDecisionAt = new Date().toISOString();
+}
+
 function getRemainingCooldownMs(
   cooldowns: Map<string, number>,
   asset: string,
@@ -1942,8 +1947,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       .map(c => `${coinLabel(c.market.ticker)}(${c.score.toFixed(0)} ${c.side})`)
       .join(" > ");
     console.log(`[RANKING] ${candidates.length} signals → best: ${board}`);
-    state.lastDecision = `${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`;
-    state.lastDecisionAt = new Date().toISOString();
+    setLastDecision(`${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`);
   }
 
   // ── Phase 3: Execute top-ranked signals up to MAX_POSITIONS ──────────────
@@ -1959,6 +1963,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Safety guard — if bot was stopped between Phase 1 and Phase 3, abort
     if (!state.enabled) {
       console.log(`[EXECUTE ABORTED] Bot disabled before trade could fire — enabled:${state.enabled} stopReason:${state.stopReason}`);
+      setLastDecision(`ABORT — bot_disabled (${state.stopReason ?? "unknown"})`);
       return;
     }
 
@@ -1969,14 +1974,18 @@ export async function scanMomentumMarkets(): Promise<void> {
     const signalAgeSec = (signalAgeMs / 1000).toFixed(2);
     const staleSignal = signalAgeMs > SIGNAL_TO_EXEC_MAX_DELAY_MS;
     if (staleSignal) {
+      const reason = `stale_signal_${Math.ceil(signalAgeMs / 1000)}s`;
       console.log(
-        `[EXECUTE SKIP] ${marketCoin} ${side} — stale_signal_${Math.ceil(signalAgeMs / 1000)}s (max:${Math.ceil(SIGNAL_TO_EXEC_MAX_DELAY_MS / 1000)}s)`,
+        `[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (max:${Math.ceil(SIGNAL_TO_EXEC_MAX_DELAY_MS / 1000)}s)`,
       );
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
       continue;
     }
     const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
     if (coinCooldownRemainingMs > 0) {
-      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin_cooldown_${Math.ceil(coinCooldownRemainingMs / 1000)}s`);
+      const reason = `coin_cooldown_${Math.ceil(coinCooldownRemainingMs / 1000)}s`;
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
       continue;
     }
 
@@ -1988,6 +1997,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       if (!exchangeSyncOk) {
         console.log(`[ENTRY CHECK] asset=${marketCoin}, exchangeSync=stale_or_failed, lastError=${lastExchangeSyncError ?? "unknown"}`);
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — exchange_sync_unavailable`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — exchange_sync_unavailable`);
         continue;
       }
       const gateStatus = await getSharedTradeGateStatus(marketCoin);
@@ -2011,12 +2021,14 @@ export async function scanMomentumMarkets(): Promise<void> {
               ? `post_exit_cooldown_${Math.ceil(closeDedupRemainingMs / 1000)}s`
               : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
         continue;
       }
     } else {
       // Simulator keeps existing local-memory duplicate guard.
       if (currentPositions.some(p => coinLabel(p.marketId) === marketCoin)) {
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — has_open_position`);
         continue;
       }
     }
@@ -2037,6 +2049,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Health gate: if Broken, skip real trades entirely — paper only
     if (health === "Broken" && !state.simulatorMode) {
       console.log(`[HEALTH GATE] Skipping live trade — bot health is Broken. Switch to sim or wait for recovery.`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — health_gate_broken`);
       continue;
     }
 
@@ -2046,6 +2059,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         `[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢ signalAge:${signalAgeSec}s`,
       );
       enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
+      setLastDecision(`SIM EXECUTED ${marketCoin} ${side} @${ob.mid}¢`);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
       // Balance guard — always runs, even if no floor is configured.
@@ -2091,6 +2105,7 @@ export async function scanMomentumMarkets(): Promise<void> {
           const blockedReason = `balance_guard_failed floor:${effectiveFloor}¢ reserved:${reservedBetCents}¢`;
           console.warn(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
           log(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
+          setLastDecision(`SKIP ${coinLabel(market.ticker)} ${side} — ${blockedReason}`);
           return;
         }
       }
@@ -2109,11 +2124,14 @@ export async function scanMomentumMarkets(): Promise<void> {
         context: "momentum_scan_execute",
       });
       if (!entryLock.allowed) {
-        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${entryLock.reason ?? "trade_gate_blocked"} (final pre-entry check)`);
+        const reason = entryLock.reason ?? "trade_gate_blocked";
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (final pre-entry check)`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
         continue;
       }
       if (hasOpenPosition(marketCoin) || entryLock.openPosition) {
         console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — has_open_position`);
         releaseTradeEntryGate(marketCoin, "momentum_scan_execute_open_position");
         continue;
       }
@@ -2136,6 +2154,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         log(
           `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
         );
+        setLastDecision(`RESULT ${marketCoin} ${side} — ${executeResult.status} (${executeResult.reason})`);
         if (executeResult.status === "trade_opened") {
           setLastTradeNow(marketCoin);
           keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
