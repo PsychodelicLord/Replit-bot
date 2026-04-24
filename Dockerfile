@@ -1,17 +1,17 @@
-FROM node:20-alpine
+FROM node:24-slim
 
 RUN npm install -g pnpm
 
 WORKDIR /app
 
-# cache-bust: 2026-04-19T12
 COPY . .
 
-RUN pnpm install --no-frozen-lockfile --filter @workspace/api-server...
+# Install full workspace so frontend+backend builds always use current source.
+RUN pnpm install --no-frozen-lockfile
 
+RUN rm -rf artifacts/kalshi-bot/dist/public
+RUN pnpm --filter @workspace/kalshi-bot run build
 RUN pnpm --filter @workspace/api-server run build
-
-RUN cp -r artifacts/kalshi-bot/dist/public artifacts/api-server/dist/public
 
 EXPOSE 8080
 

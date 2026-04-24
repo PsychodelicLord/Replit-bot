@@ -489,18 +489,58 @@ async function botLog(level: string, message: string, data?: unknown): Promise<v
 }
 
 // ─── Fetch and update account balance ────────────────────────────────────────
+function parseMoneyFieldToCents(value: unknown, forceCents: boolean): number | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) return null;
+    if (forceCents) return Math.round(value);
+    // If decimal is present, treat as dollars; integer values are treated as cents.
+    return Number.isInteger(value) ? Math.round(value) : Math.round(value * 100);
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return null;
+    if (forceCents) return Math.round(parsed);
+    return value.includes(".") ? Math.round(parsed * 100) : Math.round(parsed);
+  }
+  return null;
+}
+
 export async function refreshBalance(): Promise<void> {
   try {
     const resp = await kalshiFetch("GET", "/portfolio/balance");
     console.log(`[BALANCE RAW] ${JSON.stringify(resp)}`);
-    // Kalshi returns { balance: <cents as integer>, portfolio_value: <cents>, ... }
-    const r = resp as { balance?: number; balance_cents?: number };
-    const rawCents = r?.balance ?? r?.balance_cents ?? 0;
-    // If value looks like dollars (< 20 and non-zero), convert; otherwise treat as cents
-    state.balanceCents = rawCents > 0 && rawCents < 20 ? Math.round(rawCents * 100) : rawCents;
+    const r = resp as Record<string, unknown>;
+
+    // Prefer explicit cents fields first; fallback to generic fields.
+    const candidates: Array<{ key: string; forceCents: boolean }> = [
+      { key: "balance_cents", forceCents: true },
+      { key: "available_balance_cents", forceCents: true },
+      { key: "cash_balance_cents", forceCents: true },
+      { key: "balance", forceCents: false },
+      { key: "available_balance", forceCents: false },
+      { key: "cash_balance", forceCents: false },
+    ];
+
+    let parsedCents: number | null = null;
+    let usedKey = "none";
+    for (const candidate of candidates) {
+      parsedCents = parseMoneyFieldToCents(r[candidate.key], candidate.forceCents);
+      if (parsedCents !== null) {
+        usedKey = candidate.key;
+        break;
+      }
+    }
+
+    if (parsedCents === null) {
+      throw new Error("balance response missing parseable balance field");
+    }
+
+    state.balanceCents = parsedCents;
     lastBalanceRefreshOkAt = Date.now();
     lastBalanceRefreshError = null;
-    console.log(`[BALANCE PARSED] raw:${rawCents} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`);
+    console.log(
+      `[BALANCE PARSED] key:${usedKey} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`,
+    );
   } catch (err) {
     console.log(`[BALANCE ERROR] ${String(err)}`);
     lastBalanceRefreshError = String(err);
@@ -582,30 +622,6 @@ async function checkSafetyLimits(): Promise<boolean> {
   }
 
   return true;
-}
-
-// Lightweight check for coin flip — same limits but never stops the main bot
-async function checkSafetyLimitsPassive(): Promise<{ ok: boolean; reason?: string }> {
-  const balanceCheck = await assertSafeToEnterTrade({
-    stopBotOnFloorHit: false,
-    context: "coin-flip gate",
-  });
-  if (!balanceCheck.ok) return balanceCheck;
-
-  await refreshDailyPnl();
-
-  const { balanceFloorCents, dailyProfitTargetCents, dailyLossLimitCents } = botConfig;
-
-  if (balanceFloorCents > 0 && state.balanceCents <= balanceFloorCents) {
-    return { ok: false, reason: `Balance floor hit (${formatUsd(state.balanceCents)} ≤ ${formatUsd(balanceFloorCents)})` };
-  }
-  if (dailyProfitTargetCents > 0 && state.dailyPnlCents >= dailyProfitTargetCents) {
-    return { ok: false, reason: `Daily profit target already reached` };
-  }
-  if (dailyLossLimitCents > 0 && state.dailyPnlCents <= -dailyLossLimitCents) {
-    return { ok: false, reason: `Daily loss limit hit` };
-  }
-  return { ok: true };
 }
 
 // ─── Market types ────────────────────────────────────────────────────────────
@@ -957,9 +973,11 @@ async function executeSell(
     ? (sellResp?.order?.yes_price ?? 0)
     : (sellResp?.order?.no_price  ?? 0);
   const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : currentBidCents;
-  const gross     = fillPrice - pos.entryPriceCents;
-  const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-  const netPnl    = gross - fee;
+  // P&L is per-contract delta multiplied by contract count.
+  const grossPerContract = fillPrice - pos.entryPriceCents;
+  const grossTotal       = grossPerContract * pos.contractCount;
+  const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+  const netPnl           = grossTotal - fee;
 
   const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
   if (idx >= 0) openPositions.splice(idx, 1);
@@ -1021,7 +1039,9 @@ export async function syncPortfolioFromKalshi(): Promise<void> {
     const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
       positions?: Array<{ ticker_name?: string; position?: number; market_exposure?: number }>
     };
-    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0);
+    // Treat ANY non-zero exposure as an open position.
+    // Some APIs encode NO exposure as negative quantity; filtering only >0 can miss it.
+    const positions = (posResp.positions ?? []).filter(p => (p.position ?? 0) !== 0);
 
     logger.info({ count: positions.length }, "syncPortfolioFromKalshi: Kalshi positions found");
 
@@ -1159,9 +1179,10 @@ export async function retryOpenPositions(): Promise<void> {
               // Sell confirmed filled — commit removal
               const rawPrice  = pos.side === "YES" ? (or.order?.yes_price ?? 0) : (or.order?.no_price ?? 0);
               const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pos.entryPriceCents;
-              const gross     = fillPrice - pos.entryPriceCents;
-              const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
-              const netPnl    = gross - fee;
+              const grossPerContract = fillPrice - pos.entryPriceCents;
+              const grossTotal       = grossPerContract * pos.contractCount;
+              const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+              const netPnl           = grossTotal - fee;
               const idxP = openPositions.findIndex(p => p.tradeId === pos.tradeId);
               if (idxP >= 0) openPositions.splice(idxP, 1);
               openMarkets.delete(pos.marketId);
@@ -1242,9 +1263,10 @@ export async function retryOpenPositions(): Promise<void> {
                 const rawFp = pos.side === "YES" ? (sellFill.yes_price ?? 0) : (sellFill.no_price ?? 0);
                 if (rawFp > 0) {
                   sellPriceCents = Math.round(rawFp * 100);
-                  const gross    = sellPriceCents - pos.entryPriceCents;
-                  const fee      = Math.floor(botConfig.feeRate * Math.max(0, gross));
-                  pnlCents       = gross - fee;
+                  const grossPerContract = sellPriceCents - pos.entryPriceCents;
+                  const grossTotal       = grossPerContract * pos.contractCount;
+                  const fee              = Math.floor(botConfig.feeRate * Math.max(0, grossTotal));
+                  pnlCents               = grossTotal - fee;
                 }
               }
             } catch (_) { /* fill lookup failed — use zero */ }
@@ -1285,8 +1307,11 @@ export async function retryOpenPositions(): Promise<void> {
           const settled    = m?.status === "settled" || m?.status === "finalized";
           const ourSideWon = settled && m?.result?.toLowerCase() === pos.side.toLowerCase();
           const pnlCents   = ourSideWon
-            ? (() => { const g = 100 - pos.entryPriceCents; return g - Math.floor(botConfig.feeRate * g); })()
-            : -pos.entryPriceCents;
+            ? (() => {
+                const grossTotal = (100 - pos.entryPriceCents) * pos.contractCount;
+                return grossTotal - Math.floor(botConfig.feeRate * grossTotal);
+              })()
+            : -(pos.entryPriceCents * pos.contractCount);
 
           const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
           if (idx >= 0) openPositions.splice(idx, 1);
@@ -1329,9 +1354,12 @@ export async function retryOpenPositions(): Promise<void> {
           continue;
         }
 
-        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL)
-        if (currentBid > 0 && grossProfit <= -3) {
-          await executeSell(pos, currentBid, `stop-loss (${grossProfit}¢)`);
+        // Stop-loss — cut losses when down ≥3¢ (mirrors sim SL).
+        // If bid is 0, treat executable exit as 1¢ to avoid getting stuck unprotected.
+        const slExecutablePrice = currentBid > 0 ? currentBid : 1;
+        const slGrossProfit = slExecutablePrice - pos.entryPriceCents;
+        if (slGrossProfit <= -3) {
+          await executeSell(pos, slExecutablePrice, `stop-loss (${slGrossProfit}¢)`);
           continue;
         }
 
@@ -1376,6 +1404,11 @@ export function getBotState(): BotState {
 }
 
 export async function startBot(): Promise<BotState> {
+  // Legacy bot pipeline is intentionally retired.
+  // Single active execution path is momentumBot: signal -> gate -> execute -> update state.
+  logger.warn("legacy startBot() invocation blocked; use momentum bot controls");
+  return getBotState();
+
   if (state.running) return getBotState();
   if (!API_KEY_ID || !PRIVATE_KEY_PEM) {
     throw new Error("KALSHI_API_KEY and KALSHI_PRIVATE_KEY must be set");
@@ -1484,17 +1517,33 @@ export async function manualTrade(
   limitCents: number,
   quantity: number,
 ): Promise<{ success: boolean; tradeId?: number; orderId?: string; message: string }> {
+  logger.warn({ ticker, side, limitCents, quantity }, "legacy manualTrade() invocation blocked");
+  return {
+    success: false,
+    message: "Manual trade path disabled. ACTIVE TRADE PATHS: 1 (signal -> gate -> execute -> update state).",
+  };
+
+  let gateLocked = false;
   try {
+    const lock = await acquireTradeEntryGate(ticker, "manual_trade");
+    if (!lock.allowed) {
+      return { success: false, message: lock.reason ?? `Trade gate blocked ${ticker}` };
+    }
+    gateLocked = true;
     const balanceGate = await assertSafeToEnterTrade({
       stopBotOnFloorHit: true,
       context: `manual trade ${ticker}`,
     });
     if (!balanceGate.ok) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_balance_blocked");
       return { success: false, message: balanceGate.reason ?? "Balance safety gate blocked manual trade" };
     }
 
     const cooldownRemainingMs = getMarketReentryCooldownRemainingMs(ticker);
     if (cooldownRemainingMs > 0) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_cooldown_blocked");
       return {
         success: false,
         message: `Cooldown active for ${ticker} (${Math.ceil(cooldownRemainingMs / 1000)}s remaining)`,
@@ -1503,6 +1552,8 @@ export async function manualTrade(
 
     const resp = await kalshiFetch("GET", `/markets/${ticker}`) as { market?: KalshiMarket };
     if (!resp.market) {
+      gateLocked = false;
+      releaseTradeEntryGate(ticker, "manual_trade_market_not_found");
       return { success: false, message: `Market not found: ${ticker}` };
     }
     const { title, close_time } = resp.market;
@@ -1553,291 +1604,10 @@ export async function manualTrade(
     const msg = String(err);
     await botLog("error", `🎯 Manual trade failed on ${ticker}: ${msg}`);
     return { success: false, message: msg };
-  }
-}
-
-// ─── Coin-flip auto mode ──────────────────────────────────────────────────────
-interface CoinFlipAutoState {
-  enabled: boolean;
-  intervalSecs: number;
-  nextFlipAt: number | null;
-  lastResult: { success: boolean; message: string; side?: "YES" | "NO" } | null;
-}
-
-const coinFlipAuto: CoinFlipAutoState = {
-  enabled: false,
-  intervalSecs: 900,
-  nextFlipAt: null,
-  lastResult: null,
-};
-
-let coinFlipTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Returns ms until 30s into the next :00/:15/:30/:45 UTC cycle boundary. */
-function msToNextCycleStart(): number {
-  const now = Date.now();
-  const CYCLE_MS = 15 * 60_000;
-  const remainder = now % CYCLE_MS;
-  const msToNextBoundary = CYCLE_MS - remainder;
-  // Fire 30s after the boundary — Kalshi has new markets live by then
-  return msToNextBoundary + 30_000;
-}
-
-function scheduleCoinFlip(retryDelaySecs?: number) {
-  if (coinFlipTimer) clearTimeout(coinFlipTimer);
-  if (!coinFlipAuto.enabled) return;
-
-  let delay: number;
-  if (retryDelaySecs !== undefined) {
-    delay = retryDelaySecs * 1000;
-  } else {
-    // If we're early enough in the current cycle, fire right away (2s grace)
-    const CYCLE_MS = 15 * 60_000;
-    const minsUntilCycleEnd = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
-    if (minsUntilCycleEnd > botConfig.minMinutesRemaining + 1) {
-      delay = 2_000; // fire in 2 seconds
-    } else {
-      delay = msToNextCycleStart(); // wait for the next cycle
-    }
-  }
-
-  coinFlipAuto.nextFlipAt = Date.now() + delay;
-  coinFlipTimer = setTimeout(async () => {
-    if (!coinFlipAuto.enabled) return;
-    try {
-      const result = await coinFlipTrade();
-      coinFlipAuto.lastResult = { success: result.success, message: result.message, side: result.side };
-      await botLog("info", `🪙 Auto-flip: ${result.message}`);
-      if (!result.success && result.message.includes("No markets")) {
-        // Retry mid-cycle if there's still enough time, otherwise wait for next cycle
-        const CYCLE_MS = 15 * 60_000;
-        const minsLeft = (CYCLE_MS - (Date.now() % CYCLE_MS)) / 60_000;
-        if (minsLeft > botConfig.minMinutesRemaining + 2) {
-          scheduleCoinFlip(30); // retry in 30s — still enough time
-        } else {
-          scheduleCoinFlip(); // too late in cycle — wait for next cycle start
-        }
-      } else {
-        scheduleCoinFlip();
-      }
-    } catch (err) {
-      coinFlipAuto.lastResult = { success: false, message: String(err) };
-      scheduleCoinFlip();
-    }
-  }, delay);
-}
-
-export function startCoinFlipAuto(intervalSecs: number): CoinFlipAutoState {
-  coinFlipAuto.enabled = true;
-  coinFlipAuto.intervalSecs = intervalSecs;
-  scheduleCoinFlip();
-  return { ...coinFlipAuto };
-}
-
-export function stopCoinFlipAuto(): CoinFlipAutoState {
-  coinFlipAuto.enabled = false;
-  coinFlipAuto.nextFlipAt = null;
-  if (coinFlipTimer) { clearTimeout(coinFlipTimer); coinFlipTimer = null; }
-  return { ...coinFlipAuto };
-}
-
-export function getCoinFlipAutoState(): CoinFlipAutoState {
-  return { ...coinFlipAuto };
-}
-
-// ─── Coin-flip trade ──────────────────────────────────────────────────────────
-export interface CoinFlipResult {
-  success: boolean;
-  message: string;
-  ticker?: string;
-  title?: string;
-  side?: "YES" | "NO";
-  priceCents?: number;
-  tradeId?: number;
-}
-
-export async function coinFlipTrade(): Promise<CoinFlipResult> {
-  if (tradeMutex) {
-    return { success: false, message: "Another trade is in progress — coin flip blocked." };
-  }
-  tradeMutex = true;
-  try {
-    // Check safety limits without stopping the main bot
-    const safety = await checkSafetyLimitsPassive();
-    if (!safety.ok) {
-      return { success: false, message: `Coin flip blocked — ${safety.reason}` };
-    }
-
-    // Respect max open positions — try DB for accuracy, fall back to in-memory if DB is down
-    let effectiveOpen = openMarkets.size;
-    let occupiedTickers = new Set<string>([...openMarkets]);
-    try {
-      const openRows = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
-      effectiveOpen = Math.max(openMarkets.size, openRows.length);
-      occupiedTickers = new Set<string>([...openMarkets, ...openRows.map(t => t.marketId)]);
-    } catch (dbErr) {
-      logger.warn({ err: dbErr }, "coinFlipTrade: DB open-positions check failed — using in-memory state only");
-    }
-    if (effectiveOpen >= botConfig.maxOpenPositions) {
-      return { success: false, message: `Max open positions (${botConfig.maxOpenPositions}) already reached — coin flip blocked.` };
-    }
-
-    const now = Date.now();
-
-    // Query each enabled coin's series directly — avoids pagination/ordering issues with the
-    // general /markets endpoint that can return 200 non-crypto results before reaching BTC/ETH
-    const enabledCoins = botConfig.cryptoCoins.length > 0
-      ? botConfig.cryptoCoins
-      : ["BTC", "ETH", "SOL", "DOGE"];
-
-    const allMarkets: KalshiMarket[] = [];
-    for (const coin of enabledCoins) {
-      const seriesPrefixes = CRYPTO_COIN_SERIES[coin.toUpperCase()] ?? [];
-      for (const series of seriesPrefixes) {
-        try {
-          const resp = await kalshiFetch("GET", `/markets?status=open&series_ticker=${series}&limit=50`) as { markets?: KalshiMarket[] };
-          allMarkets.push(...(resp.markets ?? []));
-        } catch (_) { /* skip if series not found */ }
-      }
-    }
-
-    // Coin flip only enters markets with >minMinutesRemaining left — no upper cap since we queried
-    // the series directly so we know they're 15-min markets
-    let timeOk = 0;
-    const eligible = allMarkets.filter((m) => {
-      if (!m.close_time) return false;
-      const mins = (new Date(m.close_time).getTime() - now) / 60_000;
-      if (mins <= botConfig.minMinutesRemaining) return false;
-      timeOk++;
-      return true;
-    });
-
-    // Deduplicate by ticker (same market may appear from multiple series queries)
-    const seen = new Set<string>();
-    const uniqueEligible = eligible.filter(m => {
-      if (seen.has(m.ticker)) return false;
-      seen.add(m.ticker);
-      return true;
-    });
-
-    const sample = allMarkets.slice(0, 3).map(m =>
-      `${m.ticker}(${((new Date(m.close_time).getTime() - now) / 60_000).toFixed(1)}min)`
-    ).join(", ");
-    await botLog("info",
-      `🔍 Coin flip scan: ${allMarkets.length} series markets fetched, ${timeOk} in time window, ${uniqueEligible.length} eligible | sample: ${sample || "none"}`,
-    );
-
-    if (uniqueEligible.length === 0) {
-      return { success: false, message: `No markets found — fetched ${allMarkets.length} from ${enabledCoins.join("/")} series, ${timeOk} in time window` };
-    }
-
-    // Flip the coin ONCE — this is the side we will trade.
-    // We then search for a market where this side has a live quote within the price cap.
-    // The coin is never re-flipped; we just find the right market for the chosen side.
-    const coinYes = Math.random() < 0.5;
-    const chosenSide: "YES" | "NO" = coinYes ? "YES" : "NO";
-    const maxAsk = Math.min(botConfig.maxEntryPriceCents, 99);
-
-    // Shuffle eligible markets and try each in turn until one fits
-    const shuffled = [...uniqueEligible].sort(() => Math.random() - 0.5);
-
-    let market!: KalshiMarket;
-    let side!: "YES" | "NO";
-    let ask!: number;
-    let minutesLeft!: number;
-
-    let triedAll = 0;
-    for (const candidate of shuffled) {
-      // Skip markets already held — each open position must be on a different market
-      if (occupiedTickers.has(candidate.ticker)) continue;
-      if (isMarketInReentryCooldown(candidate.ticker)) continue;
-
-      triedAll++;
-      const detailResp = await kalshiFetch("GET", `/markets/${candidate.ticker}`) as { market?: KalshiMarket };
-      const m = detailResp.market ?? candidate;
-
-      const freshMins = (new Date(m.close_time).getTime() - Date.now()) / 60_000;
-      if (freshMins <= botConfig.minMinutesRemaining) continue; // stale — expired
-
-      const yesAsk = priceCents(m, "yes_ask");
-      const noAsk  = priceCents(m, "no_ask");
-      const tryAsk = chosenSide === "YES" ? yesAsk : noAsk;
-
-      if (tryAsk <= 0) {
-        await botLog("info", `Coin flip: landed ${chosenSide} on ${candidate.ticker} but no quote — trying next market`);
-        continue;
-      }
-
-      if (tryAsk > maxAsk) {
-        await botLog("info", `Coin flip: ${candidate.ticker} ${chosenSide} ask ${tryAsk}¢ exceeds max ${maxAsk}¢ — skipping`);
-        continue;
-      }
-
-      market = m;
-      side = chosenSide;
-      ask = tryAsk;
-      minutesLeft = freshMins;
-      break;
-    }
-
-    if (!market) {
-      return { success: false, message: `No tradeable markets — checked ${triedAll} markets, none with a live quote in the time window` };
-    }
-
-    const { ticker, title } = market;
-
-    // Add 1¢ buffer above ask to cross the spread, but never exceed the user's price cap
-    const orderPriceCents = Math.min(ask + 1, maxAsk);
-
-    const buyResp = await kalshiFetch("POST", "/portfolio/orders",
-      buildOrderPayload(ticker, `coinflip-${Date.now()}`, "limit", "buy", side, 1, orderPriceCents),
-    ) as { order?: { order_id?: string } };
-
-    const buyOrderId = buyResp?.order?.order_id ?? null;
-    const provisId   = -Date.now();
-
-    // ── Register IMMEDIATELY in memory — sell monitor works even if DB is down ─
-    const posRef = registerOpenPosition({
-      tradeId:         provisId,
-      marketId:        ticker,
-      side,
-      entryPriceCents: ask,
-      contractCount:   1,
-      enteredAt:       Date.now(),
-      buyOrderId,
-    });
-    state.tradesAttempted++;
-    state.tradesSucceeded++;
-
-    await botLog("info",
-      `🪙 Coin flip: landed ${side} — bought 1x ${side} on "${title}" at ${ask}¢`,
-      { buyOrderId, ticker, side, ask },
-    );
-
-    // ── DB write fire-and-forget — swap provisional ID when it completes ────────
-    db.insert(tradesTable).values({
-      marketId: ticker, marketTitle: title ?? ticker, side,
-      buyPriceCents: ask, contractCount: 1, feeCents: 0, status: "open",
-      kalshiBuyOrderId: buyOrderId, minutesRemaining: minutesLeft,
-    }).returning().then(([trade]) => {
-      posRef.tradeId = trade.id; // direct ref — works even if removed from openPositions
-    }).catch(err => logger.warn({ err }, "coinFlip: DB write failed — position tracked in memory only"));
-
-    return {
-      success: true,
-      message: `Flipped ${side}! Bought 1x ${side} on "${title}" at ${ask}¢ — watching for profit.`,
-      ticker,
-      title,
-      side,
-      priceCents: ask,
-      tradeId: provisId,
-    };
-  } catch (err) {
-    const msg = String(err);
-    await botLog("error", `🪙 Coin flip trade failed: ${msg}`);
-    return { success: false, message: msg };
   } finally {
-    tradeMutex = false;
+    if (gateLocked) {
+      releaseTradeEntryGate(ticker, "manual_trade_done");
+    }
   }
 }
 
@@ -1855,8 +1625,730 @@ export async function clearStuckPositions(): Promise<{ cleared: number }> {
     await botLog("warn", `🧹 Trade ${trade.id} force-cleared via dashboard reset`, { tradeId: trade.id });
   }
   state.openPositionCount = 0;
-  // Reset last result and retry immediately so the button disappears and next flip fires in 5s
-  coinFlipAuto.lastResult = null;
-  if (coinFlipAuto.enabled) scheduleCoinFlip(5);
   return { cleared: openTrades.length };
+}
+
+// ─── Shared position gate (exchange-backed) for all bots ──────────────────────
+const POSITION_SYNC_MS = 5_000;
+let lastPositionSyncAt = 0;
+let lastPositionSyncOkAt = 0;
+let lastPositionSyncError: string | null = null;
+const exchangeOpenAssets = new Set<string>(); // asset labels, e.g. BTC/ETH/SOL
+const ENTRY_LOCK_TTL_MS = 45_000;
+const GLOBAL_MAX_OPEN_POSITIONS = 2;
+const ASSET_POST_EXIT_COOLDOWN_MS = 75_000;
+const ENTRY_LOCK_OWNER_ID = `${process.pid}-${crypto.randomUUID()}`;
+const INTENT_WINDOW_MS = 30_000;
+const ENTRY_CONFIRM_WINDOW_MS = 20_000;
+
+function assetLabel(ticker: string): string {
+  const up = ticker.toUpperCase();
+  const aliases: Array<{ asset: string; keys: string[] }> = [
+    { asset: "BTC", keys: ["BTC", "BITCOIN", "KXBTC"] },
+    { asset: "ETH", keys: ["ETH", "ETHEREUM", "KXETH"] },
+    { asset: "SOL", keys: ["SOL", "SOLANA", "KXSOL"] },
+    { asset: "DOGE", keys: ["DOGE", "DOGECOIN", "KXDOGE"] },
+    { asset: "XRP", keys: ["XRP", "RIPPLE", "KXXRP"] },
+    { asset: "ADA", keys: ["ADA", "CARDANO", "KXADA"] },
+    { asset: "MATIC", keys: ["MATIC", "POLYGON", "KXMATIC"] },
+    { asset: "BNB", keys: ["BNB", "KXBNB"] },
+  ];
+  for (const a of aliases) {
+    if (a.keys.some(k => up.includes(k))) return a.asset;
+  }
+  return up;
+}
+
+export function canonicalizeAssetLabel(assetOrTicker: string): string {
+  return assetLabel(assetOrTicker);
+}
+
+interface ParsedExchangePositionRow {
+  ticker: string;
+  asset: string;
+  hasExposure: boolean;
+}
+
+interface ParsedExchangePositions {
+  rows: ParsedExchangePositionRow[];
+  rawCount: number;
+  openCount: number;
+  suspiciousCount: number;
+  suspicious: boolean;
+}
+
+function parseMaybeNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number.parseFloat(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function hasOwn(obj: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function parseExchangePositionsPayload(positionsPayload: unknown): ParsedExchangePositions {
+  const rows = Array.isArray(positionsPayload) ? positionsPayload : [];
+  const parsedRows: ParsedExchangePositionRow[] = [];
+  let openCount = 0;
+  let suspiciousCount = 0;
+
+  for (const rowRaw of rows) {
+    if (!rowRaw || typeof rowRaw !== "object") {
+      suspiciousCount++;
+      continue;
+    }
+    const row = rowRaw as Record<string, unknown>;
+    const tickerRaw = row.ticker_name ?? row.ticker;
+    const ticker = typeof tickerRaw === "string" ? tickerRaw.trim() : "";
+    const rawNumbers = [
+      row.position,
+      row.position_fp,
+      row.market_exposure,
+      row.market_exposure_cents,
+    ];
+    const parsedNumbers = rawNumbers
+      .map(parseMaybeNumber)
+      .filter((v): v is number => v !== null);
+    const hasKnownNumericField =
+      hasOwn(row, "position") ||
+      hasOwn(row, "position_fp") ||
+      hasOwn(row, "market_exposure") ||
+      hasOwn(row, "market_exposure_cents");
+    const hasUnparseableNumeric =
+      rawNumbers.some((v) => v !== undefined && v !== null && String(v).trim() !== "" && parseMaybeNumber(v) === null);
+    const hasNonZeroExposure = parsedNumbers.some((v) => v !== 0);
+
+    if (hasNonZeroExposure && ticker) {
+      openCount++;
+      parsedRows.push({ ticker, asset: assetLabel(ticker), hasExposure: true });
+    }
+
+    const suspiciousRow =
+      hasUnparseableNumeric ||
+      (ticker && !hasKnownNumericField) ||
+      (ticker && hasKnownNumericField && parsedNumbers.length === 0) ||
+      (hasNonZeroExposure && !ticker);
+
+    if (suspiciousRow) suspiciousCount++;
+  }
+
+  return {
+    rows: parsedRows,
+    rawCount: rows.length,
+    openCount,
+    suspiciousCount,
+    suspicious: rows.length > 0 && suspiciousCount > 0,
+  };
+}
+
+export function parseExchangePositionRows(positionsPayload: unknown): {
+  ok: boolean;
+  reason?: string;
+  rows: ParsedExchangePositionRow[];
+} {
+  const parsed = parseExchangePositionsPayload(positionsPayload);
+  if (parsed.suspicious) {
+    return {
+      ok: false,
+      reason: `rows=${parsed.rawCount} suspicious=${parsed.suspiciousCount}`,
+      rows: [],
+    };
+  }
+  return { ok: true, rows: parsed.rows };
+}
+
+function hasFreshPositionSnapshot(): boolean {
+  if (lastPositionSyncOkAt <= 0) return false;
+  return Date.now() - lastPositionSyncOkAt <= POSITION_SYNC_MS * 3;
+}
+
+async function refreshExchangeOpenAssets(force = false): Promise<boolean> {
+  const now = Date.now();
+  if (!force && now - lastPositionSyncAt < POSITION_SYNC_MS) {
+    return hasFreshPositionSnapshot();
+  }
+  lastPositionSyncAt = now;
+  try {
+    const pr = await kalshiFetch("GET", "/portfolio/positions") as {
+      positions?: unknown;
+    };
+    const parsed = parseExchangePositionsPayload(pr.positions);
+    if (parsed.suspicious) {
+      lastPositionSyncError = `positions payload parse anomaly: rows=${parsed.rawCount} suspicious=${parsed.suspiciousCount}`;
+      logger.warn(
+        { rawCount: parsed.rawCount, suspiciousCount: parsed.suspiciousCount, openCount: parsed.openCount },
+        "position gate: refusing to trust unparseable positions payload",
+      );
+      return false;
+    }
+    exchangeOpenAssets.clear();
+    for (const row of parsed.rows) {
+      if (row.hasExposure) {
+        exchangeOpenAssets.add(row.asset);
+      }
+    }
+    lastPositionSyncOkAt = Date.now();
+    lastPositionSyncError = null;
+    return true;
+  } catch (err) {
+    lastPositionSyncError = String(err);
+    logger.warn({ err }, "position gate: exchange sync failed");
+    return false;
+  }
+}
+
+type QueryRows<T extends Record<string, unknown>> = { rows?: T[] };
+
+function extractQueryRows<T extends Record<string, unknown>>(result: unknown): T[] {
+  const maybeRows = (result as QueryRows<T> | null)?.rows;
+  return Array.isArray(maybeRows) ? maybeRows : [];
+}
+
+async function getTradeLockRow(asset: string): Promise<{
+  ok: boolean;
+  exists: boolean;
+  ownerId: string | null;
+  intentStartedAt: Date | null;
+  state: string | null;
+  error: string | null;
+}> {
+  try {
+    const result = await db.execute(
+      sql`
+        SELECT owner_id, intent_created_at, state
+        FROM trade_locks
+        WHERE asset = ${asset}
+        LIMIT 1
+      `,
+    );
+    const rows = extractQueryRows<{
+      owner_id: string | null;
+      intent_created_at: Date | string | null;
+      state: string | null;
+    }>(result);
+    if (rows.length === 0) {
+      return { ok: true, exists: false, ownerId: null, intentStartedAt: null, state: null, error: null };
+    }
+    const row = rows[0]!;
+    const startedAt = row.intent_created_at
+      ? (row.intent_created_at instanceof Date ? row.intent_created_at : new Date(row.intent_created_at))
+      : null;
+    return {
+      ok: true,
+      exists: true,
+      ownerId: row.owner_id ?? null,
+      intentStartedAt: startedAt,
+      state: row.state ?? null,
+      error: null,
+    };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "trade lock: failed reading lock row");
+    return { ok: false, exists: true, ownerId: null, intentStartedAt: null, state: null, error: message };
+  }
+}
+
+async function acquireAtomicTradeLock(asset: string): Promise<{ ok: boolean; acquired: boolean; error: string | null }> {
+  const token = `${ENTRY_LOCK_OWNER_ID}-${Date.now()}`;
+  try {
+    await db.execute(
+      sql`
+        INSERT INTO trade_locks (
+          asset,
+          owner_id,
+          lock_token,
+          state,
+          intent_created_at,
+          intent_expires_at,
+          expires_at,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${asset},
+          ${ENTRY_LOCK_OWNER_ID},
+          ${token},
+          'locked',
+          NOW(),
+          NOW() + (${ENTRY_LOCK_TTL_MS} * INTERVAL '1 millisecond'),
+          NOW() + (${ENTRY_LOCK_TTL_MS} * INTERVAL '1 millisecond'),
+          NOW(),
+          NOW()
+        )
+      `,
+    );
+    return { ok: true, acquired: true, error: null };
+  } catch (err) {
+    const message = String(err);
+    const conflict = message.includes("duplicate key value");
+    if (conflict) {
+      return { ok: true, acquired: false, error: null };
+    }
+    logger.warn({ err, asset }, "trade lock: acquisition failed");
+    return { ok: false, acquired: false, error: message };
+  }
+}
+
+async function markTradeIntent(asset: string): Promise<{ ok: boolean; error: string | null }> {
+  try {
+    await db.execute(
+      sql`
+        UPDATE trade_locks
+        SET state = 'intent',
+            intent_created_at = NOW(),
+            expires_at = NOW() + (${INTENT_WINDOW_MS} * INTERVAL '1 millisecond'),
+            updated_at = NOW()
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    );
+    return { ok: true, error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "trade lock: intent marker update failed");
+    return { ok: false, error: message };
+  }
+}
+
+async function releaseAtomicTradeLock(asset: string): Promise<void> {
+  try {
+    await db.execute(
+      sql`
+        DELETE FROM trade_locks
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    );
+  } catch (err) {
+    logger.warn({ err, asset }, "trade lock: release failed");
+  }
+}
+
+async function finalizeTradeIntent(asset: string, state: "confirmed" | "rolled_back"): Promise<void> {
+  try {
+    await db.execute(
+      sql`
+        UPDATE trade_locks
+        SET state = ${state}, updated_at = NOW()
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    );
+  } catch (err) {
+    logger.warn({ err, asset, state }, "trade lock: finalize state update failed");
+  }
+}
+
+async function cleanupStaleTradeLock(asset: string, lock: {
+  ownerId: string | null;
+  intentStartedAt: Date | null;
+  state: string | null;
+}): Promise<void> {
+  const startedMs = lock.intentStartedAt ? lock.intentStartedAt.getTime() : 0;
+  const staleIntent = startedMs > 0 && Date.now() - startedMs > INTENT_WINDOW_MS;
+  const staleUnknown = !lock.intentStartedAt && lock.state !== "confirmed";
+  if (!staleIntent && !staleUnknown) return;
+  try {
+    await db.execute(
+      sql`
+        DELETE FROM trade_locks
+        WHERE asset = ${asset}
+          AND owner_id = ${lock.ownerId ?? ""}
+      `,
+    );
+    logger.warn(
+      { asset, ownerId: lock.ownerId, state: lock.state, startedAt: lock.intentStartedAt?.toISOString() ?? null },
+      "trade lock: cleaned stale lock",
+    );
+  } catch (err) {
+    logger.warn({ err, asset }, "trade lock: stale cleanup failed");
+  }
+}
+
+async function getGlobalOpenPositionCount(): Promise<{ ok: boolean; count: number; error: string | null }> {
+  try {
+    const rows = await db
+      .select({ count: sql<number>`cast(count(*) as int)` })
+      .from(tradesTable)
+      .where(eq(tradesTable.status, "open"));
+    return { ok: true, count: rows[0]?.count ?? 0, error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err }, "position gate: global open position count query failed");
+    return { ok: false, count: 0, error: message };
+  }
+}
+
+async function hasOpenPositionForAssetInDb(asset: string): Promise<{ ok: boolean; hasOpen: boolean; error: string | null }> {
+  try {
+    const rows = await db
+      .select({ count: sql<number>`cast(count(*) as int)` })
+      .from(tradesTable)
+      .where(
+        and(
+          eq(tradesTable.status, "open"),
+          sql`UPPER(${tradesTable.marketId}) LIKE '%' || UPPER(${asset}) || '%'`,
+        ),
+      )
+      .limit(1);
+    return { ok: true, hasOpen: (rows[0]?.count ?? 0) > 0, error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "position gate: asset open-position db query failed");
+    return { ok: false, hasOpen: false, error: message };
+  }
+}
+
+async function getAssetPostExitCooldownRemainingMs(asset: string): Promise<{ ok: boolean; remainingMs: number; error: string | null }> {
+  try {
+    const rows = await db
+      .select({
+        closedAt: tradesTable.closedAt,
+      })
+      .from(tradesTable)
+      .where(
+        and(
+          ne(tradesTable.status, "open"),
+          sql`${tradesTable.closedAt} IS NOT NULL`,
+          sql`UPPER(${tradesTable.marketId}) LIKE '%' || UPPER(${asset}) || '%'`,
+        ),
+      )
+      .orderBy(sql`${tradesTable.closedAt} DESC`)
+      .limit(1);
+    const closedAt = rows[0]?.closedAt ?? null;
+    if (!closedAt) {
+      return { ok: true, remainingMs: 0, error: null };
+    }
+    const remainingMs = closedAt.getTime() + ASSET_POST_EXIT_COOLDOWN_MS - Date.now();
+    return { ok: true, remainingMs: Math.max(0, remainingMs), error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "position gate: post-exit cooldown query failed");
+    return { ok: false, remainingMs: 0, error: message };
+  }
+}
+
+export interface SharedTradeGateStatus {
+  asset: string;
+  openPosition: boolean;
+  entryLocked: boolean;
+  lockState: string | null;
+  lockOwnerId: string | null;
+  intentMarked: boolean;
+  exchangeSyncOk: boolean;
+  lastError: string | null;
+}
+
+function readTradeGateStatus(assetOrTicker: string, lockState: string | null, lockOwnerId: string | null): SharedTradeGateStatus {
+  const asset = assetLabel(assetOrTicker);
+  const intentMarked =
+    lockState === "intent" ||
+    lockState === "confirmed";
+  return {
+    asset,
+    openPosition: exchangeOpenAssets.has(asset),
+    entryLocked: lockOwnerId !== null,
+    lockState,
+    lockOwnerId,
+    intentMarked,
+    exchangeSyncOk: hasFreshPositionSnapshot(),
+    lastError: lastPositionSyncError,
+  };
+}
+
+export async function getSharedTradeGateStatus(assetOrTicker: string): Promise<SharedTradeGateStatus> {
+  const syncOk = await refreshExchangeOpenAssets();
+  const asset = assetLabel(assetOrTicker);
+  const lock = await getTradeLockRow(asset);
+  if (lock.ok && lock.exists) {
+    await cleanupStaleTradeLock(asset, {
+      ownerId: lock.ownerId,
+      intentStartedAt: lock.intentStartedAt,
+      state: lock.state,
+    });
+  }
+  const status = readTradeGateStatus(asset, lock.state, lock.ownerId);
+  return {
+    ...status,
+    exchangeSyncOk: syncOk || status.exchangeSyncOk,
+    lastError: lock.error ?? status.lastError,
+  };
+}
+
+export async function canEnterAssetTrade(
+  assetOrTicker: string,
+  options?: { allowLockOwnerId?: string },
+): Promise<{ ok: boolean; reason?: string; status: SharedTradeGateStatus }> {
+  const asset = assetLabel(assetOrTicker);
+  const exchangeSyncOk = await refreshExchangeOpenAssets();
+  const lock = await getTradeLockRow(asset);
+  if (lock.ok && lock.exists) {
+    await cleanupStaleTradeLock(asset, {
+      ownerId: lock.ownerId,
+      intentStartedAt: lock.intentStartedAt,
+      state: lock.state,
+    });
+  }
+  const lockAfterCleanup = await getTradeLockRow(asset);
+  const globalCount = await getGlobalOpenPositionCount();
+  const assetOpen = await hasOpenPositionForAssetInDb(asset);
+  const cooldown = await getAssetPostExitCooldownRemainingMs(asset);
+  const status = readTradeGateStatus(asset, lockAfterCleanup.state, lockAfterCleanup.ownerId);
+  const allowLockOwnerId = options?.allowLockOwnerId ?? null;
+  const lockHeldByOther =
+    status.lockOwnerId !== null && status.lockOwnerId !== allowLockOwnerId;
+  const effectiveExchangeSyncOk = exchangeSyncOk || status.exchangeSyncOk;
+  const dbOpenPosition = assetOpen.hasOpen;
+  const effectiveHasPosition = status.openPosition || dbOpenPosition;
+  const lastError = lockAfterCleanup.error ?? globalCount.error ?? assetOpen.error ?? cooldown.error ?? status.lastError;
+  logger.info(
+    {
+      asset: status.asset,
+      openPosition: status.openPosition,
+      dbOpenPosition,
+      effectiveHasPosition,
+      entryLocked: status.entryLocked,
+      lockState: status.lockState,
+      lockOwnerId: status.lockOwnerId,
+      lockHeldByOther,
+      globalOpenPositions: globalCount.count,
+      postExitCooldownMs: cooldown.remainingMs,
+      exchangeSyncOk: effectiveExchangeSyncOk,
+      lastError,
+    },
+    `[TRADE GATE] asset=${status.asset}, openPosition=${status.openPosition}, entryLocked=${status.entryLocked}`,
+  );
+  if (!effectiveExchangeSyncOk) {
+    return { ok: false, reason: "exchange_sync_unavailable", status: { ...status, exchangeSyncOk: false, lastError } };
+  }
+  if (!lockAfterCleanup.ok) {
+    return { ok: false, reason: "entry_lock_unavailable", status: { ...status, lastError } };
+  }
+  if (!globalCount.ok) {
+    return { ok: false, reason: "position_count_unavailable", status: { ...status, lastError } };
+  }
+  if (!assetOpen.ok) {
+    return { ok: false, reason: "asset_open_position_unavailable", status: { ...status, lastError } };
+  }
+  if (!cooldown.ok) {
+    return { ok: false, reason: "post_exit_cooldown_unavailable", status: { ...status, lastError } };
+  }
+  if (cooldown.remainingMs > 0) {
+    return {
+      ok: false,
+      reason: `post_exit_cooldown_${Math.ceil(cooldown.remainingMs / 1000)}s`,
+      status,
+    };
+  }
+  if (globalCount.count >= GLOBAL_MAX_OPEN_POSITIONS) {
+    return { ok: false, reason: "max_positions_reached", status };
+  }
+  if (effectiveHasPosition) {
+    return { ok: false, reason: "has_open_position", status };
+  }
+  if (lockHeldByOther) {
+    return { ok: false, reason: "entry_in_progress", status };
+  }
+  return { ok: true, status };
+}
+
+export interface TradeEntryGateResult {
+  allowed: boolean;
+  asset: string;
+  openPosition: boolean;
+  entryLocked: boolean;
+  lockState: string | null;
+  lockOwnerId: string | null;
+  intentMarked: boolean;
+  reason?: string;
+}
+
+export async function acquireTradeEntryGate(assetOrTicker: string, _context?: string): Promise<TradeEntryGateResult> {
+  const asset = assetLabel(assetOrTicker);
+  // Acquire DB atomic lock FIRST, before any async checks.
+  const lock = await acquireAtomicTradeLock(asset);
+  if (!lock.ok) {
+    return {
+      allowed: false,
+      asset,
+      openPosition: false,
+      entryLocked: true,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: false,
+      reason: "entry_lock_unavailable",
+    };
+  }
+  if (!lock.acquired) {
+    const current = await getTradeLockRow(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: false,
+      entryLocked: true,
+      lockState: current.state,
+      lockOwnerId: current.ownerId,
+      intentMarked: false,
+      reason: "entry_in_progress",
+    };
+  }
+  const intent = await markTradeIntent(asset);
+  if (!intent.ok) {
+    await releaseAtomicTradeLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: false,
+      entryLocked: false,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: false,
+      reason: "intent_marker_failed",
+    };
+  }
+
+  // After lock + intent marker, allow this owner to continue through validation.
+  const check = await canEnterAssetTrade(asset, { allowLockOwnerId: ENTRY_LOCK_OWNER_ID });
+  if (!check.ok) {
+    await finalizeTradeIntent(asset, "rolled_back");
+    await releaseAtomicTradeLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: check.status.openPosition,
+      entryLocked: check.status.entryLocked,
+      lockState: check.status.lockState,
+      lockOwnerId: check.status.lockOwnerId,
+      intentMarked: true,
+      reason: check.reason,
+    };
+  }
+
+  const postAcquireSyncOk = await refreshExchangeOpenAssets(true);
+  const postAcquireOpen = exchangeOpenAssets.has(asset);
+  if (!postAcquireSyncOk && !hasFreshPositionSnapshot()) {
+    await finalizeTradeIntent(asset, "rolled_back");
+    await releaseAtomicTradeLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: postAcquireOpen,
+      entryLocked: false,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: true,
+      reason: "exchange_sync_unavailable",
+    };
+  }
+  if (postAcquireOpen) {
+    await finalizeTradeIntent(asset, "rolled_back");
+    await releaseAtomicTradeLock(asset);
+    return {
+      allowed: false,
+      asset,
+      openPosition: true,
+      entryLocked: false,
+      lockState: null,
+      lockOwnerId: null,
+      intentMarked: true,
+      reason: "has_open_position",
+    };
+  }
+
+  logger.info(
+    { asset, openPosition: false, entryLocked: true, lockState: "intent", lockOwnerId: ENTRY_LOCK_OWNER_ID },
+    `[TRADE GATE] asset=${asset}, openPosition=false, entryLocked=true`,
+  );
+  return {
+    allowed: true,
+    asset,
+    openPosition: false,
+    entryLocked: true,
+    lockState: "intent",
+    lockOwnerId: ENTRY_LOCK_OWNER_ID,
+    intentMarked: true,
+  };
+}
+
+export function releaseTradeEntryGate(
+  assetOrTicker: string,
+  _context?: string,
+  options?: { keepDistributedLockMs?: number; finalState?: "confirmed" | "rolled_back" },
+): void {
+  const asset = assetLabel(assetOrTicker);
+  const finalState = options?.finalState ?? "rolled_back";
+  const keepMs = Math.max(0, Math.floor(options?.keepDistributedLockMs ?? 0));
+  if (keepMs > 0) {
+    // Confirmation window: keep lock while waiting for external position propagation.
+    void db.execute(
+      sql`
+        UPDATE trade_locks
+        SET state = ${finalState},
+            intent_created_at = NOW(),
+            intent_expires_at = NOW() + (${keepMs} * INTERVAL '1 millisecond'),
+            updated_at = NOW()
+        WHERE asset = ${asset}
+          AND owner_id = ${ENTRY_LOCK_OWNER_ID}
+      `,
+    ).then(() => {
+      setTimeout(() => {
+        void releaseAtomicTradeLock(asset);
+      }, keepMs);
+    }).catch((err) => {
+      logger.warn({ err, asset }, "trade lock: delayed release scheduling failed");
+      void releaseAtomicTradeLock(asset);
+    });
+    return;
+  }
+  void finalizeTradeIntent(asset, finalState).then(() => releaseAtomicTradeLock(asset));
+}
+
+export function hasOpenPositionFromExchange(assetOrTicker: string): boolean {
+  return exchangeOpenAssets.has(assetLabel(assetOrTicker));
+}
+
+export function isAssetEntryLocked(assetOrTicker: string): boolean {
+  return false;
+}
+
+export function acquireAssetEntryLock(assetOrTicker: string): boolean {
+  return false;
+}
+
+export function releaseAssetEntryLock(assetOrTicker: string): void {
+  return;
+}
+
+export interface TradeEntrySignal {
+  assetOrTicker: string;
+  context?: string;
+}
+
+export async function tryEnterTrade(asset: string, signal: TradeEntrySignal): Promise<TradeEntryGateResult> {
+  return acquireTradeEntryGate(signal.assetOrTicker ?? asset, signal.context ?? "try_enter_trade");
+}
+
+export function setExchangeOpenPositionsSnapshot(assets: Set<string>): void {
+  exchangeOpenAssets.clear();
+  for (const a of assets) {
+    exchangeOpenAssets.add(assetLabel(a));
+  }
+  lastPositionSyncOkAt = Date.now();
+  lastPositionSyncError = null;
+}
+
+export function noteOpenedAssetPosition(assetOrTicker: string): void {
+  exchangeOpenAssets.add(assetLabel(assetOrTicker));
+}
+
+export function noteClosedAssetPosition(assetOrTicker: string): void {
+  exchangeOpenAssets.delete(assetLabel(assetOrTicker));
 }

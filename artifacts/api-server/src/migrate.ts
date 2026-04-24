@@ -11,7 +11,8 @@ export async function runMigrations(): Promise<void> {
         side            TEXT NOT NULL,
         buy_price_cents  INTEGER NOT NULL,
         sell_price_cents INTEGER,
-        contract_count  INTEGER NOT NULL,
+        contract_count  REAL NOT NULL,
+        contract_count_fp TEXT,
         fee_cents       INTEGER NOT NULL DEFAULT 0,
         pnl_cents       INTEGER,
         status          TEXT NOT NULL DEFAULT 'open',
@@ -31,6 +32,108 @@ export async function runMigrations(): Promise<void> {
         data       TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
+    `);
+
+    await db.execute(sql`
+      ALTER TABLE trades
+      ALTER COLUMN contract_count TYPE REAL
+      USING contract_count::real
+    `);
+    await db.execute(sql`
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS contract_count_fp TEXT
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS trade_entry_locks (
+        asset      TEXT PRIMARY KEY,
+        owner_id   TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS trade_entry_locks_expires_at_idx
+      ON trade_entry_locks (expires_at)
+    `);
+    await db.execute(sql`
+      DELETE FROM trade_entry_locks
+      WHERE expires_at <= NOW()
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS trade_locks (
+        asset             TEXT PRIMARY KEY,
+        owner_id          TEXT NOT NULL,
+        state             TEXT NOT NULL DEFAULT 'locked',
+        intent_id         TEXT,
+        intent_payload    TEXT,
+        intent_created_at TIMESTAMPTZ,
+        expires_at        TIMESTAMPTZ NOT NULL,
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS owner_id TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'locked'
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_id TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_payload TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_created_at TIMESTAMPTZ
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS intent_expires_at TIMESTAMPTZ
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS lock_token TEXT
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    await db.execute(sql`
+      UPDATE trade_locks
+      SET owner_id = COALESCE(owner_id, lock_owner),
+          state = COALESCE(state, lock_status, 'locked'),
+          intent_created_at = COALESCE(intent_created_at, intent_started_at),
+          intent_expires_at = COALESCE(intent_expires_at, intent_started_at, intent_created_at, NOW() + INTERVAL '45 seconds'),
+          expires_at = COALESCE(expires_at, intent_expires_at, NOW() + INTERVAL '45 seconds'),
+          lock_token = COALESCE(
+            lock_token,
+            owner_id || ':' || asset || ':' || EXTRACT(EPOCH FROM NOW())::TEXT
+          ),
+          updated_at = COALESCE(updated_at, NOW())
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ALTER COLUMN owner_id SET NOT NULL
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ALTER COLUMN state SET NOT NULL
+    `);
+    await db.execute(sql`
+      ALTER TABLE trade_locks ALTER COLUMN expires_at SET NOT NULL
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS trade_locks_lock_token_uq
+      ON trade_locks (lock_token)
+      WHERE lock_token IS NOT NULL
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS trade_locks_expires_at_idx
+      ON trade_locks (expires_at)
+    `);
+    await db.execute(sql`
+      DELETE FROM trade_locks
+      WHERE expires_at <= NOW()
     `);
 
     await db.execute(sql`

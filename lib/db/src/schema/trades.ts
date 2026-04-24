@@ -9,7 +9,9 @@ export const tradesTable = pgTable("trades", {
   side: text("side").notNull(),
   buyPriceCents: integer("buy_price_cents").notNull(),
   sellPriceCents: integer("sell_price_cents"),
-  contractCount: integer("contract_count").notNull(),
+  // Supports fractional contract quantities from Kalshi count_fp.
+  contractCount: real("contract_count").notNull(),
+  contractCountFp: text("contract_count_fp"),
   feeCents: integer("fee_cents").notNull().default(0),
   pnlCents: integer("pnl_cents"),
   status: text("status").notNull().default("open"),

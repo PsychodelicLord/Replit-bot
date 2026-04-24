@@ -5,8 +5,10 @@
  * Instinct Scalper API
  * OpenAPI spec version: 0.1.0
  */
-import type { LogEntry } from './logEntry';
 
-export interface LogList {
-  logs: LogEntry[];
+export interface ManualTradeResult {
+  success: boolean;
+  tradeId?: number;
+  orderId?: string;
+  message: string;
 }

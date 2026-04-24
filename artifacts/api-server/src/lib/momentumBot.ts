@@ -16,10 +16,24 @@
  *  - Use max_close_ts to surface short-duration crypto markets
  */
 
-import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook } from "./kalshi-bot";
+import {
+  kalshiFetch,
+  getBotState,
+  refreshBalance,
+  setTradeClosedHook,
+  canEnterAssetTrade,
+  tryEnterTrade,
+  releaseTradeEntryGate,
+  getSharedTradeGateStatus,
+  setExchangeOpenPositionsSnapshot,
+  noteOpenedAssetPosition,
+  noteClosedAssetPosition,
+  canonicalizeAssetLabel,
+  parseExchangePositionRows,
+} from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
-import { eq, asc, desc } from "drizzle-orm";
+import { eq, asc, desc, gte } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
@@ -51,6 +65,10 @@ const MIN_MINUTES_REMAINING_SIM = 2;  // sim mode: enter with 2 min left (vs 3)
 
 const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
+const ENTRY_CHECK_COOLDOWN_MS = 10_000; // short per-asset duplicate-entry cooldown
+const EXCHANGE_POSITION_SYNC_MS = 5_000; // refresh exchange open positions frequently
+const SIGNAL_TO_EXEC_MAX_DELAY_MS = 8_000; // skip entries if signal is already too old
+const POST_ENTRY_LOCK_HOLD_MS = 20_000; // keep distributed lock briefly after open to cover exchange-sync lag
 
 const FEE_RATE = 0.07;
 
@@ -68,6 +86,7 @@ interface MomentumPosition {
   side: "YES" | "NO";
   entryPriceCents: number;
   contractCount: number;
+  contractCountFp?: string;
   enteredAt: number;        // ms
   lastSeenPriceCents: number;
   lastMovedAt: number;      // ms — last time price moved ≥1¢
@@ -77,12 +96,52 @@ interface MomentumPosition {
   pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
 }
 
+function normalizeCountFp(raw?: string | null): string | null {
+  if (!raw) return null;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed.toFixed(2);
+}
+
+function countFpToStorageUnits(countFp: string | null): number {
+  if (!countFp) return 0;
+  const parsed = Number.parseFloat(countFp);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.round(parsed * 100);
+}
+
+function storageUnitsToCountFp(units: number): string | null {
+  if (!Number.isFinite(units) || units <= 0) return null;
+  return (units / 100).toFixed(2);
+}
+
+type MarketMeta = {
+  ticker: string;
+  title: string;
+  minutesRemaining: number;
+  closeTs: number;
+  status: string;
+  askCents: number;
+  bidCents: number;
+  fractionalTradingEnabled: boolean;
+};
+
 interface MomentumDecision {
   action: "BUY_YES" | "BUY_NO" | "SKIP";
   reason: string;
   moveCents: number;      // abs price move detected within the window (¢)
   moveMs: number;         // time span over which the move occurred (ms)
   centsPerSec: number;    // velocity: moveCents / (moveMs / 1000)
+}
+
+type MarketPriceSource = "orderbook" | "market_hint" | "market_detail";
+
+interface OrderBookSnapshot {
+  bid: number;
+  ask: number;
+  spread: number;
+  mid: number;
+  source: MarketPriceSource;
 }
 
 // ─── State ─────────────────────────────────────────────────────────────────
@@ -126,7 +185,7 @@ export interface MomentumBotState {
 
   // Exit thresholds (cents) — configurable from UI
   tpCents: number;   // take-profit: gain in cents above entry
-  slCents: number;   // stop-loss: loss in cents below entry
+  slCents: number;   // stop-loss: triggers on relative loss OR absolute YES-price floor
   staleMs: number;   // exit if price flat for this long (ms)
   tpAbsoluteCents: number;          // 0 = use relative tpCents; >0 = exit when YES price hits this level
   sessionProfitTargetCents: number; // 0 = trade indefinitely; >0 = stop when session gain hits this
@@ -195,7 +254,7 @@ export interface MomentumBotConfig {
   priceMin?: number;             // min entry price in cents (default 38)
   priceMax?: number;             // max entry price in cents (default 62)
   tpCents?: number;              // take-profit threshold in cents (default 5)
-  slCents?: number;              // stop-loss threshold in cents (default 2)
+  slCents?: number;              // stop-loss threshold: relative loss + absolute YES floor (default 2)
   staleMs?: number;              // stale-exit timer in ms (default 65000)
   tpAbsoluteCents?: number;      // 0 = use relative; >0 = exit when YES price hits this
   sessionProfitTargetCents?: number; // 0 = unlimited; >0 = stop when session P&L hits this
@@ -214,13 +273,12 @@ const simPositions: MomentumPosition[] = [];
 
 // Per-market cooldowns
 const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") → cooldown-expiry ms
-
-
-// Global post-trade cooldown — blocks ALL new entries for N seconds after any trade closes.
-// Prevents back-to-back trade spam across different markets.
-const POST_WIN_COOLDOWN_MS  = 60_000;  // 60s after a TP/STALE exit
-const POST_LOSS_COOLDOWN_MS = 120_000; // 120s after an SL exit (losses need more breathing room)
-let globalCooldownUntilMs = 0;
+const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
+const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
+const marketFractionalTradingEnabledByTicker = new Map<string, boolean>();
+let lastExchangeSyncMs = 0;
+let lastExchangeSyncOkAt = 0;
+let lastExchangeSyncError: string | null = null;
 
 // Hardcoded minimum balance — always enforced even if user hasn't set a floor.
 // Bot will stop itself if available cash drops below this regardless of floor setting.
@@ -230,12 +288,10 @@ const MIN_BALANCE_HARD_FLOOR_CENTS = 200; // $2 absolute minimum to keep trading
 let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
 
-// Startup hold — blocks all trades for 60s after (re)start so DB recovery and
-// syncPortfolioFromKalshi can repopulate openPositions before any new entries fire.
-let startupHoldUntilMs = 0;
-// Recovery latch — live mode cannot open new trades until DB recovery for open
-// positions has completed at least once after start/restart.
+// Recovery latch — live mode cannot open new trades until exchange-backed position
+// sync has completed at least once after start/restart.
 let recoveryReady = false;
+let recoveryRetryTimer: NodeJS.Timeout | null = null;
 
 // ─── Bot Health Score rolling buffer ────────────────────────────────────────
 interface TradeRecord {
@@ -395,10 +451,159 @@ function isMomentumMarket(ticker: string): boolean {
 }
 
 function coinLabel(ticker: string): string {
-  for (const coin of ALLOWED_COINS) {
-    if (ticker.toUpperCase().includes(coin)) return coin;
+  return canonicalizeAssetLabel(ticker);
+}
+
+function isCryptoMomentumTicker(ticker: string): boolean {
+  const up = ticker.toUpperCase();
+  return ALLOWED_TICKER_PREFIXES.some((prefix) => up.startsWith(prefix));
+}
+
+function parseFixedPointCountToContracts(value: string): number {
+  const trimmed = value.trim();
+  const parsed = Number.parseFloat(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return parsed;
+}
+
+function parseContractCount(raw: unknown): number {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
   }
-  return ticker;
+  if (typeof raw === "string") {
+    return parseFixedPointCountToContracts(raw);
+  }
+  return 0;
+}
+
+function recordMarketCapabilities(markets: Array<{ ticker: string; fractionalTradingEnabled: boolean }>): void {
+  for (const market of markets) {
+    marketFractionalTradingEnabledByTicker.set(market.ticker, market.fractionalTradingEnabled);
+  }
+}
+
+function hasOpenPosition(asset: string): boolean {
+  return openPositions.some(p => coinLabel(p.marketId) === asset);
+}
+
+function getLastTradeAgoMs(asset: string): number | null {
+  const last = lastTradeTimeByAssetMs.get(asset);
+  if (!last) return null;
+  return Date.now() - last;
+}
+
+function setLastTradeNow(asset: string): void {
+  lastTradeTimeByAssetMs.set(asset, Date.now());
+}
+
+function setLastDecision(message: string): void {
+  state.lastDecision = message;
+  state.lastDecisionAt = new Date().toISOString();
+}
+
+function getRemainingCooldownMs(
+  cooldowns: Map<string, number>,
+  asset: string,
+): number {
+  const untilMs = cooldowns.get(asset) ?? 0;
+  if (untilMs <= 0) return 0;
+  const remainingMs = untilMs - Date.now();
+  if (remainingMs <= 0) {
+    cooldowns.delete(asset);
+    return 0;
+  }
+  return remainingMs;
+}
+
+async function restoreRestartEntryGuardsFromDb(): Promise<{ dedupRestored: number; cooldownRestored: number }> {
+  const now = Date.now();
+  const dedupCutoff = new Date(now - ENTRY_CHECK_COOLDOWN_MS);
+  const cooldownCutoff = new Date(now - COOLDOWN_MS);
+
+  try {
+    const [recentEntries, recentClosures] = await Promise.all([
+      db.select({
+        marketId: tradesTable.marketId,
+        createdAt: tradesTable.createdAt,
+      }).from(tradesTable).where(gte(tradesTable.createdAt, dedupCutoff)),
+      db.select({
+        marketId: tradesTable.marketId,
+        closedAt: tradesTable.closedAt,
+      }).from(tradesTable).where(gte(tradesTable.closedAt, cooldownCutoff)),
+    ]);
+
+    let dedupRestored = 0;
+    for (const trade of recentEntries) {
+      const asset = coinLabel(trade.marketId);
+      const createdMs = trade.createdAt.getTime();
+      const prev = lastTradeTimeByAssetMs.get(asset) ?? 0;
+      if (createdMs > prev) {
+        lastTradeTimeByAssetMs.set(asset, createdMs);
+        dedupRestored++;
+      }
+    }
+
+    let cooldownRestored = 0;
+    for (const trade of recentClosures) {
+      if (!trade.closedAt) continue;
+      const asset = coinLabel(trade.marketId);
+      const untilMs = trade.closedAt.getTime() + COOLDOWN_MS;
+      if (untilMs <= now) continue;
+      const prev = marketCooldowns.get(asset) ?? 0;
+      if (untilMs > prev) {
+        marketCooldowns.set(asset, untilMs);
+        const dedupUntil = trade.closedAt.getTime() + ENTRY_CHECK_COOLDOWN_MS;
+        const dedupPrev = assetEntryCooldownUntilMs.get(asset) ?? 0;
+        if (dedupUntil > dedupPrev) {
+          assetEntryCooldownUntilMs.set(asset, dedupUntil);
+        }
+        cooldownRestored++;
+      }
+    }
+
+    return { dedupRestored, cooldownRestored };
+  } catch (err) {
+    warn(`[RECOVERY] Failed to restore entry guards from DB: ${String(err)}`);
+    return { dedupRestored: 0, cooldownRestored: 0 };
+  }
+}
+
+function hasFreshExchangePositionSnapshot(): boolean {
+  if (lastExchangeSyncOkAt <= 0) return false;
+  // Allow a brief grace window beyond sync cadence for transient API jitter.
+  return Date.now() - lastExchangeSyncOkAt <= EXCHANGE_POSITION_SYNC_MS * 3;
+}
+
+async function refreshLiveOpenPositionsFromExchange(force = false): Promise<boolean> {
+  if (state.simulatorMode) return true;
+  const now = Date.now();
+  if (!force && now - lastExchangeSyncMs < EXCHANGE_POSITION_SYNC_MS) {
+    return hasFreshExchangePositionSnapshot();
+  }
+  lastExchangeSyncMs = now;
+
+  try {
+    const posResp = await kalshiFetch("GET", "/portfolio/positions");
+    const parsed = parseExchangePositionRows((posResp as Record<string, unknown>)?.positions);
+    if (!parsed.ok) {
+      lastExchangeSyncError = `position payload parse failed: ${parsed.reason}`;
+      warn(`[ENTRY CHECK] Exchange position sync parse failed: ${parsed.reason}`);
+      return false;
+    }
+    const freshAssets = new Set<string>();
+    for (const row of parsed.rows) {
+      if (!row.hasExposure) continue;
+      freshAssets.add(coinLabel(row.ticker));
+    }
+    setExchangeOpenPositionsSnapshot(freshAssets);
+    lastExchangeSyncOkAt = Date.now();
+    lastExchangeSyncError = null;
+    return true;
+  } catch (err) {
+    lastExchangeSyncError = String(err);
+    warn(`[ENTRY CHECK] Exchange position sync failed: ${lastExchangeSyncError}`);
+    return false;
+  }
 }
 
 // ─── Risk Management ───────────────────────────────────────────────────────
@@ -558,7 +763,7 @@ async function fetchMarketOrderBook(
   ticker: string,
   hintAskCents?: number,
   hintBidCents?: number,
-): Promise<{ bid: number; ask: number; spread: number; mid: number } | null> {
+): Promise<OrderBookSnapshot | null> {
   try {
     const resp = await kalshiFetch("GET", `/markets/${ticker}/orderbook`) as {
       // New format (Kalshi API ≥ 2025): prices in 0.0–1.0 dollar scale
@@ -590,14 +795,14 @@ async function fetchMarketOrderBook(
       const bid = bestYesBid > 0 ? bestYesBid : Math.max(0, ask - 2);
       const spread = ask - bid;
       const mid = Math.round((ask + bid) / 2);
-      if (ask > 0 && bid > 0) return { bid, ask, spread, mid };
+      if (ask > 0 && bid > 0) return { bid, ask, spread, mid, source: "orderbook" };
     }
 
     // Orderbook empty — use market-list price hints if provided
     if (hintAskCents && hintBidCents && hintAskCents > 0 && hintBidCents > 0) {
       const spread = hintAskCents - hintBidCents;
       const mid = Math.round((hintAskCents + hintBidCents) / 2);
-      return { bid: hintBidCents, ask: hintAskCents, spread, mid };
+      return { bid: hintBidCents, ask: hintAskCents, spread, mid, source: "market_hint" };
     }
 
     // Last resort: individual market detail (has yes_ask_dollars / yes_bid_dollars)
@@ -610,7 +815,7 @@ async function fetchMarketOrderBook(
       const bid = m.yes_bid_dollars ? Math.round(m.yes_bid_dollars * 100) : Math.max(0, ask - 2);
       const spread = ask - bid;
       const mid = Math.round((ask + bid) / 2);
-      if (ask > 0 && bid > 0) return { bid, ask, spread, mid };
+      if (ask > 0 && bid > 0) return { bid, ask, spread, mid, source: "market_detail" };
     }
 
     return null;
@@ -626,6 +831,7 @@ type RawMarket = {
   status?: string;
   yes_ask_dollars?: number;
   yes_bid_dollars?: number;
+  fractional_trading_enabled?: boolean;
 };
 
 function rawToMarket(m: RawMarket, now: number) {
@@ -637,18 +843,27 @@ function rawToMarket(m: RawMarket, now: number) {
     ? Math.round(m.yes_ask_dollars * 100) : 0;
   const bidCents = m.yes_bid_dollars != null && m.yes_bid_dollars > 0
     ? Math.round(m.yes_bid_dollars * 100) : 0;
-  return { ticker: m.ticker!, title: m.title ?? m.ticker!, minutesRemaining, closeTs, status: m.status ?? "open", askCents, bidCents };
+  return {
+    ticker: m.ticker!,
+    title: m.title ?? m.ticker!,
+    minutesRemaining,
+    closeTs,
+    status: m.status ?? "open",
+    askCents,
+    bidCents,
+    fractionalTradingEnabled: m.fractional_trading_enabled === true,
+  };
 }
 
 // ── Market list cache — refreshed every 2 min to avoid rate-limiting Kalshi ──
 let _marketCache: {
-  markets: Array<{ ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number }>;
+  markets: Array<{ ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number; fractionalTradingEnabled: boolean }>;
   cachedAt: number;
 } | null = null;
 const MARKET_CACHE_TTL_MS = 2 * 60_000; // re-fetch market list every 2 minutes
 
 export async function fetchActiveMarkets(): Promise<Array<{
-  ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number;
+  ticker: string; title: string; minutesRemaining: number; closeTs: number; status: string; askCents: number; bidCents: number; fractionalTradingEnabled: boolean;
 }>> {
   const now = Date.now();
 
@@ -692,6 +907,7 @@ export async function fetchActiveMarkets(): Promise<Array<{
     .filter(m => m.ticker && (!m.status || m.status === "open" || m.status === "active"))
     .map(m => rawToMarket(m, now))
     .filter(m => m.minutesRemaining > (state.simulatorMode ? MIN_MINUTES_REMAINING_SIM : MIN_MINUTES_REMAINING));
+  recordMarketCapabilities(markets.map((m) => ({ ticker: m.ticker, fractionalTradingEnabled: m.fractionalTradingEnabled })));
 
   console.log(`[FETCH] Refresh complete — ${markets.length} eligible markets found`);
 
@@ -708,8 +924,38 @@ export async function fetchActiveMarkets(): Promise<Array<{
 
 // ─── Order placement ────────────────────────────────────────────────────────
 type BuyOrderResult =
-  | { ok: true; orderId: string; fillPrice: number; contractCount: number }
+  | { ok: true; orderId: string; fillPrice: number; contractCount: number; countFp?: string | null }
   | { ok: false; reason: "budget_too_small" | "order_failed"; message: string };
+
+type CountMode =
+  | { mode: "integer"; count: number }
+  | { mode: "fractional"; countFp: string };
+
+function toFixedPointCount(contracts: number): string {
+  return contracts.toFixed(2);
+}
+
+function deriveCountMode(
+  ticker: string,
+  side: "YES" | "NO",
+  entryPriceCents: number,
+  betCostCents: number,
+): CountMode | null {
+  if (entryPriceCents <= 0) return null;
+  const marketFlag = marketFractionalTradingEnabledByTicker.get(ticker) === true;
+  const fractionalEnabled = marketFlag || isCryptoMomentumTicker(ticker);
+  if (fractionalEnabled) {
+    // Kalshi fixed-point contract units: support sub-contract entries, capped to 2 decimals.
+    const fractionalContracts = betCostCents / entryPriceCents;
+    if (fractionalContracts < 0.01) return null;
+    const floored = Math.floor(fractionalContracts * 100) / 100;
+    if (floored < 0.01) return null;
+    return { mode: "fractional", countFp: toFixedPointCount(floored) };
+  }
+  const integerContracts = Math.floor(betCostCents / entryPriceCents);
+  if (integerContracts < 1) return null;
+  return { mode: "integer", count: integerContracts };
+}
 
 async function placeBuyOrder(
   ticker: string,
@@ -718,45 +964,52 @@ async function placeBuyOrder(
   betCostCents: number,
 ): Promise<BuyOrderResult> {
   const clientOrderId = `momentum-${ticker}-${side}-${Date.now()}`;
-  // Kalshi uses count-based ordering (number of contracts), not cost-based.
-  // limitCents is always passed in YES-space.
-  // For NO orders: actual NO cost per contract = 100 − limitCents (NO-space conversion).
-  const noPriceCents      = 100 - limitCents;
-  const pricePerContract  = side === "NO" ? noPriceCents : limitCents;
-
-  // If budget < price, we can't afford even 1 contract — skip rather than overspend.
-  const contractCount = Math.floor(betCostCents / pricePerContract);
-  if (contractCount < 1) {
-    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford 1 contract, skipping entry`);
+  // limitCents is always YES-space.
+  // For NO, per-contract entry cost is NO-space = 100 - YES.
+  const noPriceCents = 100 - limitCents;
+  const pricePerContract = side === "NO" ? noPriceCents : limitCents;
+  const countMode = deriveCountMode(ticker, side, pricePerContract, betCostCents);
+  if (!countMode) {
+    console.log(`[ORDER SKIP] budget:${betCostCents}¢ price:${pricePerContract}¢ (${side}) — can't afford minimum contract size, skipping entry`);
     return {
       ok: false,
       reason: "budget_too_small",
-      message: `budget ${betCostCents}¢ < single-contract price ${pricePerContract}¢`,
+      message: `budget ${betCostCents}¢ is below minimum size at ${pricePerContract}¢`,
     };
   }
 
   // ── Hard cap: absolute maximum is the budget itself (betCostCents). ────────
-  // $20 (2000¢) secondary ceiling in case betCostCents is somehow stale/wrong.
+  // Secondary ceiling protects against stale oversize config.
   const HARD_MAX_CENTS = 2000;
-  const maxContractsByHardCap = Math.max(1, Math.floor(HARD_MAX_CENTS / pricePerContract));
-  const safeCount = Math.min(contractCount, maxContractsByHardCap);
-  const estimatedCost = safeCount * pricePerContract;
+  const hardCapCost = Math.min(betCostCents, HARD_MAX_CENTS);
+  const requestedContracts = countMode.mode === "fractional"
+    ? Number.parseFloat(countMode.countFp)
+    : countMode.count;
+  const maxContractsByHardCap = countMode.mode === "fractional"
+    ? Math.floor((hardCapCost / pricePerContract) * 100) / 100
+    : Math.max(1, Math.floor(hardCapCost / pricePerContract));
+  const safeContracts = countMode.mode === "fractional"
+    ? Math.min(requestedContracts, maxContractsByHardCap)
+    : Math.min(requestedContracts, maxContractsByHardCap);
+  const safeCountFp = countMode.mode === "fractional" ? toFixedPointCount(safeContracts) : null;
+  const safeCount = countMode.mode === "integer" ? Math.max(1, Math.floor(safeContracts)) : null;
+  const estimatedCost = Math.round(safeContracts * pricePerContract);
 
   // ── [SIZE CHECK] log — emitted before EVERY live order ───────────────────
   const balanceCents = getBotState().balanceCents;
-  console.log(`[SIZE CHECK] requested=${betCostCents}¢ ($${(betCostCents/100).toFixed(2)}) capped=${estimatedCost}¢ ($${(estimatedCost/100).toFixed(2)}) balance=${balanceCents}¢ ($${(balanceCents/100).toFixed(2)}) contracts=${safeCount} price=${pricePerContract}¢`);
+  console.log(
+    `[SIZE CHECK] requested=${betCostCents}¢ ($${(betCostCents/100).toFixed(2)}) capped=${estimatedCost}¢ ($${(estimatedCost/100).toFixed(2)}) balance=${balanceCents}¢ ($${(balanceCents/100).toFixed(2)}) contracts=${countMode.mode === "fractional" ? safeCountFp : safeCount} price=${pricePerContract}¢ mode=${countMode.mode}`,
+  );
 
   // ── Hard fail-safe: estimatedCost must NEVER exceed betCostCents ──────────
-  // Math.floor guarantees this, but if any upstream change ever breaks that
-  // invariant this will catch it before money leaves the account.
   if (estimatedCost > betCostCents) {
     const msg = `[SIZE FAIL-SAFE] estimatedCost=${estimatedCost}¢ exceeds betCostCents=${betCostCents}¢ — ORDER BLOCKED`;
     console.error(msg);
     throw new Error(msg);
   }
 
-  if (safeCount < contractCount) {
-    console.error(`[HARD CAP] contractCount ${contractCount} → ${safeCount} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢)`);
+  if (safeContracts < requestedContracts) {
+    console.error(`[HARD CAP] contracts ${requestedContracts} → ${safeContracts} (budget:${betCostCents}¢ hardMax:${HARD_MAX_CENTS}¢ price:${pricePerContract}¢ mode:${countMode.mode})`);
   }
 
   const payload: Record<string, unknown> = {
@@ -764,8 +1017,12 @@ async function placeBuyOrder(
     client_order_id: clientOrderId,
     type:   "limit",
     action: "buy",
+    // Avoid implicit fill-or-kill behavior in thin books so entries can rest/cancel
+    // instead of hard failing with insufficient resting volume.
+    time_in_force: "good_till_canceled",
     side:   side.toLowerCase(),
-    count:  safeCount,
+    count: countMode.mode === "integer" ? safeCount : undefined,
+    count_fp: countMode.mode === "fractional" ? safeCountFp : undefined,
     yes_price: side === "YES" ? limitCents    : undefined,
     no_price:  side === "NO"  ? noPriceCents  : undefined,  // must be in NO-space, not YES-space
   };
@@ -773,15 +1030,31 @@ async function placeBuyOrder(
   console.log(`[ORDER PAYLOAD] ${JSON.stringify(payload)}`);
   try {
     const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
-      order?: { order_id?: string; yes_price?: number; no_price?: number; count?: number }
+      order?: { order_id?: string; yes_price?: number; no_price?: number; yes_price_dollars?: string; no_price_dollars?: string; count?: number; count_fp?: string; filled_count?: number; filled_count_fp?: string }
     };
     console.log(`[ORDER RESPONSE] ${JSON.stringify(resp)}`);
     const orderId   = resp?.order?.order_id ?? clientOrderId;
-    const rawPrice  = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
-    const fillPrice = rawPrice > 0 ? Math.round(rawPrice * 100) : pricePerContract; // fallback uses NO-space price for NO
-    const filled    = resp?.order?.count ?? contractCount;
-    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filled} cost:${betCostCents}¢`);
-    return { ok: true, orderId, fillPrice, contractCount: filled };
+    const rawPriceCents = side === "YES" ? (resp?.order?.yes_price ?? 0) : (resp?.order?.no_price ?? 0);
+    const rawPriceDollars = side === "YES" ? resp?.order?.yes_price_dollars : resp?.order?.no_price_dollars;
+    const fillPrice = rawPriceCents > 0
+      ? Math.round(rawPriceCents * 100)
+      : rawPriceDollars
+        ? Math.round(Number.parseFloat(rawPriceDollars) * 100)
+        : pricePerContract;
+    const filledRaw: unknown = resp?.order?.filled_count_fp
+      ?? resp?.order?.count_fp
+      ?? resp?.order?.filled_count
+      ?? resp?.order?.count
+      ?? (countMode.mode === "fractional" ? safeCountFp : safeCount ?? 0);
+    const filled = parseContractCount(filledRaw);
+    console.log(`[ORDER SUCCESS] orderId:${orderId} fillPrice:${fillPrice}¢ contracts:${filledRaw} parsed:${filled} cost:${betCostCents}¢ mode:${countMode.mode}`);
+    return {
+      ok: true,
+      orderId,
+      fillPrice,
+      contractCount: filled,
+      countFp: typeof filledRaw === "string" ? filledRaw : (countMode.mode === "fractional" ? safeCountFp : null),
+    };
   } catch (err) {
     const message = String(err);
     console.error(`[ORDER FAILED] ${message}`);
@@ -824,13 +1097,17 @@ async function placeSellOrder(
   }
 
   const clientOrderId = `momentum-sell-${Math.abs(pos.tradeId)}-${Date.now()}`;
+  const sellCount = pos.contractCountFp && pos.contractCountFp.trim().length > 0
+    ? pos.contractCountFp
+    : pos.contractCount;
   const payload = {
     ticker: pos.marketId,
     client_order_id: clientOrderId,
     type: "limit",
     action: "sell",
     side: pos.side.toLowerCase(),
-    count: pos.contractCount,
+    count: typeof sellCount === "number" ? sellCount : undefined,
+    count_fp: typeof sellCount === "string" ? sellCount : undefined,
     yes_price: pos.side === "YES" ? limitCents : undefined,
     no_price:  pos.side === "NO"  ? limitCents : undefined,
   };
@@ -843,7 +1120,8 @@ async function placeSellOrder(
     // Kalshi returns count=0 when a limit order is resting (unfilled).
     // If unfilled, cancel the resting order, keep the position alive, and return false.
     // The sell monitor will retry next tick with a more aggressive price.
-    const fillCount: number = resp?.order?.count ?? resp?.order?.filled_count ?? 0;
+    const fillCountRaw: unknown = resp?.order?.count_fp ?? resp?.order?.count ?? resp?.order?.filled_count ?? 0;
+    const fillCount: number = parseContractCount(fillCountRaw);
     const sellOrderId: string | undefined = resp?.order?.order_id;
     if (fillCount === 0) {
       pos.pendingSellOrderId = sellOrderId;
@@ -870,14 +1148,15 @@ async function placeSellOrder(
     state.openTradeCount = openPositions.length;
 
     // Per-coin cooldown — keyed by coin name so it survives window rollovers
-    marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
+    const asset = coinLabel(pos.marketId);
+    marketCooldowns.set(asset, Date.now() + COOLDOWN_MS);
+    // Also arm short duplicate-entry cooldown from close time.
+    assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
     // ── Record win/loss in-memory immediately — DB-independent ──
     recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
 
-    // Global cooldown — longer after a loss so bot doesn't immediately revenge-trade
-    const cooldownMs = netPnl < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
-    globalCooldownUntilMs = Date.now() + cooldownMs;
-    console.log(`[COOLDOWN] ${netPnl < 0 ? "LOSS" : "WIN"} — global cooldown set: ${cooldownMs / 1000}s`);
+    // Per-asset duplicate entry cooldown — local to this coin only.
+    lastTradeTimeByAssetMs.set(coinLabel(pos.marketId), Date.now());
 
     // ── Health score tracking ──
     const liveGain = exitPriceForPnl - pos.entryPriceCents;
@@ -899,7 +1178,7 @@ async function placeSellOrder(
       pnlCents:          netPnl,
     });
 
-    // ── Async DB update — fire-and-forget, never blocks ──
+    // ── DB update: awaited for canonical cross-instance state consistency ──
     const sellFields = {
       status: "closed" as const,
       sellPriceCents: exitPriceForPnl,
@@ -908,15 +1187,13 @@ async function placeSellOrder(
       closedAt: new Date(),
     };
 
-    const persistSell = (id: number) => {
-      db.update(tradesTable).set(sellFields)
-        .where(eq(tradesTable.id, id))
-        .catch(err => warn(`DB sell update failed for id=${id}: ${String(err)}`));
-    };
-
     if (pos.tradeId > 0) {
       // Real DB id already resolved — update immediately
-      persistSell(pos.tradeId);
+      try {
+        await db.update(tradesTable).set(sellFields).where(eq(tradesTable.id, pos.tradeId));
+      } catch (err) {
+        warn(`DB sell update failed for id=${pos.tradeId}: ${String(err)}`);
+      }
     } else if (pos.buyOrderId) {
       // DB insert may still be in-flight — wait 6s for it to resolve,
       // then find the row by buyOrderId since we can't use the provisional negative id
@@ -976,22 +1253,23 @@ export async function executeMomentumTrade(
     };
   }
 
-  // If the limit order didn't fill immediately (resting order), contractCount comes back as 0.
-  // A 0-contract position can never be sold — it becomes a silent ghost that blocks the slot
+  // If the limit order didn't fill immediately (resting order), filled count comes back as 0.
+  // A 0-sized position can never be sold — it becomes a silent ghost that blocks the slot
   // and never records a loss. Cancel it immediately and bail out.
-  if (result.contractCount === 0) {
+  if (result.contractCount <= 0) {
     console.warn(`[ORDER UNFILLED] ${coinLabel(ticker)} ${side} — order resting on book (count:0), cancelling`);
     dbLog("warn", `[MOMENTUM] ORDER UNFILLED: ${coinLabel(ticker)} ${side} @${result.fillPrice}¢ — resting order, cancelled`);
     kalshiFetch("DELETE", `/portfolio/orders/${result.orderId}`).catch(() => {});
     return {
       status: "order_unfilled_cancelled",
-      reason: `order ${result.orderId} returned contractCount=0 and was cancelled`,
+      reason: `order ${result.orderId} returned filled count=0 and was cancelled`,
     };
   }
 
-  // Insert trade row to DB (fire-and-forget)
+  // Insert trade row to DB before releasing atomic entry gate so other instances
+  // immediately observe this asset as open via DB-level checks.
   let tradeId = -(Date.now()); // provisional negative ID
-  db.insert(tradesTable).values({
+  const insertedTrade = await db.insert(tradesTable).values({
     marketId:       ticker,
     marketTitle:    title,
     side,
@@ -1002,14 +1280,12 @@ export async function executeMomentumTrade(
     status:         "open",
     minutesRemaining: null,
     kalshiBuyOrderId: result.orderId,
-  }).returning({ id: tradesTable.id }).then(rows => {
-    if (rows[0]) {
-      const realId = rows[0].id;
-      const pos = openPositions.find(p => p.tradeId === tradeId);
-      if (pos) pos.tradeId = realId;
-      tradeId = realId;
-    }
-  }).catch(err => warn(`DB insert failed: ${String(err)}`));
+  }).returning({ id: tradesTable.id }).catch(err => {
+    throw new Error(`DB insert failed: ${String(err)}`);
+  });
+  if (insertedTrade[0]) {
+    tradeId = insertedTrade[0].id;
+  }
 
   // lastSeenPriceCents must be in YES-space (sell monitor always compares against currentMid=YES).
   // For YES: fill price IS the YES price.
@@ -1028,6 +1304,7 @@ export async function executeMomentumTrade(
     entryPriceCents:   result.fillPrice,
     entrySlippageCents: Math.abs(result.fillPrice - expectedEntryPrice), // actual vs expected (correct space)
     contractCount: result.contractCount,
+    contractCountFp: result.countFp ?? undefined,
     enteredAt: Date.now(),
     lastSeenPriceCents: entryYesEquiv,  // YES-space so stale-tracker comparisons are valid
     lastMovedAt: Date.now(),
@@ -1036,6 +1313,7 @@ export async function executeMomentumTrade(
   };
 
   openPositions.push(pos);
+  noteOpenedAssetPosition(ticker);
   state.openTradeCount = openPositions.length;
   state.status = "IN_TRADE";
 
@@ -1047,7 +1325,7 @@ export async function executeMomentumTrade(
   dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
   return {
     status: "trade_opened",
-    reason: `trade opened with ${result.contractCount} contract(s) at ${result.fillPrice}¢`,
+    reason: `trade opened with ${result.countFp ?? result.contractCount} contract(s) at ${result.fillPrice}¢`,
   };
 }
 
@@ -1064,10 +1342,18 @@ function enterSimPosition(
 ): void {
   const limitCents    = Math.min(askCents, bidCents + 1);
   const budget        = betCents ?? state.betCostCents;
-  // Cap contract count: use at least MIN_PRICE_FOR_CONTRACTS as the divisor.
-  // Without this cap, a 5¢-priced entry with 100¢ bet = 20 contracts,
-  // so a -3¢ SL hit becomes -60¢ total. At 20¢ baseline, max loss = -3¢ × 5 = -15¢.
-  const contractCount = budget / Math.max(limitCents, MIN_PRICE_FOR_CONTRACTS);
+  const entryPriceCents = side === "NO" ? (100 - limitCents) : limitCents;
+  // Mirror live sizing in paper mode: integer contracts and the same min-price
+  // denominator guard so sim P&L/auto-sell behavior stays comparable.
+  const cappedPricePerContract = Math.max(entryPriceCents, MIN_PRICE_FOR_CONTRACTS);
+  const contractCount = Math.floor(budget / cappedPricePerContract);
+  if (contractCount < 1) {
+    log(
+      `🎮 [SIM] SKIP ${side} ${coinLabel(ticker)} — budget:${budget}¢ < 1 contract @${cappedPricePerContract}¢`,
+    );
+    dbLog("warn", `[SIM] SKIP ${side} ${coinLabel(ticker)} budget:${budget}¢ price:${cappedPricePerContract}¢`);
+    return;
+  }
   const tradeId       = -(Date.now());
 
   const pos: MomentumPosition = {
@@ -1075,9 +1361,10 @@ function enterSimPosition(
     marketId: ticker,
     marketTitle: title,
     side,
-    entryPriceCents: limitCents,
+    entryPriceCents,
     contractCount,
     enteredAt: Date.now(),
+    // Keep this in YES-space for stale movement tracking.
     lastSeenPriceCents: limitCents,
     lastMovedAt: Date.now(),
     buyOrderId: null,
@@ -1088,15 +1375,13 @@ function enterSimPosition(
   state.simOpenTradeCount = simPositions.length;
   state.status = "IN_TRADE";
 
-  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢ | contracts:${contractCount.toFixed(3)} cost:${budget}¢`);
+  log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${entryPriceCents}¢ | contracts:${contractCount} cost:${budget}¢`);
   dbLog("info", `[SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢`);
 }
 
 /** Close a paper position at current price — no Kalshi API call */
 function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason: string): void {
-  const rawGain  = pos.side === "YES"
-    ? exitPriceCents - pos.entryPriceCents
-    : pos.entryPriceCents - exitPriceCents;
+  const rawGain  = exitPriceCents - pos.entryPriceCents;
   const pnlCents = Math.round(rawGain * pos.contractCount);
 
   const idx = simPositions.findIndex(p => p.tradeId === pos.tradeId);
@@ -1251,28 +1536,35 @@ async function monitorSimPositions(): Promise<void> {
       }
     } catch { /* keep last known */ }
 
-    // Trigger checks must use executable prices (same side as real sell path),
-    // not midpoint snapshots, otherwise SL can be missed in wide spreads.
+    // Trigger checks use executable prices in side-space:
+    // YES exits at YES bid; NO exits at NO bid (100 - YES ask).
     const executableExitPrice = pos.side === "YES"
       ? (currentBid > 0 ? currentBid : currentMid)
-      : (currentAsk > 0 ? currentAsk : currentMid);
-    const gain = pos.side === "YES"
-      ? executableExitPrice - pos.entryPriceCents
-      : pos.entryPriceCents - executableExitPrice;
+      : (currentAsk > 0 ? Math.max(1, 100 - currentAsk) : Math.max(1, 100 - currentMid));
+    const gain = executableExitPrice - pos.entryPriceCents;
 
     if (Math.abs(currentMid - pos.lastSeenPriceCents) >= 1) pos.lastMovedAt = now;
     pos.lastSeenPriceCents = currentMid;
 
-    // Exit price mirrors placeSellOrder: sell YES at bid, sell NO at ask
-    // (selling NO contracts = buying back YES, so you pay the ask to close)
-    const realisticExitPrice = pos.side === "YES"
-      ? (currentBid > 0 ? currentBid : currentMid)
-      : (currentAsk > 0 ? currentAsk : currentMid);
+    // Exit price mirrors executable side-space exits used above.
+    const realisticExitPrice = executableExitPrice;
 
     const simMinsLeft = pos.closeTs > 0 ? (pos.closeTs - now) / 60_000 : 999;
     if      (simMinsLeft < 2)                        toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
     else if (gain >= state.tpCents)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
-    else if (gain <= -state.slCents)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
+    else if (
+      gain <= -state.slCents ||
+      (pos.side === "YES" ? currentMid <= state.slCents : currentMid >= (100 - state.slCents))
+    ) {
+      const absStop = pos.side === "YES" ? currentMid <= state.slCents : currentMid >= (100 - state.slCents);
+      toClose.push({
+        pos,
+        exitPrice: realisticExitPrice,
+        reason: absStop
+          ? `SL ABS ${currentMid}¢${pos.side === "YES" ? `<=${state.slCents}` : `>=${100 - state.slCents}`}`
+          : `SL ${gain}¢`,
+      });
+    }
     else if (now - pos.lastMovedAt >= state.staleMs) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
   }
 
@@ -1287,9 +1579,10 @@ async function runSellMonitor(): Promise<void> {
 
   // Purge any ghost positions with 0 contracts — these can never be sold and block slots
   for (const pos of [...openPositions]) {
-    if (pos.contractCount === 0) {
+    if (pos.contractCount <= 0) {
       const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
       if (idx >= 0) openPositions.splice(idx, 1);
+    noteClosedAssetPosition(pos.marketId);
       state.openTradeCount = openPositions.length;
       console.warn(`[GHOST PURGE] Removed 0-contract ghost position: ${pos.marketId} ${pos.side} tradeId:${pos.tradeId}`);
       dbLog("warn", `[MOMENTUM] GHOST PURGE: removed 0-contract position ${pos.marketId} (${pos.side}) — no loss recorded (order never filled)`);
@@ -1347,8 +1640,13 @@ async function runSellMonitor(): Promise<void> {
         const gain = pos.side === "YES"
           ? fallbackMid - pos.entryPriceCents
           : (100 - pos.entryPriceCents) - fallbackMid;
-        if (gain <= -state.slCents) {
-          console.warn(`[SELL-MONITOR] SL via fallback price: gain ${gain}¢ — force-closing ${pos.marketId}`);
+        const absStopHit = pos.side === "YES"
+          ? fallbackMid <= state.slCents
+          : fallbackMid >= (100 - state.slCents);
+        if (gain <= -state.slCents || absStopHit) {
+          console.warn(
+            `[SELL-MONITOR] SL via fallback price: gain ${gain}¢ absStop=${absStopHit} mid:${fallbackMid}¢ threshold:${pos.side === "YES" ? state.slCents : 100 - state.slCents}¢ — force-closing ${pos.marketId}`,
+          );
           await placeSellOrder(pos, fallbackBid, fallbackMid);
         }
       }
@@ -1412,6 +1710,17 @@ async function runSellMonitor(): Promise<void> {
       continue;
     }
 
+    const absStopHit = pos.side === "YES"
+      ? currentMid <= state.slCents
+      : currentMid >= (100 - state.slCents);
+    if (absStopHit) {
+      log(
+        `🛑 ABS-SL hit — YES price ${currentMid}¢ crossed ${pos.side === "YES" ? "<=" : ">="} ${pos.side === "YES" ? state.slCents : 100 - state.slCents}¢ on Trade ${pos.tradeId}`,
+      );
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      continue;
+    }
+
     // Stale-position exit
     if (now - pos.lastMovedAt >= state.staleMs) {
       log(`⏳ STALE EXIT — price flat for ${Math.round((now - pos.lastMovedAt) / 1000)}s on Trade ${pos.tradeId}`);
@@ -1439,13 +1748,6 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   try {
 
-  // Startup hold — wait for DB recovery / Kalshi sync to repopulate openPositions
-  if (Date.now() < startupHoldUntilMs) {
-    const secsLeft = Math.ceil((startupHoldUntilMs - Date.now()) / 1000);
-    console.log(`[SCAN] Startup hold active — ${secsLeft}s remaining (recovering open positions before trading)`);
-    return;
-  }
-
   // Live mode safety: never trade before restart recovery has completed.
   // If recovery failed/unfinished, we could forget existing open positions and re-enter.
   if (!state.simulatorMode && !recoveryReady) {
@@ -1467,13 +1769,6 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   state.status = activePositions.length > 0 ? "IN_TRADE" : "WAITING_FOR_SETUP";
 
-  // Global post-trade cooldown — blocks ALL new entries for 60s after any close
-  if (Date.now() < globalCooldownUntilMs) {
-    const secsLeft = Math.ceil((globalCooldownUntilMs - Date.now()) / 1000);
-    console.log(`[SCAN] Global cooldown active — ${secsLeft}s remaining (post-trade spam guard)`);
-    return;
-  }
-
   const markets = await fetchActiveMarkets();
   if (markets.length === 0) {
     log(`[SCAN] fetchActiveMarkets returned 0 markets — check ticker prefixes or API`);
@@ -1494,6 +1789,7 @@ export async function scanMomentumMarkets(): Promise<void> {
     decision: MomentumDecision;
     side: "YES" | "NO";
     score: number;
+    signalDetectedAtMs: number;
   };
   const candidates: Candidate[] = [];
   const plannedCoins = new Set(activePositions.map(p => coinLabel(p.marketId)));
@@ -1501,14 +1797,14 @@ export async function scanMomentumMarkets(): Promise<void> {
 
   for (const market of markets) {
     if (activePositions.some(p => p.marketId === market.ticker)) continue;
-    const cooldown = marketCooldowns.get(coinLabel(market.ticker));
-    if (cooldown && Date.now() < cooldown) {
-      console.log(`[SCAN] ${coinLabel(market.ticker)} — coin cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s left), skipping`);
+    const marketCoin = coinLabel(market.ticker);
+    const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
+    if (coinCooldownRemainingMs > 0) {
+      console.log(`[SCAN] ${marketCoin} — coin cooldown active (${Math.ceil(coinCooldownRemainingMs / 1000)}s left), skipping`);
       continue;
     }
 
     // ── Coin allow-list filter ────────────────────────────────────────────────
-    const marketCoin = coinLabel(market.ticker);
     if (!state.allowedCoins.includes(marketCoin)) {
       console.log(`[SCAN] ${marketCoin} — not in allowedCoins [${state.allowedCoins.join(",")}], skipping`);
       continue;
@@ -1531,15 +1827,24 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) {
+      console.log(
+        `[SCAN SKIP NO_PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — no bid/ask from orderbook, hints, or detail`,
+      );
       log(`[SCAN] ${coinLabel(market.ticker)} — no orderbook data, skipping`);
       continue;
     }
 
     const { bid, ask, spread, mid } = ob;
     if (ask <= 0 || bid <= 0) {
+      console.log(
+        `[SCAN SKIP NO_PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — non-tradable price snapshot source:${ob.source} ask:${ask} bid:${bid}`,
+      );
       console.log(`[SCAN] ${coinLabel(market.ticker)} — zero prices (ask:${ask} bid:${bid}), skipping`);
       continue;
     }
+    console.log(
+      `[SCAN INCLUDE PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — source:${ob.source} ask:${ask} bid:${bid} spread:${spread} mid:${mid}`,
+    );
     // Hard skip only if price is well outside configurable range (with ±5¢ buffer for momentum continuation)
     const pMin = state.priceMin;
     const pMax = state.priceMax;
@@ -1631,7 +1936,7 @@ export async function scanMomentumMarkets(): Promise<void> {
 
     log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)} | ${decision.reason}`);
     dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)}`);
-    candidates.push({ market, ob, decision, side, score });
+    candidates.push({ market, ob, decision, side, score, signalDetectedAtMs: Date.now() });
     plannedCoins.add(marketCoin);
   }
 
@@ -1642,8 +1947,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       .map(c => `${coinLabel(c.market.ticker)}(${c.score.toFixed(0)} ${c.side})`)
       .join(" > ");
     console.log(`[RANKING] ${candidates.length} signals → best: ${board}`);
-    state.lastDecision = `${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`;
-    state.lastDecisionAt = new Date().toISOString();
+    setLastDecision(`${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`);
   }
 
   // ── Phase 3: Execute top-ranked signals up to MAX_POSITIONS ──────────────
@@ -1652,22 +1956,81 @@ export async function scanMomentumMarkets(): Promise<void> {
   let reservedBetCents = 0;
 
   for (const candidate of candidates) {
-    if (activePositions.length >= MAX_POSITIONS) break;
+    // Always recompute from canonical state in case positions changed mid-scan.
+    const currentPositions = state.simulatorMode ? simPositions : openPositions;
+    if (currentPositions.length >= MAX_POSITIONS) break;
 
     // Safety guard — if bot was stopped between Phase 1 and Phase 3, abort
     if (!state.enabled) {
       console.log(`[EXECUTE ABORTED] Bot disabled before trade could fire — enabled:${state.enabled} stopReason:${state.stopReason}`);
+      setLastDecision(`ABORT — bot_disabled (${state.stopReason ?? "unknown"})`);
       return;
     }
 
     const { market, ob, side, decision } = candidate;
     const marketCoin = coinLabel(market.ticker);
-
-    // Defensive re-check in execute phase: candidate ranking is built earlier in the same
-    // scan pass, so ensure we still never open a second position for the same coin.
-    if (activePositions.some(p => coinLabel(p.marketId) === marketCoin)) {
-      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
+    const nowMs = Date.now();
+    const signalAgeMs = Math.max(0, nowMs - candidate.signalDetectedAtMs);
+    const signalAgeSec = (signalAgeMs / 1000).toFixed(2);
+    const staleSignal = signalAgeMs > SIGNAL_TO_EXEC_MAX_DELAY_MS;
+    if (staleSignal) {
+      const reason = `stale_signal_${Math.ceil(signalAgeMs / 1000)}s`;
+      console.log(
+        `[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (max:${Math.ceil(SIGNAL_TO_EXEC_MAX_DELAY_MS / 1000)}s)`,
+      );
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
       continue;
+    }
+    const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
+    if (coinCooldownRemainingMs > 0) {
+      const reason = `coin_cooldown_${Math.ceil(coinCooldownRemainingMs / 1000)}s`;
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+      continue;
+    }
+
+    // Exchange-first entry guard (live mode only):
+    // - hasPosition: true if local OR exchange state says this asset is already open
+    // - dedupCooldownActive: true if we just attempted/opened this asset recently
+    if (!state.simulatorMode) {
+      const exchangeSyncOk = await refreshLiveOpenPositionsFromExchange();
+      if (!exchangeSyncOk) {
+        console.log(`[ENTRY CHECK] asset=${marketCoin}, exchangeSync=stale_or_failed, lastError=${lastExchangeSyncError ?? "unknown"}`);
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — exchange_sync_unavailable`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — exchange_sync_unavailable`);
+        continue;
+      }
+      const gateStatus = await getSharedTradeGateStatus(marketCoin);
+      const hasPosition = hasOpenPosition(marketCoin) || gateStatus.openPosition;
+      const entryLocked = gateStatus.entryLocked;
+      const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
+      const closeDedupRemainingMs = getRemainingCooldownMs(assetEntryCooldownUntilMs, marketCoin);
+      const dedupCooldownActive =
+        (lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS) || closeDedupRemainingMs > 0;
+      const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
+      console.log(`[TRADE GATE] asset=${marketCoin}, openPosition=${hasPosition}, entryLocked=${entryLocked}`);
+      console.log(
+        `[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s, postExitCooldown=${Math.ceil(closeDedupRemainingMs / 1000)}s, signalAge=${signalAgeSec}s`,
+      );
+      if (hasPosition || entryLocked || dedupCooldownActive) {
+        const reason = hasPosition
+          ? "has_open_position"
+          : entryLocked
+            ? "entry_in_progress"
+            : closeDedupRemainingMs > 0
+              ? `post_exit_cooldown_${Math.ceil(closeDedupRemainingMs / 1000)}s`
+              : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+        continue;
+      }
+    } else {
+      // Simulator keeps existing local-memory duplicate guard.
+      if (currentPositions.some(p => coinLabel(p.marketId) === marketCoin)) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — coin already has active position, skipping duplicate`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — has_open_position`);
+        continue;
+      }
     }
 
     // ── Signal-strength variable sizing ──────────────────────────────────────
@@ -1686,13 +2049,17 @@ export async function scanMomentumMarkets(): Promise<void> {
     // Health gate: if Broken, skip real trades entirely — paper only
     if (health === "Broken" && !state.simulatorMode) {
       console.log(`[HEALTH GATE] Skipping live trade — bot health is Broken. Switch to sim or wait for recovery.`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — health_gate_broken`);
       continue;
     }
 
     if (state.simulatorMode) {
       // ── Simulator: paper position, no real money ──────────────────────────
-      console.log(`[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢`);
+      console.log(
+        `[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢ signalAge:${signalAgeSec}s`,
+      );
       enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
+      setLastDecision(`SIM EXECUTED ${marketCoin} ${side} @${ob.mid}¢`);
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
       // Balance guard — always runs, even if no floor is configured.
@@ -1738,38 +2105,74 @@ export async function scanMomentumMarkets(): Promise<void> {
           const blockedReason = `balance_guard_failed floor:${effectiveFloor}¢ reserved:${reservedBetCents}¢`;
           console.warn(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
           log(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
+          setLastDecision(`SKIP ${coinLabel(market.ticker)} ${side} — ${blockedReason}`);
           return;
         }
       }
 
       // Log full active config snapshot so Railway logs always show exactly what was in effect
       console.log(`[CONFIG SNAPSHOT] betCostCents:${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}) priceRange:${state.priceMin}-${state.priceMax}¢ floor:${state.balanceFloorCents}¢ sim:${state.simulatorMode}`);
-      console.log(`[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length}`);
+      console.log(
+        `[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length} signalAge:${signalAgeSec}s`,
+      );
       log(
         `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
         { market: market.ticker, price: ob.mid, spread: ob.spread },
       );
-      const executeResult = await executeMomentumTrade(
-        market.ticker,
-        market.title,
-        side,
-        ob.bid,
-        ob.ask,
-        market.closeTs,
-        effectiveBet,
-      );
-      console.log(
-        `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
-      );
-      log(
-        `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
-      );
-      // Reserve this bet so the next candidate's balance check sees the correct available balance,
-      // even if Kalshi's API hasn't updated yet.
-      if (executeResult.status === "trade_opened") {
-        reservedBetCents += effectiveBet;
+      const entryLock = await tryEnterTrade(marketCoin, {
+        assetOrTicker: marketCoin,
+        context: "momentum_scan_execute",
+      });
+      if (!entryLock.allowed) {
+        const reason = entryLock.reason ?? "trade_gate_blocked";
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (final pre-entry check)`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+        continue;
       }
-      console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
+      if (hasOpenPosition(marketCoin) || entryLock.openPosition) {
+        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
+        setLastDecision(`SKIP ${marketCoin} ${side} — has_open_position`);
+        releaseTradeEntryGate(marketCoin, "momentum_scan_execute_open_position");
+        continue;
+      }
+
+      let keepDistributedLockMs = 0;
+      let finalLockState: "confirmed" | "rolled_back" = "rolled_back";
+      try {
+        const executeResult = await executeMomentumTrade(
+          market.ticker,
+          market.title,
+          side,
+          ob.bid,
+          ob.ask,
+          market.closeTs,
+          effectiveBet,
+        );
+        console.log(
+          `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+        );
+        log(
+          `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
+        );
+        setLastDecision(`RESULT ${marketCoin} ${side} — ${executeResult.status} (${executeResult.reason})`);
+        if (executeResult.status === "trade_opened") {
+          setLastTradeNow(marketCoin);
+          keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
+          finalLockState = "confirmed";
+        }
+        // Reserve this bet so the next candidate's balance check sees the correct available balance,
+        // even if Kalshi's API hasn't updated yet.
+        if (executeResult.status === "trade_opened") {
+          reservedBetCents += effectiveBet;
+        }
+        console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
+      } finally {
+        releaseTradeEntryGate(
+          marketCoin,
+          "momentum_scan_execute_finally",
+          { keepDistributedLockMs: keepDistributedLockMs, finalState: finalLockState },
+        );
+      }
     }
   }
 
@@ -2127,11 +2530,8 @@ export function startMomentumBot(): MomentumBotState {
   state.pausedUntilMs = null;
   state.pauseReason = null;
 
-  // Block all new trades for 60s so DB recovery + Kalshi portfolio sync have time
-  // to repopulate openPositions before any new entries fire. Prevents the restart
-  // race condition where the bot re-enters coins it was already holding.
-  startupHoldUntilMs = Date.now() + 60_000;
-  console.log(`[STARTUP HOLD] No new trades for 60s — recovering open positions from DB and Kalshi`);
+  // No global startup cooldown: trading resumes immediately once recoveryReady
+  // is true and entry checks pass.
 
   if (state.simulatorMode) {
     simPositions.length = 0;
@@ -2151,8 +2551,8 @@ export function startMomentumBot(): MomentumBotState {
   // This fixes the gap where a buy order filled but the server restarted before the
   // sell monitor could close the position — without this the position sits orphaned on Kalshi.
   if (!state.simulatorMode) {
-    db.select().from(tradesTable).where(eq(tradesTable.status, "open"))
-      .then(openTrades => {
+    const completeRecovery = async () => {
+      const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
         let recovered = 0;
         for (const t of openTrades) {
           if (openPositions.some(p => p.tradeId === t.id)) continue; // already tracked
@@ -2165,6 +2565,7 @@ export function startMomentumBot(): MomentumBotState {
             entryPriceCents:    t.buyPriceCents,
             entrySlippageCents: 0,
             contractCount:      t.contractCount,
+            contractCountFp:    t.contractCountFp ?? undefined,
             enteredAt:          t.createdAt.getTime(),
             lastSeenPriceCents: entryYesEquiv,
             lastMovedAt:        Date.now(),
@@ -2179,28 +2580,43 @@ export function startMomentumBot(): MomentumBotState {
           log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
           dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
         }
+        const guardRestore = await restoreRestartEntryGuardsFromDb();
+        if (guardRestore.dedupRestored > 0 || guardRestore.cooldownRestored > 0) {
+          log(
+            `🔄 [RECOVERY] Restored anti-stack guards from DB — dedup:${guardRestore.dedupRestored} cooldown:${guardRestore.cooldownRestored}`,
+          );
+        }
+        const exchangeSyncOk = await refreshLiveOpenPositionsFromExchange(true);
+        if (!exchangeSyncOk) {
+          throw new Error(`initial exchange position sync failed: ${lastExchangeSyncError ?? "unknown"}`);
+        }
         recoveryReady = true;
         console.log(`[RECOVERY] Ready — DB recovery complete, live entries unlocked (restored:${recovered})`);
-      })
+    };
+
+    completeRecovery()
       .catch(err => {
         // Keep recoveryReady=false so live mode cannot re-enter blindly after restart.
         warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)} — live entries remain locked`);
+        if (recoveryRetryTimer) clearTimeout(recoveryRetryTimer);
+        recoveryRetryTimer = setTimeout(() => {
+          if (!state.enabled || state.simulatorMode || recoveryReady) return;
+          console.log("[RECOVERY] Retrying startup recovery after failure...");
+          completeRecovery().catch(e => warn(`[RECOVERY] Retry failed: ${String(e)}`));
+        }, 5_000);
       });
   } else {
     // Sim mode does not rely on DB position recovery.
     recoveryReady = true;
   }
 
-  // Kick off scan loop with a brief startup pause
+  // Kick off scan loop immediately; recovery latch controls live entry readiness.
   if (!scanTimer) {
-    setTimeout(() => {
-      if (!state.enabled) return;
-      if (!scanTimer) {
-        scanTimer = setInterval(() => {
-          scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
-        }, SCAN_INTERVAL_MS);
-      }
-    }, 5_000);
+    scanTimer = setInterval(() => {
+      scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
+    }, SCAN_INTERVAL_MS);
+    // Also run once right away to avoid missing near-term scalp windows.
+    scanMomentumMarkets().catch(err => warn(`Initial scan error: ${String(err)}`));
   }
 
   log(`▶️  Momentum Bot STARTED | bet=$${(state.betCostCents/100).toFixed(2)}/trade | range:${state.priceMin}-${state.priceMax}¢ | floor:$${(state.balanceFloorCents/100).toFixed(2)} | sim:${state.simulatorMode}`);
