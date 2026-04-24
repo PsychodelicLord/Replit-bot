@@ -1263,9 +1263,10 @@ export async function executeMomentumTrade(
     };
   }
 
-  // Insert trade row to DB (fire-and-forget)
+  // Insert trade row to DB before releasing atomic entry gate so other instances
+  // immediately observe this asset as open via DB-level checks.
   let tradeId = -(Date.now()); // provisional negative ID
-  db.insert(tradesTable).values({
+  const insertedTrade = await db.insert(tradesTable).values({
     marketId:       ticker,
     marketTitle:    title,
     side,
@@ -1276,14 +1277,12 @@ export async function executeMomentumTrade(
     status:         "open",
     minutesRemaining: null,
     kalshiBuyOrderId: result.orderId,
-  }).returning({ id: tradesTable.id }).then(rows => {
-    if (rows[0]) {
-      const realId = rows[0].id;
-      const pos = openPositions.find(p => p.tradeId === tradeId);
-      if (pos) pos.tradeId = realId;
-      tradeId = realId;
-    }
-  }).catch(err => warn(`DB insert failed: ${String(err)}`));
+  }).returning({ id: tradesTable.id }).catch(err => {
+    throw new Error(`DB insert failed: ${String(err)}`);
+  });
+  if (insertedTrade[0]) {
+    tradeId = insertedTrade[0].id;
+  }
 
   // lastSeenPriceCents must be in YES-space (sell monitor always compares against currentMid=YES).
   // For YES: fill price IS the YES price.

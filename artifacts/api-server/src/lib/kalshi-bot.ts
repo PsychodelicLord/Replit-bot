@@ -1987,6 +1987,26 @@ async function getGlobalOpenPositionCount(): Promise<{ ok: boolean; count: numbe
   }
 }
 
+async function hasOpenPositionForAssetInDb(asset: string): Promise<{ ok: boolean; hasOpen: boolean; error: string | null }> {
+  try {
+    const rows = await db
+      .select({ count: sql<number>`cast(count(*) as int)` })
+      .from(tradesTable)
+      .where(
+        and(
+          eq(tradesTable.status, "open"),
+          sql`UPPER(${tradesTable.marketId}) LIKE '%' || UPPER(${asset}) || '%'`,
+        ),
+      )
+      .limit(1);
+    return { ok: true, hasOpen: (rows[0]?.count ?? 0) > 0, error: null };
+  } catch (err) {
+    const message = String(err);
+    logger.warn({ err, asset }, "position gate: asset open-position db query failed");
+    return { ok: false, hasOpen: false, error: message };
+  }
+}
+
 async function getAssetPostExitCooldownRemainingMs(asset: string): Promise<{ ok: boolean; remainingMs: number; error: string | null }> {
   try {
     const rows = await db
@@ -2079,17 +2099,22 @@ export async function canEnterAssetTrade(
   }
   const lockAfterCleanup = await getTradeLockRow(asset);
   const globalCount = await getGlobalOpenPositionCount();
+  const assetOpen = await hasOpenPositionForAssetInDb(asset);
   const cooldown = await getAssetPostExitCooldownRemainingMs(asset);
   const status = readTradeGateStatus(asset, lockAfterCleanup.state, lockAfterCleanup.ownerId);
   const allowLockOwnerId = options?.allowLockOwnerId ?? null;
   const lockHeldByOther =
     status.lockOwnerId !== null && status.lockOwnerId !== allowLockOwnerId;
   const effectiveExchangeSyncOk = exchangeSyncOk || status.exchangeSyncOk;
-  const lastError = lockAfterCleanup.error ?? globalCount.error ?? cooldown.error ?? status.lastError;
+  const dbOpenPosition = assetOpen.hasOpen;
+  const effectiveHasPosition = status.openPosition || dbOpenPosition;
+  const lastError = lockAfterCleanup.error ?? globalCount.error ?? assetOpen.error ?? cooldown.error ?? status.lastError;
   logger.info(
     {
       asset: status.asset,
       openPosition: status.openPosition,
+      dbOpenPosition,
+      effectiveHasPosition,
       entryLocked: status.entryLocked,
       lockState: status.lockState,
       lockOwnerId: status.lockOwnerId,
@@ -2110,6 +2135,9 @@ export async function canEnterAssetTrade(
   if (!globalCount.ok) {
     return { ok: false, reason: "position_count_unavailable", status: { ...status, lastError } };
   }
+  if (!assetOpen.ok) {
+    return { ok: false, reason: "asset_open_position_unavailable", status: { ...status, lastError } };
+  }
   if (!cooldown.ok) {
     return { ok: false, reason: "post_exit_cooldown_unavailable", status: { ...status, lastError } };
   }
@@ -2123,7 +2151,7 @@ export async function canEnterAssetTrade(
   if (globalCount.count >= GLOBAL_MAX_OPEN_POSITIONS) {
     return { ok: false, reason: "max_positions_reached", status };
   }
-  if (status.openPosition) {
+  if (effectiveHasPosition) {
     return { ok: false, reason: "has_open_position", status };
   }
   if (lockHeldByOther) {
