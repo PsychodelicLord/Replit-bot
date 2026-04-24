@@ -1173,7 +1173,7 @@ async function placeSellOrder(
       pnlCents:          netPnl,
     });
 
-    // ── Async DB update — fire-and-forget, never blocks ──
+    // ── DB update: awaited for canonical cross-instance state consistency ──
     const sellFields = {
       status: "closed" as const,
       sellPriceCents: exitPriceForPnl,
@@ -1182,15 +1182,13 @@ async function placeSellOrder(
       closedAt: new Date(),
     };
 
-    const persistSell = (id: number) => {
-      db.update(tradesTable).set(sellFields)
-        .where(eq(tradesTable.id, id))
-        .catch(err => warn(`DB sell update failed for id=${id}: ${String(err)}`));
-    };
-
     if (pos.tradeId > 0) {
       // Real DB id already resolved — update immediately
-      persistSell(pos.tradeId);
+      try {
+        await db.update(tradesTable).set(sellFields).where(eq(tradesTable.id, pos.tradeId));
+      } catch (err) {
+        warn(`DB sell update failed for id=${pos.tradeId}: ${String(err)}`);
+      }
     } else if (pos.buyOrderId) {
       // DB insert may still be in-flight — wait 6s for it to resolve,
       // then find the row by buyOrderId since we can't use the provisional negative id
