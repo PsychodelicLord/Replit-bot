@@ -1382,11 +1382,11 @@ export function MomentumBot() {
                           placeholder="3"
                           className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-red-500/50"
                         />
-                        <p className="text-[9px] text-slate-600 mt-0.5">SL -¢</p>
+                        <p className="text-[9px] text-slate-600 mt-0.5">SL (loss¢ or price floor¢)</p>
                       </div>
                     </div>
                     <p className="text-[9px] text-slate-600 mt-0.5">
-                      Exit when price moves +TP or −SL cents from entry. Default: <strong className="text-slate-500">5 / 2</strong>
+                      Exit when price moves +TP from entry, or hits SL by either relative loss or absolute YES-price floor. Default: <strong className="text-slate-500">5 / 2</strong>
                     </p>
                   </div>
 

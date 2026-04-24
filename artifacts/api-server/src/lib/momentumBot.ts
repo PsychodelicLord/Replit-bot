@@ -185,7 +185,7 @@ export interface MomentumBotState {
 
   // Exit thresholds (cents) — configurable from UI
   tpCents: number;   // take-profit: gain in cents above entry
-  slCents: number;   // stop-loss: loss in cents below entry
+  slCents: number;   // stop-loss: triggers on relative loss OR absolute YES-price floor
   staleMs: number;   // exit if price flat for this long (ms)
   tpAbsoluteCents: number;          // 0 = use relative tpCents; >0 = exit when YES price hits this level
   sessionProfitTargetCents: number; // 0 = trade indefinitely; >0 = stop when session gain hits this
@@ -254,7 +254,7 @@ export interface MomentumBotConfig {
   priceMin?: number;             // min entry price in cents (default 38)
   priceMax?: number;             // max entry price in cents (default 62)
   tpCents?: number;              // take-profit threshold in cents (default 5)
-  slCents?: number;              // stop-loss threshold in cents (default 2)
+  slCents?: number;              // stop-loss threshold: relative loss + absolute YES floor (default 2)
   staleMs?: number;              // stale-exit timer in ms (default 65000)
   tpAbsoluteCents?: number;      // 0 = use relative; >0 = exit when YES price hits this
   sessionProfitTargetCents?: number; // 0 = unlimited; >0 = stop when session P&L hits this
@@ -1547,7 +1547,19 @@ async function monitorSimPositions(): Promise<void> {
     const simMinsLeft = pos.closeTs > 0 ? (pos.closeTs - now) / 60_000 : 999;
     if      (simMinsLeft < 2)                        toClose.push({ pos, exitPrice: realisticExitPrice, reason: `EXPIRY ${simMinsLeft.toFixed(1)}min` });
     else if (gain >= state.tpCents)                  toClose.push({ pos, exitPrice: realisticExitPrice, reason: `TP +${gain}¢` });
-    else if (gain <= -state.slCents)                 toClose.push({ pos, exitPrice: realisticExitPrice, reason: `SL ${gain}¢` });
+    else if (
+      gain <= -state.slCents ||
+      (pos.side === "YES" ? currentMid <= state.slCents : currentMid >= (100 - state.slCents))
+    ) {
+      const absStop = pos.side === "YES" ? currentMid <= state.slCents : currentMid >= (100 - state.slCents);
+      toClose.push({
+        pos,
+        exitPrice: realisticExitPrice,
+        reason: absStop
+          ? `SL ABS ${currentMid}¢${pos.side === "YES" ? `<=${state.slCents}` : `>=${100 - state.slCents}`}`
+          : `SL ${gain}¢`,
+      });
+    }
     else if (now - pos.lastMovedAt >= state.staleMs) toClose.push({ pos, exitPrice: realisticExitPrice, reason: `STALE ${Math.round((now - pos.lastMovedAt) / 1000)}s` });
   }
 
@@ -1623,8 +1635,13 @@ async function runSellMonitor(): Promise<void> {
         const gain = pos.side === "YES"
           ? fallbackMid - pos.entryPriceCents
           : (100 - pos.entryPriceCents) - fallbackMid;
-        if (gain <= -state.slCents) {
-          console.warn(`[SELL-MONITOR] SL via fallback price: gain ${gain}¢ — force-closing ${pos.marketId}`);
+        const absStopHit = pos.side === "YES"
+          ? fallbackMid <= state.slCents
+          : fallbackMid >= (100 - state.slCents);
+        if (gain <= -state.slCents || absStopHit) {
+          console.warn(
+            `[SELL-MONITOR] SL via fallback price: gain ${gain}¢ absStop=${absStopHit} mid:${fallbackMid}¢ threshold:${pos.side === "YES" ? state.slCents : 100 - state.slCents}¢ — force-closing ${pos.marketId}`,
+          );
           await placeSellOrder(pos, fallbackBid, fallbackMid);
         }
       }
@@ -1684,6 +1701,17 @@ async function runSellMonitor(): Promise<void> {
     // Stop-loss
     if (executableGain <= -state.slCents) {
       log(`🛑 SL hit — loss ${executableGain}¢ on Trade ${pos.tradeId}`, { gain: executableGain, tradeId: pos.tradeId });
+      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      continue;
+    }
+
+    const absStopHit = pos.side === "YES"
+      ? currentMid <= state.slCents
+      : currentMid >= (100 - state.slCents);
+    if (absStopHit) {
+      log(
+        `🛑 ABS-SL hit — YES price ${currentMid}¢ crossed ${pos.side === "YES" ? "<=" : ">="} ${pos.side === "YES" ? state.slCents : 100 - state.slCents}¢ on Trade ${pos.tradeId}`,
+      );
       await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
