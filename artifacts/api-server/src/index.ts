@@ -2,7 +2,6 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { retryOpenPositions, refreshBalance, startCoinFlipAuto, syncPortfolioFromKalshi, registerOpenPosition, loadBotConfigFromDb } from "./lib/kalshi-bot";
 import { startMomentumBot, loadMomentumConfig } from "./lib/momentumBot";
-import { loadOutcomeConfig } from "./lib/outcomeBot";
 import { runMigrations } from "./migrate";
 import { db, tradesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
