@@ -496,8 +496,7 @@ export async function refreshBalance(): Promise<void> {
     // Kalshi returns { balance: <cents as integer>, portfolio_value: <cents>, ... }
     const r = resp as { balance?: number; balance_cents?: number };
     const rawCents = r?.balance ?? r?.balance_cents ?? 0;
-    // If value looks like dollars (< 20 and non-zero), convert; otherwise treat as cents
-    state.balanceCents = rawCents > 0 && rawCents < 20 ? Math.round(rawCents * 100) : rawCents;
+    state.balanceCents = Math.round(rawCents);
     lastBalanceRefreshOkAt = Date.now();
     lastBalanceRefreshError = null;
     console.log(`[BALANCE PARSED] raw:${rawCents} cents:${state.balanceCents} ($${(state.balanceCents / 100).toFixed(2)})`);
