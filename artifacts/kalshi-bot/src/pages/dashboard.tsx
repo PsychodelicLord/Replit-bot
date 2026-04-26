@@ -1,5 +1,4 @@
 import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
-import { OutcomeBot } from "@/components/outcome-bot";
 import { TradeTable } from "@/components/trade-table";
 import { Wallet, TrendingUp, TrendingDown, Trophy, Skull, Zap } from "lucide-react";
 
