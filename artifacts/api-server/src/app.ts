@@ -7,25 +7,18 @@ import NotFound from "@/pages/not-found";
 import { Component, ReactNode } from "react";
 
 // ─── Error Boundary ──────────────────────────────────────────────────────────
-class ErrorBoundary extends Component
-  { children: ReactNode },
-  { error: string | null }
-> {
-  state = { error: null };
-  static getDerivedStateFromError(e: Error) {
+type EBState = { error: string | null };
+class ErrorBoundary extends Component<{ children: ReactNode }, EBState> {
+  state: EBState = { error: null };
+  static getDerivedStateFromError(e: Error): EBState {
     return { error: e.message };
   }
   render() {
     if (this.state.error) {
       return (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-4 p-8">
-          <p className="text-red-400 text-sm font-mono text-center">{this.state.error}</p>
-          <button
-            onClick={() => this.setState({ error: null })}
-            className="px-4 py-2 rounded-lg border border-white/10 text-xs text-slate-300 hover:bg-white/5"
-          >
-            Retry
-          </button>
+        <div style={{ padding: 32, color: "red" }}>
+          <p>{this.state.error}</p>
+          <button onClick={() => this.setState({ error: null })}>Retry</button>
         </div>
       );
     }
