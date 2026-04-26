@@ -1,12 +1,10 @@
 import { Router, type IRouter } from "express";
-import { startBot, stopBot, getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, manualTrade, clearStuckPositions } from "../lib/kalshi-bot";
+import { getBotState, getBotConfig, updateBotConfig, saveBotConfigToDb, clearStuckPositions } from "../lib/kalshi-bot";
 import { getMomentumBotState, startMomentumBot, stopMomentumBot, updateMomentumConfig, debugMomentumMarkets, resetSimStats, resetAllStats, getLivePerformanceReport, getPaperStats } from "../lib/momentumBot";
 import { db, botLogsTable, tradesTable } from "@workspace/db";
 import { desc, count, sql } from "drizzle-orm";
 import {
   GetBotStatusResponse,
-  StartBotResponse,
-  StopBotResponse,
   GetBotConfigResponse,
   UpdateBotConfigBody,
   UpdateBotConfigResponse,
@@ -21,10 +19,8 @@ import {
 
 const router: IRouter = Router();
 
-/** Returns true only when running on Railway (the live deployment).
- *  Prevents the local dev server from accidentally placing real trades. */
 function isProductionDeployment(): boolean {
-  return !!(process.env.RAILWAY_ENVIRONMENT || process.env.COINFLIP_AUTO_START === "true");
+  return !!(process.env.RAILWAY_ENVIRONMENT);
 }
 
 function serializeState(s: ReturnType<typeof getBotState>) {
@@ -59,20 +55,6 @@ router.patch("/bot/config", async (req, res): Promise<void> => {
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
   res.json(GetBotStatusResponse.parse(serializeState(getBotState())));
-});
-
-router.post("/bot/start", async (_req, res): Promise<void> => {
-  if (!isProductionDeployment()) {
-    res.status(403).json({ error: "Trading is disabled on the dev server — use the Railway deployment." });
-    return;
-  }
-  const s = await startBot();
-  res.json(StartBotResponse.parse(serializeState(s)));
-});
-
-router.post("/bot/stop", async (_req, res): Promise<void> => {
-  const s = await stopBot();
-  res.json(StopBotResponse.parse(serializeState(s)));
 });
 
 router.get("/logs", async (req, res): Promise<void> => {
@@ -150,8 +132,6 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
   }));
 });
 
-
-
 router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
   const result = await clearStuckPositions();
   res.json(result);
@@ -161,8 +141,8 @@ router.post("/bot/clear-positions", async (_req, res): Promise<void> => {
 router.get("/bot/momentum/status", (_req, res): void => {
   const state = getMomentumBotState();
   db.select({
-    allTimeWins:    sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} > 0) as int)`,
-    allTimeLosses:  sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} < 0) as int)`,
+    allTimeWins:     sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} > 0) as int)`,
+    allTimeLosses:   sql<number>`cast(count(*) filter (where ${tradesTable.pnlCents} < 0) as int)`,
     allTimePnlCents: sql<number>`cast(coalesce(sum(${tradesTable.pnlCents}), 0) as int)`,
   }).from(tradesTable).where(sql`${tradesTable.status} = 'closed'`)
     .then(([row]) => {
@@ -196,7 +176,6 @@ router.get("/bot/momentum/paper-stats", async (_req, res): Promise<void> => {
     const stats = await getPaperStats();
     res.json(stats);
   } catch (err) {
-    // Return empty stats so the UI never crashes (e.g. table not yet migrated)
     console.error("[paper-stats] DB error, returning empty stats:", String(err));
     res.json({
       totalTrades: 0, wins: 0, losses: 0, winRatePct: 0,
@@ -217,7 +196,6 @@ router.post("/bot/momentum/reset-all", async (_req, res): Promise<void> => {
   res.json(MomentumBotStatus.parse(state));
 });
 
-// Live execution quality report — purely observational, real trades only
 router.get("/bot/momentum/live-performance", (_req, res): void => {
   res.json(getLivePerformanceReport());
 });
@@ -229,27 +207,25 @@ router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
 
     const { enabled, balanceFloorCents, maxSessionLossCents, consecutiveLossLimit, betCostCents, simulatorMode, priceMin, priceMax, tpCents, slCents, staleMs, tpAbsoluteCents, sessionProfitTargetCents, allowedCoins } = parsed.data;
 
-    // Real trading requires Railway deployment. Simulator mode can run anywhere.
     if (enabled && !simulatorMode && !isProductionDeployment()) {
       res.status(403).json({ error: "Live trading is disabled on the dev server — use Railway or enable Simulator mode." });
       return;
     }
 
-    // Await config update so DB write is guaranteed before responding
     await updateMomentumConfig({
-      balanceFloorCents:    balanceFloorCents    ?? 0,
-      maxSessionLossCents:  maxSessionLossCents  ?? 0,
-      consecutiveLossLimit: consecutiveLossLimit ?? 0,
-      betCostCents:         betCostCents         ?? 30,
-      simulatorMode:        simulatorMode        ?? false,
-      priceMin:             priceMin             ?? 20,
-      priceMax:             priceMax             ?? 80,
-      tpCents:              tpCents,
-      slCents:              slCents,
-      staleMs:              staleMs,
-      tpAbsoluteCents:          tpAbsoluteCents,
-      sessionProfitTargetCents: sessionProfitTargetCents,
-      allowedCoins:             allowedCoins,
+      balanceFloorCents:           balanceFloorCents    ?? 0,
+      maxSessionLossCents:         maxSessionLossCents  ?? 0,
+      consecutiveLossLimit:        consecutiveLossLimit ?? 0,
+      betCostCents:                betCostCents         ?? 30,
+      simulatorMode:               simulatorMode        ?? false,
+      priceMin:                    priceMin             ?? 20,
+      priceMax:                    priceMax             ?? 80,
+      tpCents,
+      slCents,
+      staleMs,
+      tpAbsoluteCents,
+      sessionProfitTargetCents,
+      allowedCoins,
     });
 
     const state = enabled ? startMomentumBot() : stopMomentumBot();
@@ -260,7 +236,6 @@ router.post("/bot/momentum/auto", async (req, res): Promise<void> => {
   }
 });
 
-// Emergency stop — requires ?confirm=yes to prevent accidental triggers from browser history/refresh
 router.get("/bot/momentum/emergency-stop", (req, res): void => {
   if (req.query.confirm !== "yes") {
     res.status(400).json({ error: "Add ?confirm=yes to the URL to confirm emergency stop", hint: "e.g. /api/bot/momentum/emergency-stop?confirm=yes" });
