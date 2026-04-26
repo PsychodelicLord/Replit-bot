@@ -674,6 +674,10 @@ async function placeSellOrder(
     if (idx >= 0) openPositions.splice(idx, 1);
     state.openTradeCount = openPositions.length;
     marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
+    if (!pos.resultRecorded) {
+      pos.resultRecorded = true;
+      recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
+    }
 
     // Update DB row
     if (pos.tradeId > 0) {
