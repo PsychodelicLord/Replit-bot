@@ -1,39 +1,46 @@
-import { Switch, Route, Router as WouterRouter } from "wouter";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Toaster } from "@/components/ui/toaster";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { Dashboard } from "@/pages/dashboard";
-import NotFound from "@/pages/not-found";
+import express, { type Express } from "express";
+import cors from "cors";
+import pinoHttp from "pino-http";
+import path from "path";
+import router from "./routes";
+import { logger } from "./lib/logger";
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: false,
-      refetchOnWindowFocus: false,
+const app: Express = express();
+
+app.use(
+  pinoHttp({
+    logger,
+    serializers: {
+      req(req) {
+        return {
+          id: req.id,
+          method: req.method,
+          url: req.url?.split("?")[0],
+        };
+      },
+      res(res) {
+        return {
+          statusCode: res.statusCode,
+        };
+      },
     },
-  },
+  }),
+);
+
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use("/api", router);
+
+const frontendDist = path.join(new URL(".", import.meta.url).pathname, "../../kalshi-bot/dist/public");
+app.use(express.static(frontendDist));
+
+app.use((_req, res) => {
+  res.sendFile(path.join(frontendDist, "index.html"), (err) => {
+    if (err) {
+      res.status(200).send("Bot is running.");
+    }
+  });
 });
 
-function Router() {
-  return (
-    <Switch>
-      <Route path="/" component={Dashboard} />
-      <Route component={NotFound} />
-    </Switch>
-  );
-}
-
-function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-          <Router />
-        </WouterRouter>
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>
-  );
-}
-
-export default App;
+export default app;
