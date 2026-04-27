@@ -9,17 +9,7 @@ function money(cents: number, sign = false) {
   return `${prefix}$${(Math.abs(cents) / 100).toFixed(2)}`;
 }
 
-function StatPill({
-  icon: Icon,
-  label,
-  value,
-  color,
-}: {
-  icon: React.ElementType;
-  label: string;
-  value: string;
-  color: string;
-}) {
+function StatPill({ icon: Icon, label, value, color }: { icon: React.ElementType; label: string; value: string; color: string; }) {
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
       <Icon className={`w-3.5 h-3.5 ${color}`} />
@@ -44,7 +34,6 @@ export function Dashboard() {
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
-      {/* Header */}
       <header className="sticky top-0 z-50 border-b border-white/5 bg-black/60 backdrop-blur-xl">
         <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3">
@@ -60,18 +49,8 @@ export function Dashboard() {
             {balance > 0 && (
               <StatPill icon={Wallet} label="Balance" value={`$${(balance / 100).toFixed(2)}`} color="text-white" />
             )}
-            <StatPill
-              icon={TrendingUp}
-              label="Today"
-              value={money(todayPnl, true)}
-              color={todayPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-            />
-            <StatPill
-              icon={todayPnl >= 0 ? TrendingUp : TrendingDown}
-              label="All-time"
-              value={money(totalPnl, true)}
-              color={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-            />
+            <StatPill icon={TrendingUp} label="Today" value={money(todayPnl, true)} color={todayPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
+            <StatPill icon={todayPnl >= 0 ? TrendingUp : TrendingDown} label="All-time" value={money(totalPnl, true)} color={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
             <button
               onClick={async () => {
                 if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
@@ -85,7 +64,6 @@ export function Dashboard() {
         </div>
       </header>
 
-      {/* Stats Row */}
       <div className="max-w-4xl w-full mx-auto px-4 pt-4">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 flex flex-col gap-0.5">
@@ -97,7 +75,6 @@ export function Dashboard() {
             </div>
             <span className="text-[10px] text-slate-600">settled trades</span>
           </div>
-
           <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 flex flex-col gap-0.5">
             <span className="text-[10px] text-slate-500 uppercase tracking-widest">Win Rate</span>
             <div className="flex items-baseline gap-1 mt-1">
@@ -107,7 +84,6 @@ export function Dashboard() {
             </div>
             <span className="text-[10px] text-slate-600">of closed trades</span>
           </div>
-
           <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 flex flex-col gap-0.5">
             <div className="flex items-center gap-1">
               <Trophy className="w-3 h-3 text-emerald-500" />
@@ -116,7 +92,6 @@ export function Dashboard() {
             <span className="text-lg font-bold text-emerald-400 mt-1">+${(totalEarned / 100).toFixed(2)}</span>
             <span className="text-[10px] text-slate-600">total from wins</span>
           </div>
-
           <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 flex flex-col gap-0.5">
             <div className="flex items-center gap-1">
               <Skull className="w-3 h-3 text-red-500" />
@@ -130,7 +105,7 @@ export function Dashboard() {
 
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6 pb-12">
         <MomentumBot />
-  <t    <TradeTable />
+        <TradeTable />
       </main>
     </div>
   );
