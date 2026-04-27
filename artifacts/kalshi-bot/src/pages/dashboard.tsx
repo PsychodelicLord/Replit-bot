@@ -1,5 +1,6 @@
 import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
 import { TradeTable } from "@/components/trade-table";
+import { MomentumBot } from "@/components/momentum-bot";
 import { Wallet, TrendingUp, TrendingDown, Trophy, Skull, Zap } from "lucide-react";
 
 const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
