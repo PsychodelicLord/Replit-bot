@@ -137,66 +137,6 @@ export type GetBotLogsParams = {
   limit?: number;
 };
 
-export interface CoinFlipResult {
-  success: boolean;
-  message: string;
-  ticker?: string;
-  title?: string;
-  side?: "YES" | "NO";
-  priceCents?: number;
-  tradeId?: number;
-}
-
-export interface CoinFlipAutoBody {
-  enabled: boolean;
-  intervalSecs?: number;
-}
-
-export interface CoinFlipAutoStatus {
-  enabled: boolean;
-  intervalSecs: number;
-  nextFlipAt: number | null;
-}
-
-export interface OutcomeBotOpenPosition {
-  posId:           string;
-  marketId:        string;
-  marketTitle:     string;
-  side:            "YES" | "NO";
-  entryPriceCents: number;
-  entryYesPrice:   number;
-  contractCount:   number;
-  peakPnlCents:    number;
-  trailingActive:  boolean;
-  lastYesPrice:    number;
-  msRemaining:     number;
-  enteredAt:       number;
-}
-
-export interface OutcomeBotMarketState {
-  state:       "TRENDING" | "BREAKOUT" | "EMERGING" | "NO_TRADE";
-  direction?:  "UP" | "DOWN";
-  moveCents?:  number;
-  reason:      string;
-  samples:     number;
-  latestPrice?: number;
-}
-
-export interface OutcomeBotStatus {
-  enabled:        boolean;
-  status:         "DISABLED" | "SCANNING" | "IN_TRADE";
-  lastDecision:   string | null;
-  lastDecisionAt: string | null;
-  openTradeCount: number;
-  simWins:        number;
-  simLosses:      number;
-  simPnlCents:    number;
-  noEdgeCount:    number;
-  betCostCents:   number;
-  openPositions?: OutcomeBotOpenPosition[];
-  marketStates?:  Record<string, OutcomeBotMarketState>;
-}
-
 export interface PaperTradeRecord {
   id:         number;
   coin:       string;
@@ -225,11 +165,6 @@ export interface PaperStats {
   maxDrawdownCents: number;
   timeOfDay:        TimeOfDayBucket[];
   recentTrades:     PaperTradeRecord[];
-}
-
-export interface OutcomeBotToggleBody {
-  enabled:       boolean;
-  betCostCents?: number;
 }
 
 export interface MomentumBotAutoBody {
