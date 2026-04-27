@@ -7,11 +7,13 @@ import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Clock, 
 const BASE_URL = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + "/";
 
 type DebugMarket = { ticker: string; minutesRemaining: number; askCents: number; bidCents: number };
-type DebugCounter = { lastPrice: number | null; upMoves: number; downMoves: number; flatMoves: number; windowSize: number };
+
+// FIX: Updated to match time-based momentum system (was old tick-counter types)
+type DebugCounter = { samples: number; currentPrice: number | null; oldestSampleAgeMs: number; newestSampleAgeMs: number };
 type DebugData = {
   filteredMarkets: DebugMarket[];
   momentumCounters: Record<string, DebugCounter>;
-  config: { DOMINANCE_REQUIRED: number; TICK_WINDOW_SIZE: number };
+  config: { MOMENTUM_WINDOW_MS: number; MIN_FAST_MOVE_CENTS: number; SCAN_INTERVAL_MS: number };
 };
 
 type LiveTradeRecord = {
@@ -37,7 +39,6 @@ function coinLabel(ticker: string) {
   return ticker.slice(0, 6);
 }
 
-// ── Lightning animation styles ────────────────────────────────────────────────
 const LIGHTNING_STYLES = `
 @keyframes bolt-strike {
   0%   { opacity: 0; transform: translateY(-120%) rotate(var(--rot)) scale(0.6); }
@@ -77,7 +78,6 @@ const LIGHTNING_STYLES = `
 }
 `;
 
-// Bolt positions: [left%, top%, rotation, size, delay]
 const BOLT_CONFIGS = [
   { left: "12%",  top: "5%",  rot: "-15deg", size: 28, delay: 0 },
   { left: "35%",  top: "2%",  rot: "8deg",   size: 22, delay: 80 },
@@ -130,7 +130,6 @@ function DecisionChip({ decision }: { decision: string | null | undefined }) {
   const isBuyYes = decision.includes("BUY_YES");
   const isBuyNo  = decision.includes("BUY_NO");
   const isSkip   = !isBuyYes && !isBuyNo;
-
   return (
     <div className={`flex items-start gap-1.5 p-2 rounded-lg text-[10px] leading-relaxed border ${
       isBuyYes ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
@@ -152,7 +151,6 @@ export function MomentumBot() {
     query: { refetchInterval: 2000, retry: 3 },
   });
 
-  // True only when we genuinely have no data (API unreachable / first load)
   const isConnected = dataUpdatedAt > 0;
   const isReconnecting = !isConnected || (isError && data === undefined);
 
@@ -170,11 +168,10 @@ export function MomentumBot() {
     },
   });
 
-  // ── Live scan debug data ─────────────────────────────────────────────────
   const [debugData, setDebugData] = useState<DebugData | null>(null);
   const fetchDebug = useCallback(async () => {
     try {
-      const res = await fetch("/api/bot/momentum/debug");
+      const res = await fetch(`${BASE_URL}api/bot/momentum/debug`);
       if (res.ok) setDebugData(await res.json());
     } catch { /* non-fatal */ }
   }, []);
@@ -185,7 +182,6 @@ export function MomentumBot() {
     return () => clearInterval(id);
   }, [fetchDebug]);
 
-  // ── Live execution performance report (real trades only) ──────────────────
   const [livePerf, setLivePerf] = useState<LivePerfReport | null>(null);
   const fetchLivePerf = useCallback(async () => {
     try {
@@ -200,7 +196,6 @@ export function MomentumBot() {
     return () => clearInterval(id);
   }, [fetchLivePerf]);
 
-  // ── Signal flash state ───────────────────────────────────────────────────
   const [signalFlash, setSignalFlash] = useState(false);
   const prevDecision = useRef<string | null>(null);
 
@@ -215,7 +210,6 @@ export function MomentumBot() {
     prevDecision.current = data.lastDecision;
   }, [data?.lastDecision]);
 
-  // ── Profit notifications & withdrawal reminder ───────────────────────────
   type Toast = { id: number; pnl: number };
   const [toasts, setToasts]                   = useState<Toast[]>([]);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>("default");
@@ -255,7 +249,6 @@ export function MomentumBot() {
     setNotifPermission(result);
   };
 
-  // Reset withdrawal reminder when P&L drops (new session / reset)
   const prevSessionPnlRef = useRef<number | null>(null);
   useEffect(() => {
     const pnl = data?.sessionPnlCents ?? 0;
@@ -265,7 +258,6 @@ export function MomentumBot() {
     prevSessionPnlRef.current = pnl;
   }, [data?.sessionPnlCents]);
 
-  // Settings state
   const [balanceFloor, setBalanceFloor]       = useState("0");
   const [maxSessionLoss, setMaxSessionLoss]   = useState("0");
   const [consecutiveLossLimit, setConsecutiveLossLimit] = useState("3");
@@ -283,13 +275,8 @@ export function MomentumBot() {
   const [showSettings, setShowSettings]       = useState(false);
   const [simulatorMode, setSimulatorMode]     = useState(false);
   const [simModeSynced, setSimModeSynced]     = useState(false);
+  const [settingsSynced, setSettingsSynced]   = useState(false);
 
-  // Track whether the main settings block has been synced from server
-  const [settingsSynced, setSettingsSynced] = useState(false);
-
-  // Sync ALL settings from server on first load so the form always shows what Railway actually has.
-  // Without this, betCostCents/priceMin/priceMax/etc show hardcoded defaults — and clicking Save
-  // would overwrite Railway's real values with those defaults.
   useEffect(() => {
     if (!settingsSynced && data !== undefined) {
       if (data.betCostCents !== undefined)       setBetCostCents((data.betCostCents / 100).toFixed(2));
@@ -302,8 +289,6 @@ export function MomentumBot() {
     }
   }, [data, settingsSynced]);
 
-  // Sync local simulatorMode from server on first load — prevents accidentally
-  // sending simulatorMode:false when toggling Auto Mode while server is in sim mode.
   useEffect(() => {
     if (!simModeSynced && data?.simulatorMode !== undefined) {
       setSimulatorMode(data.simulatorMode);
@@ -311,7 +296,6 @@ export function MomentumBot() {
     }
   }, [data?.simulatorMode, simModeSynced]);
 
-  // Sync allowedCoins from server on first load
   useEffect(() => {
     if (!coinsSynced && data?.allowedCoins !== undefined && data.allowedCoins.length > 0) {
       setAllowedCoins(data.allowedCoins);
@@ -319,7 +303,6 @@ export function MomentumBot() {
     }
   }, [data?.allowedCoins, coinsSynced]);
 
-  // Sync TP/SL/stale/new fields from server on first load
   const [exitThresholdsSynced, setExitThresholdsSynced] = useState(false);
   useEffect(() => {
     if (!exitThresholdsSynced && data?.tpCents !== undefined && data?.slCents !== undefined) {
@@ -335,9 +318,7 @@ export function MomentumBot() {
   const enabled  = data?.enabled ?? false;
   const status   = data?.status;
   const isPaused = status === "PAUSED";
-  // Use server value as source of truth; local state is only for pending changes
   const isSimMode = data?.simulatorMode ?? simulatorMode;
-  // What the toggle should show: server value when bot is running (locked), local when stopped
   const toggleDisplayMode = enabled ? isSimMode : simulatorMode;
 
   function buildConfig(overrides: Partial<{ enabled: boolean; simulatorMode: boolean }> = {}) {
@@ -364,11 +345,9 @@ export function MomentumBot() {
   function toggleAuto() {
     try {
       const cfg = buildConfig();
-      console.log("[toggleAuto] sending config:", JSON.stringify(cfg));
       setAuto.mutate({ data: cfg });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error("[toggleAuto] buildConfig threw:", msg);
       setToggleError(`Config error: ${msg}`);
     }
   }
@@ -382,7 +361,7 @@ export function MomentumBot() {
     setAuto.mutate({ data: buildConfig({ enabled, simulatorMode: newSim }) });
   }
 
-  const { data: paperStats, refetch: refetchPaper } = useQuery<PaperStats>({
+  const { data: paperStats } = useQuery<PaperStats>({
     queryKey: ["paper-stats"],
     queryFn: () => fetch(`${BASE_URL}api/bot/momentum/paper-stats`).then(r => r.json()),
     refetchInterval: 15_000,
@@ -394,13 +373,12 @@ export function MomentumBot() {
   const pausedMins = data?.pausedUntilMs
     ? Math.max(0, Math.ceil((data.pausedUntilMs - Date.now()) / 60_000))
     : null;
-
-  const totalPnl       = data?.totalPnlCents ?? 0;
-  const showWithdraw   = !isSimMode && totalPnl > 0 && !withdrawDismissed;
+  const totalPnl     = data?.totalPnlCents ?? 0;
+  const showWithdraw = !isSimMode && totalPnl > 0 && !withdrawDismissed;
 
   return (
     <>
-      {/* ── Profit toast notifications (fixed, bottom-right) ─────────────── */}
+      {/* Profit toasts */}
       <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none">
         {toasts.map(t => (
           <div
@@ -411,20 +389,15 @@ export function MomentumBot() {
             <DollarSign className="w-4 h-4 text-emerald-400 shrink-0" />
             <div>
               <p className="text-xs font-bold text-emerald-400">Profitable trade closed!</p>
-              {t.pnl > 0 && (
-                <p className="text-[11px] text-slate-300">+${(t.pnl / 100).toFixed(2)} profit</p>
-              )}
+              {t.pnl > 0 && <p className="text-[11px] text-slate-300">+${(t.pnl / 100).toFixed(2)} profit</p>}
             </div>
-            <button
-              onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))}
-              className="ml-1 text-slate-500 hover:text-slate-300"
-            >
+            <button onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))} className="ml-1 text-slate-500 hover:text-slate-300">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
         ))}
       </div>
-      {/* Inject keyframe animations once */}
+
       <style>{LIGHTNING_STYLES}</style>
 
       <div
@@ -437,113 +410,38 @@ export function MomentumBot() {
           borderColor: signalFlash ? undefined : "rgba(139,92,246,0.35)",
         }}
       >
-        {/* ── Lightning bolts overlay ─────────────────────────────────────── */}
+        {/* Lightning overlay */}
         {signalFlash && (
           <div className="absolute inset-0 pointer-events-none overflow-hidden" style={{ zIndex: 10 }}>
             {BOLT_CONFIGS.map((b, i) => (
-              <div
-                key={i}
-                style={{
-                  position: "absolute",
-                  left: b.left,
-                  top: b.top,
-                  ["--rot" as string]: b.rot,
-                  animation: `bolt-strike 2.6s ease-in-out ${b.delay}ms forwards`,
-                  zIndex: 20,
-                }}
-              >
-                <Zap
-                  style={{
-                    width: b.size,
-                    height: b.size,
-                    color: i % 2 === 0 ? "#60a5fa" : "#a78bfa",
-                    filter: `drop-shadow(0 0 6px ${i % 2 === 0 ? "#3b82f6" : "#8b5cf6"}) drop-shadow(0 0 12px ${i % 2 === 0 ? "#2563eb" : "#7c3aed"})`,
-                  }}
-                  fill="currentColor"
-                />
+              <div key={i} style={{ position: "absolute", left: b.left, top: b.top, ["--rot" as string]: b.rot, animation: `bolt-strike 2.6s ease-in-out ${b.delay}ms forwards`, zIndex: 20 }}>
+                <Zap style={{ width: b.size, height: b.size, color: i % 2 === 0 ? "#60a5fa" : "#a78bfa", filter: `drop-shadow(0 0 6px ${i % 2 === 0 ? "#3b82f6" : "#8b5cf6"}) drop-shadow(0 0 12px ${i % 2 === 0 ? "#2563eb" : "#7c3aed"})` }} fill="currentColor" />
               </div>
             ))}
-
-            {/* Top crackle bar */}
-            <div
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                height: "2px",
-                background: "linear-gradient(90deg, transparent, #818cf8, #60a5fa, #a78bfa, transparent)",
-                animation: "crackle 2.6s ease-out forwards",
-              }}
-            />
-            {/* Bottom crackle bar */}
-            <div
-              style={{
-                position: "absolute",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: "2px",
-                background: "linear-gradient(90deg, transparent, #a78bfa, #60a5fa, #818cf8, transparent)",
-                animation: "crackle 2.6s ease-out 150ms forwards",
-              }}
-            />
-
-            {/* Center glow burst */}
-            <div
-              style={{
-                position: "absolute",
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                width: 120,
-                height: 120,
-                borderRadius: "50%",
-                background: "radial-gradient(circle, rgba(139,92,246,0.3) 0%, rgba(59,130,246,0.15) 50%, transparent 70%)",
-                animation: "bolt-fade 2.6s ease-out forwards",
-                pointerEvents: "none",
-              }}
-            />
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "2px", background: "linear-gradient(90deg, transparent, #818cf8, #60a5fa, #a78bfa, transparent)", animation: "crackle 2.6s ease-out forwards" }} />
+            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "2px", background: "linear-gradient(90deg, transparent, #a78bfa, #60a5fa, #818cf8, transparent)", animation: "crackle 2.6s ease-out 150ms forwards" }} />
+            <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 120, height: 120, borderRadius: "50%", background: "radial-gradient(circle, rgba(139,92,246,0.3) 0%, rgba(59,130,246,0.15) 50%, transparent 70%)", animation: "bolt-fade 2.6s ease-out forwards", pointerEvents: "none" }} />
           </div>
         )}
 
-        {/* ── Card content (z-index above overlay) ──────────────────────── */}
         <div className="relative" style={{ zIndex: 1 }}>
 
           {/* Header */}
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <Zap
-                className="w-4 h-4"
-                style={{
-                  color: signalFlash ? "#a78bfa" : "#38bdf8",
-                  filter: signalFlash ? "drop-shadow(0 0 6px #8b5cf6)" : "none",
-                  transition: "color 0.3s, filter 0.3s",
-                }}
-              />
-              <h2
-                className="text-sm font-semibold tracking-widest uppercase"
-                style={{
-                  color: signalFlash ? "#c4b5fd" : "#38bdf8",
-                  textShadow: signalFlash ? "0 0 12px rgba(167,139,250,0.7)" : "none",
-                  transition: "color 0.3s, text-shadow 0.3s",
-                }}
-              >
+              <Zap className="w-4 h-4" style={{ color: signalFlash ? "#a78bfa" : "#38bdf8", filter: signalFlash ? "drop-shadow(0 0 6px #8b5cf6)" : "none", transition: "color 0.3s, filter 0.3s" }} />
+              <h2 className="text-sm font-semibold tracking-widest uppercase" style={{ color: signalFlash ? "#c4b5fd" : "#38bdf8", textShadow: signalFlash ? "0 0 12px rgba(167,139,250,0.7)" : "none", transition: "color 0.3s, text-shadow 0.3s" }}>
                 Momentum Bot
               </h2>
             </div>
             <div className="flex items-center gap-2">
-              {/* Notification bell */}
               {"Notification" in window && (
                 <button
                   onClick={notifPermission === "granted" ? undefined : requestNotifPermission}
-                  title={notifPermission === "granted" ? "Profit notifications on" : notifPermission === "denied" ? "Notifications blocked in browser" : "Enable profit notifications"}
                   className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold transition-colors flex items-center gap-1 ${
-                    notifPermission === "granted"
-                      ? "border-emerald-700/60 bg-emerald-950/40 text-emerald-400 cursor-default"
-                      : notifPermission === "denied"
-                      ? "border-slate-700/60 bg-slate-900/40 text-slate-500 cursor-not-allowed"
-                      : "border-violet-700/60 bg-violet-950/40 text-violet-400 hover:bg-violet-900/50 hover:text-violet-300 cursor-pointer"
+                    notifPermission === "granted" ? "border-emerald-700/60 bg-emerald-950/40 text-emerald-400 cursor-default"
+                    : notifPermission === "denied" ? "border-slate-700/60 bg-slate-900/40 text-slate-500 cursor-not-allowed"
+                    : "border-violet-700/60 bg-violet-950/40 text-violet-400 hover:bg-violet-900/50 hover:text-violet-300 cursor-pointer"
                   }`}
                 >
                   {notifPermission === "granted" ? <Bell className="w-3 h-3" /> : <BellOff className="w-3 h-3" />}
@@ -563,15 +461,13 @@ export function MomentumBot() {
             </div>
           </div>
 
-          {/* ── Profit withdrawal reminder ──────────────────────────────────── */}
+          {/* Withdrawal reminder */}
           {showWithdraw && (
             <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-amber-500/40 bg-amber-950/30 px-3.5 py-2.5">
               <DollarSign className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold text-amber-300">Nice profit! Consider withdrawing before betting again.</p>
-                <p className="text-[10px] text-amber-400/70 mt-0.5">
-                  You're up ${(totalPnl / 100).toFixed(2)} since last reset. Lock in gains on Kalshi before the next session.
-                </p>
+                <p className="text-[10px] text-amber-400/70 mt-0.5">You're up ${(totalPnl / 100).toFixed(2)} since last reset. Lock in gains on Kalshi before the next session.</p>
               </div>
               <button onClick={() => setWithdrawDismissed(true)} className="text-amber-500/60 hover:text-amber-400 shrink-0 mt-0.5">
                 <X className="w-3.5 h-3.5" />
@@ -580,17 +476,16 @@ export function MomentumBot() {
           )}
 
           <p className="text-xs text-slate-500 leading-relaxed">
-            Scans BTC, ETH & SOL 15-min markets every 3s. Enters only when 4 of 5 recent price ticks
-            move the same direction, spread ≤3¢, price 30–60¢, and &gt;7 min left.
-            TP: +{data?.tpCents ?? 3}¢ · SL: -{data?.slCents ?? 3}¢ · Stale exit: 45s.
+            Scans BTC, ETH, SOL, DOGE, XRP & BNB 15-min markets every 15s. Enters when price moves ≥{data?.tpCents ?? 2}¢ within 15s window, spread ≤4¢, price {data?.priceMin ?? 38}–{data?.priceMax ?? 62}¢, and &gt;5 min left.
+            TP: +{data?.tpCents ?? 5}¢ · SL: -{data?.slCents ?? 2}¢ · Stale exit: {data?.staleMs ? Math.round(data.staleMs / 1000) : 65}s · Max 1 position.
           </p>
 
-          {/* Stats row — session */}
+          {/* Stats row */}
           <div className="grid grid-cols-4 gap-2 mt-4">
             <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-2.5 text-center">
               <p className="text-[10px] text-violet-400/80 uppercase tracking-widest">Open</p>
               <p className="text-lg font-bold text-violet-100 mt-0.5">{data?.openTradeCount ?? 0}</p>
-              <p className="text-[9px] text-violet-400/50">max 2</p>
+              <p className="text-[9px] text-violet-400/50">max 1</p>
             </div>
             <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-2.5 text-center">
               <p className="text-[10px] text-violet-400/80 uppercase tracking-widest">W / L</p>
@@ -617,41 +512,31 @@ export function MomentumBot() {
             </div>
           </div>
 
-          {/* Starting Balance Snapshot */}
+          {/* Starting balance snapshot */}
           {data?.startingBalanceCents != null && (
             <div className="mt-3 rounded-lg border border-violet-500/25 bg-violet-500/[0.07] px-3 py-2 flex items-center justify-between gap-3">
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Started at</span>
-                <span className="text-xs font-bold text-slate-300">
-                  ${(data.startingBalanceCents / 100).toFixed(2)}
-                </span>
+                <span className="text-xs font-bold text-slate-300">${(data.startingBalanceCents / 100).toFixed(2)}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Net since reset</span>
                 {(() => {
                   const net = data.totalPnlCents ?? 0;
-                  return (
-                    <span className={`text-xs font-bold ${net > 0 ? "text-emerald-400" : net < 0 ? "text-red-400" : "text-slate-400"}`}>
-                      {net >= 0 ? "+" : ""}{(net / 100).toFixed(2)}¢
-                    </span>
-                  );
+                  return <span className={`text-xs font-bold ${net > 0 ? "text-emerald-400" : net < 0 ? "text-red-400" : "text-slate-400"}`}>{net >= 0 ? "+" : ""}{(net / 100).toFixed(2)}¢</span>;
                 })()}
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] uppercase tracking-widest text-slate-500 font-semibold">Est. now</span>
-                <span className="text-xs font-bold text-slate-300">
-                  ${((data.startingBalanceCents + (data.totalPnlCents ?? 0)) / 100).toFixed(2)}
-                </span>
+                <span className="text-xs font-bold text-slate-300">${((data.startingBalanceCents + (data.totalPnlCents ?? 0)) / 100).toFixed(2)}</span>
               </div>
             </div>
           )}
           {data?.startingBalanceCents == null && (
-            <p className="mt-3 text-[9px] text-slate-600 text-center">
-              Press <strong className="text-slate-500">Reset All Winnings</strong> to snapshot your starting balance here.
-            </p>
+            <p className="mt-3 text-[9px] text-slate-600 text-center">Press <strong className="text-slate-500">Reset All Winnings</strong> to snapshot your starting balance here.</p>
           )}
 
-          {/* Simulator mode banner + stats */}
+          {/* Simulator mode banner */}
           {isSimMode && (
             <div className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3 space-y-2">
               <div className="flex items-center gap-2">
@@ -689,12 +574,12 @@ export function MomentumBot() {
                   >
                     reset scoreboard
                   </button>
-                  {/* ── Bot Health Score ── */}
+
+                  {/* Bot Health Score */}
                   {(() => {
                     const hs = data?.healthScore;
                     const bufferCount = hs?.tradesInBuffer ?? 0;
                     const needed = Math.max(0, 20 - bufferCount);
-
                     if (!hs) {
                       return (
                         <div className="mt-3 rounded-lg border border-white/5 bg-black/20 p-3">
@@ -703,35 +588,23 @@ export function MomentumBot() {
                             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Bot Health</span>
                           </div>
                           <div className="w-full bg-white/5 rounded-full h-1.5 mb-1.5">
-                            <div
-                              className="bg-violet-500 h-1.5 rounded-full transition-all"
-                              style={{ width: `${Math.min(100, (bufferCount / 20) * 100)}%` }}
-                            />
+                            <div className="bg-violet-500 h-1.5 rounded-full transition-all" style={{ width: `${Math.min(100, (bufferCount / 20) * 100)}%` }} />
                           </div>
-                          <p className="text-[9px] text-slate-500 text-center">
-                            {needed > 0 ? `${needed} more trades to unlock health report` : "Calculating..."}
-                          </p>
+                          <p className="text-[9px] text-slate-500 text-center">{needed > 0 ? `${needed} more trades to unlock health report` : "Calculating..."}</p>
                         </div>
                       );
                     }
-
                     const color = hs.label === "Healthy"
                       ? { dot: "bg-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/5", text: "text-emerald-400" }
                       : hs.label === "Fragile"
                       ? { dot: "bg-yellow-400", border: "border-yellow-500/30", bg: "bg-yellow-500/5", text: "text-yellow-400" }
                       : { dot: "bg-red-500", border: "border-red-500/30", bg: "bg-red-500/5", text: "text-red-400" };
-
-                    const advice = hs.label === "Healthy"
-                      ? "Strategy is working — safe to scale up bet size"
-                      : hs.label === "Fragile"
-                      ? "Borderline — keep sim mode running, watch closely"
-                      : "Not ready for real money — stay in paper mode";
-
+                    const advice = hs.label === "Healthy" ? "Strategy is working — safe to scale up bet size" : hs.label === "Fragile" ? "Borderline — keep sim mode running, watch closely" : "Not ready for real money — stay in paper mode";
                     return (
                       <div className={`mt-3 rounded-lg border ${color.border} ${color.bg} p-3`}>
                         <div className="flex items-center justify-between mb-2">
                           <div className="flex items-center gap-2">
-                            <span className={`w-2.5 h-2.5 rounded-full ${color.dot} shadow-lg`} style={{ boxShadow: `0 0 6px currentColor` }} />
+                            <span className={`w-2.5 h-2.5 rounded-full ${color.dot}`} />
                             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Bot Health</span>
                           </div>
                           <div className="flex items-center gap-1.5">
@@ -739,28 +612,17 @@ export function MomentumBot() {
                             <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${color.text} border ${color.border}`}>{hs.label}</span>
                           </div>
                         </div>
-
                         <p className={`text-[9px] ${color.text} mb-2.5`}>{advice}</p>
-
                         <div className="grid grid-cols-5 gap-1 mb-2">
-                          {[
-                            { label: "EV", val: hs.evScore },
-                            { label: "Stab", val: hs.stabilityScore },
-                            { label: "W/L", val: hs.ratioScore },
-                            { label: "Stale", val: hs.staleScore },
-                            { label: "Exec", val: hs.execScore },
-                          ].map(({ label, val }) => (
+                          {[{ label: "EV", val: hs.evScore }, { label: "Stab", val: hs.stabilityScore }, { label: "W/L", val: hs.ratioScore }, { label: "Stale", val: hs.staleScore }, { label: "Exec", val: hs.execScore }].map(({ label, val }) => (
                             <div key={label} className="text-center">
                               <div className="flex justify-center gap-0.5 mb-0.5">
-                                {[0,1].map(i => (
-                                  <div key={i} className={`w-1.5 h-1.5 rounded-sm ${i < val ? color.dot : "bg-white/10"}`} />
-                                ))}
+                                {[0,1].map(i => <div key={i} className={`w-1.5 h-1.5 rounded-sm ${i < val ? color.dot : "bg-white/10"}`} />)}
                               </div>
                               <span className="text-[8px] text-slate-500">{label}</span>
                             </div>
                           ))}
                         </div>
-
                         <div className="flex justify-between text-[9px] text-slate-500">
                           <span>WR {(hs.winRate * 100).toFixed(0)}%</span>
                           <span>EV {hs.netEV >= 0 ? "+" : ""}{hs.netEV.toFixed(1)}¢</span>
@@ -771,78 +633,51 @@ export function MomentumBot() {
                     );
                   })()}
 
-                  {/* ── Persistent Paper Trade History ── */}
+                  {/* Paper trade history */}
                   {paperStats && (
                     <div className="mt-3 rounded-lg border border-violet-500/20 bg-black/20 p-3 space-y-3">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-bold uppercase tracking-widest text-violet-400">Lifetime Paper History</span>
                         <span className="text-[9px] text-slate-500">{paperStats.totalTrades} trades stored</span>
                       </div>
-
                       {paperStats.totalTrades === 0 ? (
                         <p className="text-[10px] text-slate-500 text-center py-2">No trades logged yet — run the bot in sim mode to start tracking</p>
                       ) : (
-                      <>
-                      {/* Core stats row */}
-                      <div className="grid grid-cols-4 gap-1.5">
-                        {[
-                          { label: "Win Rate", val: `${paperStats.winRatePct.toFixed(1)}%`, color: paperStats.winRatePct >= 50 ? "text-emerald-400" : "text-red-400" },
-                          { label: "EV/Trade", val: `${paperStats.evPerTradeCents >= 0 ? "+" : ""}${paperStats.evPerTradeCents}¢`, color: paperStats.evPerTradeCents >= 0 ? "text-emerald-400" : "text-red-400" },
-                          { label: "Total P&L", val: `${paperStats.totalPnlCents >= 0 ? "+" : ""}${(paperStats.totalPnlCents / 100).toFixed(2)}`, color: paperStats.totalPnlCents >= 0 ? "text-emerald-400" : "text-red-400" },
-                          { label: "Max DD", val: `-${(paperStats.maxDrawdownCents / 100).toFixed(2)}`, color: "text-red-400" },
-                        ].map(({ label, val, color }) => (
-                          <div key={label} className="rounded bg-white/[0.03] border border-white/5 p-1.5 text-center">
-                            <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-0.5">{label}</p>
-                            <p className={`text-[11px] font-bold font-mono ${color}`}>{val}</p>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Time-of-day buckets */}
-                      {paperStats.timeOfDay.some(b => b.wins + b.losses > 0) && (
-                        <div>
-                          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Performance by Time (UTC)</p>
-                          <div className="grid grid-cols-4 gap-1">
-                            {paperStats.timeOfDay.map(b => {
-                              const total = b.wins + b.losses;
-                              const wr = total > 0 ? Math.round((b.wins / total) * 100) : 0;
-                              const pnlColor = b.pnlCents >= 0 ? "text-emerald-400" : "text-red-400";
-                              return (
-                                <div key={b.label} className="rounded bg-white/[0.02] border border-white/5 p-1.5 text-center">
-                                  <p className="text-[8px] text-slate-500 mb-0.5">{b.label}</p>
-                                  <p className={`text-[10px] font-bold ${pnlColor}`}>{b.pnlCents >= 0 ? "+" : ""}{b.pnlCents}¢</p>
-                                  <p className="text-[8px] text-slate-600">{total > 0 ? `${wr}% (${total})` : "—"}</p>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Recent trades */}
-                      {paperStats.recentTrades.length > 0 && (
-                        <div>
-                          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Recent Trades ({paperStats.totalTrades} lifetime)</p>
-                          <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
-                            {paperStats.recentTrades.map(t => (
-                              <div key={t.id} className="flex items-center justify-between rounded bg-white/[0.02] border border-white/5 px-2 py-1">
-                                <div className="flex items-center gap-1.5">
-                                  <span className={`text-[8px] font-bold px-1 py-0.5 rounded ${t.side === "YES" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>{t.side}</span>
-                                  <span className="text-[9px] text-slate-300 font-medium">{t.coin}</span>
-                                  <span className="text-[8px] text-slate-500">{t.entryPrice}¢→{t.exitPrice}¢</span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[8px] text-slate-600">{t.exitReason}</span>
-                                  <span className={`text-[9px] font-bold font-mono ${t.pnlCents > 0 ? "text-emerald-400" : t.pnlCents < 0 ? "text-red-400" : "text-slate-400"}`}>
-                                    {t.pnlCents >= 0 ? "+" : ""}{t.pnlCents}¢
-                                  </span>
-                                </div>
+                        <>
+                          <div className="grid grid-cols-4 gap-1.5">
+                            {[
+                              { label: "Win Rate", val: `${paperStats.winRatePct.toFixed(1)}%`, color: paperStats.winRatePct >= 50 ? "text-emerald-400" : "text-red-400" },
+                              { label: "EV/Trade", val: `${paperStats.evPerTradeCents >= 0 ? "+" : ""}${paperStats.evPerTradeCents}¢`, color: paperStats.evPerTradeCents >= 0 ? "text-emerald-400" : "text-red-400" },
+                              { label: "Total P&L", val: `${paperStats.totalPnlCents >= 0 ? "+" : ""}${(paperStats.totalPnlCents / 100).toFixed(2)}`, color: paperStats.totalPnlCents >= 0 ? "text-emerald-400" : "text-red-400" },
+                              { label: "Max DD", val: `-${(paperStats.maxDrawdownCents / 100).toFixed(2)}`, color: "text-red-400" },
+                            ].map(({ label, val, color }) => (
+                              <div key={label} className="rounded bg-white/[0.03] border border-white/5 p-1.5 text-center">
+                                <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-0.5">{label}</p>
+                                <p className={`text-[11px] font-bold font-mono ${color}`}>{val}</p>
                               </div>
                             ))}
                           </div>
-                        </div>
-                      )}
-                      </>
+                          {paperStats.recentTrades.length > 0 && (
+                            <div>
+                              <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Recent Trades</p>
+                              <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+                                {paperStats.recentTrades.map(t => (
+                                  <div key={t.id} className="flex items-center justify-between rounded bg-white/[0.02] border border-white/5 px-2 py-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className={`text-[8px] font-bold px-1 py-0.5 rounded ${t.side === "YES" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>{t.side}</span>
+                                      <span className="text-[9px] text-slate-300 font-medium">{t.coin}</span>
+                                      <span className="text-[8px] text-slate-500">{t.entryPrice}¢→{t.exitPrice}¢</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[8px] text-slate-600">{t.exitReason}</span>
+                                      <span className={`text-[9px] font-bold font-mono ${t.pnlCents > 0 ? "text-emerald-400" : t.pnlCents < 0 ? "text-red-400" : "text-slate-400"}`}>{t.pnlCents >= 0 ? "+" : ""}{t.pnlCents}¢</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                   )}
@@ -851,7 +686,7 @@ export function MomentumBot() {
             </div>
           )}
 
-          {/* All-time stats from DB */}
+          {/* All-time stats */}
           {!isSimMode && ((data?.allTimeWins ?? 0) + (data?.allTimeLosses ?? 0)) > 0 && (
             <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] px-3 py-2 flex items-center justify-between mt-4">
               <p className="text-[10px] text-slate-500 uppercase tracking-widest">All-Time</p>
@@ -868,7 +703,6 @@ export function MomentumBot() {
             </div>
           )}
 
-          {/* Reset all stats — always visible */}
           <button
             onClick={async () => {
               if (!confirm("Reset ALL stats — real wins, losses, P&L, and trade history? This cannot be undone.")) return;
@@ -886,7 +720,6 @@ export function MomentumBot() {
                 const hs = data?.healthScore;
                 const bufferCount = hs?.tradesInBuffer ?? 0;
                 const needed = Math.max(0, 20 - bufferCount);
-
                 if (!hs) {
                   return (
                     <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-3">
@@ -895,30 +728,18 @@ export function MomentumBot() {
                         <span className="text-[10px] font-bold uppercase tracking-widest text-violet-300">Bot Health</span>
                       </div>
                       <div className="w-full bg-violet-500/10 rounded-full h-1.5 mb-1.5">
-                        <div
-                          className="bg-violet-500 h-1.5 rounded-full transition-all"
-                          style={{ width: `${Math.min(100, (bufferCount / 20) * 100)}%` }}
-                        />
+                        <div className="bg-violet-500 h-1.5 rounded-full transition-all" style={{ width: `${Math.min(100, (bufferCount / 20) * 100)}%` }} />
                       </div>
-                      <p className="text-[9px] text-violet-400/60 text-center">
-                        {needed > 0 ? `${needed} more trades to unlock health report` : "Calculating..."}
-                      </p>
+                      <p className="text-[9px] text-violet-400/60 text-center">{needed > 0 ? `${needed} more trades to unlock health report` : "Calculating..."}</p>
                     </div>
                   );
                 }
-
                 const color = hs.label === "Healthy"
                   ? { dot: "bg-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/5", text: "text-emerald-400" }
                   : hs.label === "Fragile"
                   ? { dot: "bg-yellow-400", border: "border-yellow-500/30", bg: "bg-yellow-500/5", text: "text-yellow-400" }
                   : { dot: "bg-red-500", border: "border-red-500/30", bg: "bg-red-500/5", text: "text-red-400" };
-
-                const advice = hs.label === "Healthy"
-                  ? "Strategy is working — safe to scale up bet size"
-                  : hs.label === "Fragile"
-                  ? "Borderline — watch closely before increasing stakes"
-                  : "Edge is weak — lower bet size or tighten filters";
-
+                const advice = hs.label === "Healthy" ? "Strategy is working — safe to scale up bet size" : hs.label === "Fragile" ? "Borderline — watch closely before increasing stakes" : "Edge is weak — lower bet size or tighten filters";
                 return (
                   <div className={`rounded-lg border ${color.border} ${color.bg} p-3`}>
                     <div className="flex items-center justify-between mb-2">
@@ -933,18 +754,10 @@ export function MomentumBot() {
                     </div>
                     <p className={`text-[9px] ${color.text} mb-2.5`}>{advice}</p>
                     <div className="grid grid-cols-5 gap-1 mb-2">
-                      {[
-                        { label: "EV", val: hs.evScore },
-                        { label: "Stab", val: hs.stabilityScore },
-                        { label: "W/L", val: hs.ratioScore },
-                        { label: "Stale", val: hs.staleScore },
-                        { label: "Exec", val: hs.execScore },
-                      ].map(({ label, val }) => (
+                      {[{ label: "EV", val: hs.evScore }, { label: "Stab", val: hs.stabilityScore }, { label: "W/L", val: hs.ratioScore }, { label: "Stale", val: hs.staleScore }, { label: "Exec", val: hs.execScore }].map(({ label, val }) => (
                         <div key={label} className="text-center">
                           <div className="flex justify-center gap-0.5 mb-0.5">
-                            {[0,1].map(i => (
-                              <div key={i} className={`w-1.5 h-1.5 rounded-sm ${i < val ? color.dot : "bg-white/10"}`} />
-                            ))}
+                            {[0,1].map(i => <div key={i} className={`w-1.5 h-1.5 rounded-sm ${i < val ? color.dot : "bg-white/10"}`} />)}
                           </div>
                           <span className="text-[8px] text-slate-500">{label}</span>
                         </div>
@@ -962,7 +775,7 @@ export function MomentumBot() {
             </div>
           )}
 
-          {/* Live Execution Performance Card — real money mode only */}
+          {/* Live Execution Performance */}
           {!isSimMode && (
             <div className="mt-4 rounded-lg border border-violet-500/25 bg-violet-500/[0.07] p-3">
               <div className="flex items-center justify-between mb-2.5">
@@ -970,28 +783,20 @@ export function MomentumBot() {
                   <Activity className="w-3.5 h-3.5 text-sky-400" />
                   <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Live Execution Quality</span>
                 </div>
-                {livePerf && livePerf.sampleSize > 0 && (
-                  <span className="text-[9px] text-slate-600">{livePerf.sampleSize} real trades</span>
-                )}
+                {livePerf && livePerf.sampleSize > 0 && <span className="text-[9px] text-slate-600">{livePerf.sampleSize} real trades</span>}
               </div>
-
               {(!livePerf || livePerf.sampleSize === 0) ? (
                 <p className="text-[9px] text-slate-600 text-center py-2">No real trades recorded yet this session</p>
               ) : (
                 <>
-                  {/* Rolling metrics */}
                   <div className="grid grid-cols-3 gap-1.5 mb-2.5">
                     {[
-                      { label: "Win Rate", val: `${(livePerf.winRate * 100).toFixed(0)}%`,
-                        color: livePerf.winRate >= 0.6 ? "text-emerald-400" : livePerf.winRate >= 0.45 ? "text-yellow-400" : "text-red-400" },
-                      { label: "EV / Trade", val: `${livePerf.evPerTrade >= 0 ? "+" : ""}${livePerf.evPerTrade.toFixed(1)}¢`,
-                        color: livePerf.evPerTrade > 0 ? "text-emerald-400" : livePerf.evPerTrade > -1 ? "text-yellow-400" : "text-red-400" },
-                      { label: "Total P&L", val: `${livePerf.totalPnlCents >= 0 ? "+" : ""}${livePerf.totalPnlCents}¢`,
-                        color: livePerf.totalPnlCents >= 0 ? "text-emerald-400" : "text-red-400" },
+                      { label: "Win Rate", val: `${(livePerf.winRate * 100).toFixed(0)}%`, color: livePerf.winRate >= 0.6 ? "text-emerald-400" : livePerf.winRate >= 0.45 ? "text-yellow-400" : "text-red-400" },
+                      { label: "EV / Trade", val: `${livePerf.evPerTrade >= 0 ? "+" : ""}${livePerf.evPerTrade.toFixed(1)}¢`, color: livePerf.evPerTrade > 0 ? "text-emerald-400" : livePerf.evPerTrade > -1 ? "text-yellow-400" : "text-red-400" },
+                      { label: "Total P&L", val: `${livePerf.totalPnlCents >= 0 ? "+" : ""}${livePerf.totalPnlCents}¢`, color: livePerf.totalPnlCents >= 0 ? "text-emerald-400" : "text-red-400" },
                       { label: "Avg Win", val: `+${livePerf.avgWinCents.toFixed(1)}¢`, color: "text-emerald-400" },
                       { label: "Avg Loss", val: `${livePerf.avgLossCents.toFixed(1)}¢`, color: "text-red-400" },
-                      { label: "Stale Rate", val: `${(livePerf.staleRate * 100).toFixed(0)}%`,
-                        color: livePerf.staleRate < 0.2 ? "text-slate-400" : livePerf.staleRate < 0.4 ? "text-yellow-400" : "text-red-400" },
+                      { label: "Stale Rate", val: `${(livePerf.staleRate * 100).toFixed(0)}%`, color: livePerf.staleRate < 0.2 ? "text-slate-400" : livePerf.staleRate < 0.4 ? "text-yellow-400" : "text-red-400" },
                     ].map(({ label, val, color }) => (
                       <div key={label} className="rounded bg-black/20 p-1.5 text-center">
                         <p className="text-[8px] text-slate-600 uppercase tracking-widest">{label}</p>
@@ -999,41 +804,18 @@ export function MomentumBot() {
                       </div>
                     ))}
                   </div>
-
-                  {/* Slippage row */}
-                  <div className="flex justify-between text-[9px] px-0.5 mb-2.5">
-                    <span className="text-slate-600">TP {(livePerf.tpRate * 100).toFixed(0)}% · SL {(livePerf.slRate * 100).toFixed(0)}%</span>
-                    <span className={livePerf.avgExitSlip >= 0 ? "text-emerald-400/70" : "text-red-400/70"}>
-                      Exit slip avg: {livePerf.avgExitSlip >= 0 ? "+" : ""}{livePerf.avgExitSlip.toFixed(1)}¢
-                    </span>
-                    <span className={livePerf.avgEntrySlip === 0 ? "text-slate-600" : "text-yellow-400/70"}>
-                      Entry slip: {livePerf.avgEntrySlip.toFixed(1)}¢
-                    </span>
-                  </div>
-
-                  {/* Recent trades mini-table */}
                   {livePerf.recentTrades.length > 0 && (
                     <div className="border-t border-white/5 pt-2">
                       <p className="text-[8px] text-slate-600 uppercase tracking-widest mb-1.5">Recent real trades</p>
                       <div className="space-y-1">
                         {livePerf.recentTrades.slice(0, 5).map((t, i) => {
                           const coin = t.market.replace(/15M.*$/, "").replace("KX", "");
-                          const slipColor = t.exitSlippage >= 0 ? "text-emerald-400/60" : "text-red-400/60";
                           return (
                             <div key={i} className="flex items-center justify-between text-[9px]">
                               <span className="text-slate-500 w-10">{coin} {t.side}</span>
                               <span className="text-slate-600">entry:{t.entryPriceCents}¢ → fill:{t.actualFillCents}¢</span>
-                              <span className={`w-12 text-right ${slipColor}`}>
-                                slip:{t.exitSlippage >= 0 ? "+" : ""}{t.exitSlippage}¢
-                              </span>
-                              <span className={`w-10 text-right font-bold ${t.pnlCents > 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                {t.pnlCents >= 0 ? "+" : ""}{t.pnlCents}¢
-                              </span>
-                              <span className={`w-8 text-right text-[8px] ${
-                                t.exitReason === "TP" ? "text-emerald-400/70"
-                                : t.exitReason === "SL" ? "text-red-400/70"
-                                : "text-slate-500"
-                              }`}>{t.exitReason}</span>
+                              <span className={`w-10 text-right font-bold ${t.pnlCents > 0 ? "text-emerald-400" : "text-red-400"}`}>{t.pnlCents >= 0 ? "+" : ""}{t.pnlCents}¢</span>
+                              <span className={`w-8 text-right text-[8px] ${t.exitReason === "TP" ? "text-emerald-400/70" : t.exitReason === "SL" ? "text-red-400/70" : "text-slate-500"}`}>{t.exitReason}</span>
                             </div>
                           );
                         })}
@@ -1052,16 +834,13 @@ export function MomentumBot() {
               <div>
                 <p className="font-semibold">{data?.pauseReason ?? "Risk pause active"}</p>
                 {pausedMins !== null && pausedMins > 0 && (
-                  <p className="text-[10px] text-yellow-400/70 mt-0.5 flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    Resumes in ~{pausedMins} min
-                  </p>
+                  <p className="text-[10px] text-yellow-400/70 mt-0.5 flex items-center gap-1"><Clock className="w-3 h-3" />Resumes in ~{pausedMins} min</p>
                 )}
               </div>
             </div>
           )}
 
-          {/* Stop reason — shown when bot is disabled and stopped for a known reason */}
+          {/* Stop reason */}
           {!enabled && data?.stopReason && !data.stopReason.startsWith("Server started") && data.stopReason !== "Manually stopped via dashboard" && (
             <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300 mt-4">
               <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-400" />
@@ -1080,108 +859,60 @@ export function MomentumBot() {
             </div>
           )}
 
-          {/* Live Scan Panel */}
+          {/* FIX: Live Markets panel — updated for time-based momentum (was old tick counters) */}
           {debugData && debugData.filteredMarkets.length > 0 && (
             <div className="mt-4 space-y-1.5">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] text-slate-600 uppercase tracking-widest">Live Markets</p>
-                <span className="text-[9px] text-slate-700">need {isSimMode ? 2 : (debugData.config?.DOMINANCE_REQUIRED ?? 3)} price moves same dir</span>
+                <span className="text-[9px] text-slate-700">
+                  need ≥{debugData.config?.MIN_FAST_MOVE_CENTS ?? 2}¢ move in {(debugData.config?.MOMENTUM_WINDOW_MS ?? 15000) / 1000}s window
+                </span>
               </div>
               {debugData.filteredMarkets.map(m => {
                 const mid = Math.round((m.askCents + m.bidCents) / 2);
                 const spread = m.askCents - m.bidCents;
                 const counter = debugData.momentumCounters[m.ticker];
-                const up   = counter?.upMoves   ?? 0;
-                const down = counter?.downMoves  ?? 0;
-                const flat = counter?.flatMoves  ?? 0;
-                const total = counter?.windowSize ?? 0;
-                const needed = isSimMode ? 2 : (debugData.config?.DOMINANCE_REQUIRED ?? 3);
-                const hasSignal = up >= needed || down >= needed;
-                const isFlat = total > 0 && up === 0 && down === 0;
+                const samples = counter?.samples ?? 0;
+                const ageMs = counter?.oldestSampleAgeMs ?? 0;
                 const coin = coinLabel(m.ticker);
-
+                const hasHistory = samples >= 2;
                 return (
-                  <div
-                    key={m.ticker}
-                    className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 border text-[10px] ${
-                      hasSignal
-                        ? "bg-emerald-500/10 border-emerald-500/25"
-                        : "bg-white/[0.02] border-white/5"
-                    }`}
-                  >
+                  <div key={m.ticker} className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 border bg-white/[0.02] border-white/5 text-[10px]">
                     <span className="font-bold text-slate-300 w-9 shrink-0">{coin}</span>
                     <span className="text-slate-500 w-8 shrink-0">{mid}¢</span>
                     <span className="text-slate-700 w-10 shrink-0">±{spread}¢</span>
-                    <div className="flex gap-0.5 items-center flex-1">
-                      {total === 0 ? (
-                        <span className="text-slate-700">waiting…</span>
-                      ) : (
-                        <>
-                          {Array.from({ length: up }).map((_, i) => (
-                            <span key={`u${i}`} className="w-2 h-2 rounded-sm bg-emerald-500/70" title="up" />
-                          ))}
-                          {Array.from({ length: down }).map((_, i) => (
-                            <span key={`d${i}`} className="w-2 h-2 rounded-sm bg-red-500/70" title="down" />
-                          ))}
-                          {Array.from({ length: flat }).map((_, i) => (
-                            <span key={`f${i}`} className="w-2 h-2 rounded-sm bg-white/10" title="flat" />
-                          ))}
-                        </>
-                      )}
+                    <div className="flex-1 text-slate-600">
+                      {!hasHistory ? "building history…" : `${samples} samples · ${Math.round(ageMs / 1000)}s window`}
                     </div>
-                    <span className={`shrink-0 font-bold ${
-                      hasSignal ? "text-emerald-400" : isFlat ? "text-slate-700" : "text-slate-600"
-                    }`}>
-                      {hasSignal ? (up >= needed ? "▲ FIRE" : "▼ FIRE") : isFlat ? "flat" : `${Math.max(up,down)}/${needed}`}
-                    </span>
                     <span className="text-slate-700 shrink-0">{m.minutesRemaining.toFixed(0)}m</span>
                   </div>
                 );
               })}
-              <p className="text-[9px] text-slate-700 pl-1">
-                <span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 mr-1 align-middle" />up move
-                <span className="inline-block w-2 h-2 rounded-sm bg-red-500/70 mx-1 ml-2 align-middle" />down move
-              </p>
             </div>
           )}
           {debugData && debugData.filteredMarkets.length === 0 && (
             <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2 text-[10px] text-slate-600">
-              No tradeable markets right now (spreads too wide or price out of range) — re-scanning shortly
+              No tradeable markets right now — re-scanning shortly
             </div>
           )}
 
-          {/* Simulator toggle — visible above Auto Mode */}
+          {/* Simulator toggle */}
           <div className="border-t border-white/5 pt-4 mt-4">
             <div className={`flex items-center justify-between rounded-xl px-3 py-2.5 transition-colors ${toggleDisplayMode ? "bg-violet-500/15 border border-violet-500/30" : "bg-white/[0.03] border border-white/5"}`}>
               <div>
                 <p className="text-xs font-semibold text-violet-300">🎮 Paper Trading</p>
                 <p className="text-[10px] mt-0.5" style={{ color: toggleDisplayMode ? "#a78bfa99" : "#475569" }}>
-                  {enabled
-                    ? toggleDisplayMode
-                      ? "✅ Active — real markets, fake money"
-                      : "⚠️ LIVE mode — real money at risk"
-                    : toggleDisplayMode
-                      ? "Real markets, fake money — no real orders placed"
-                      : "Enable to test strategy without spending money"}
+                  {enabled ? toggleDisplayMode ? "✅ Active — real markets, fake money" : "⚠️ LIVE mode — real money at risk" : toggleDisplayMode ? "Real markets, fake money — no real orders placed" : "Enable to test strategy without spending money"}
                 </p>
               </div>
               <button
                 onClick={toggleSimMode}
                 disabled={setAuto.isPending}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none shrink-0 ml-3 ${
-                  toggleDisplayMode ? "bg-violet-500" : "bg-white/10"
-                } ${setAuto.isPending ? "opacity-50 cursor-not-allowed" : ""}`}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none shrink-0 ml-3 ${toggleDisplayMode ? "bg-violet-500" : "bg-white/10"} ${setAuto.isPending ? "opacity-50 cursor-not-allowed" : ""}`}
               >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-                  toggleDisplayMode ? "translate-x-6" : "translate-x-1"
-                }`} />
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${toggleDisplayMode ? "translate-x-6" : "translate-x-1"}`} />
               </button>
             </div>
-            {enabled && (
-              <p className="text-[9px] text-slate-500 mt-1 pl-1">
-                {toggleDisplayMode ? "🟣 Paper mode — tap to switch to live immediately" : "🔴 Live mode — tap to switch to paper immediately"}
-              </p>
-            )}
           </div>
 
           {/* Auto toggle */}
@@ -1190,13 +921,7 @@ export function MomentumBot() {
               <div>
                 <p className="text-xs font-semibold text-slate-300">Auto Mode</p>
                 <p className="text-[10px] mt-0.5 text-slate-600">
-                  {isReconnecting
-                    ? "⟳ Reconnecting to server..."
-                    : setAuto.isPending
-                      ? "⟳ Saving..."
-                      : enabled
-                        ? isSimMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups"
-                        : "Tap to start momentum trading"}
+                  {isReconnecting ? "⟳ Reconnecting to server..." : setAuto.isPending ? "⟳ Saving..." : enabled ? isSimMode ? "🎮 Paper scanning — no real money" : "Scanning every 15s for clean setups" : "Tap to start momentum trading"}
                 </p>
               </div>
               {isReconnecting ? (
@@ -1204,22 +929,15 @@ export function MomentumBot() {
                   <span className="inline-block h-4 w-4 transform rounded-full bg-amber-400/70 shadow translate-x-3" />
                 </div>
               ) : (
-              <button
-                onClick={toggleAuto}
-                disabled={setAuto.isPending}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                  enabled
-                    ? simulatorMode ? "bg-violet-500/70" : "bg-sky-500/70"
-                    : "bg-white/10"
-                }`}
-              >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-                  enabled ? "translate-x-6" : "translate-x-1"
-                }`} />
-              </button>
+                <button
+                  onClick={toggleAuto}
+                  disabled={setAuto.isPending}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${enabled ? simulatorMode ? "bg-violet-500/70" : "bg-sky-500/70" : "bg-white/10"}`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-6" : "translate-x-1"}`} />
+                </button>
               )}
             </div>
-
             {toggleError && (
               <div className="mt-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
                 <p className="text-[10px] text-red-400 leading-relaxed">⚠ {toggleError}</p>
@@ -1227,10 +945,7 @@ export function MomentumBot() {
             )}
             {enabled && !setAuto.isPending && (
               <button
-                onClick={() => {
-                  setToggleError(null);
-                  setAuto.mutate({ data: { enabled: false } });
-                }}
+                onClick={() => { setToggleError(null); setAuto.mutate({ data: { enabled: false } }); }}
                 className="mt-2 w-full text-[10px] text-red-400/70 hover:text-red-400 border border-red-500/20 hover:border-red-500/40 rounded-lg py-1.5 transition-colors"
               >
                 Force Stop Bot
@@ -1239,262 +954,106 @@ export function MomentumBot() {
             {enabled && !isPaused && (
               <div className={`flex items-center gap-1.5 mt-2 text-[10px] ${simulatorMode ? "text-violet-400/70" : "text-sky-400/70"}`}>
                 <RefreshCw className="w-3 h-3 animate-spin" style={{ animationDuration: "3s" }} />
-                <span>{simulatorMode ? "🎮 Paper trading — tracking imaginary P&L" : "Scanning BTC · ETH · SOL — waiting for strong signal"}</span>
+                <span>{simulatorMode ? "🎮 Paper trading — tracking imaginary P&L" : "Scanning BTC · ETH · SOL · DOGE · XRP · BNB — waiting for momentum signal"}</span>
               </div>
             )}
           </div>
 
           {/* Risk Settings */}
           <div className="border-t border-white/5 pt-3 mt-0">
-            <button
-              onClick={() => setShowSettings(s => !s)}
-              className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
-            >
+            <button onClick={() => setShowSettings(s => !s)} className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors">
               <Shield className="w-3 h-3" />
               Risk Controls {showSettings ? "▲" : "▼"}
             </button>
 
             {showSettings && (
               <div className="mt-3 space-y-3">
-                <p className="text-[10px] text-slate-600">
-                  Settings apply when you toggle Auto Mode. Changes while running take effect on next start.
-                </p>
+                <p className="text-[10px] text-slate-600">Settings apply when you toggle Auto Mode.</p>
 
-                <div className="space-y-2">
-
-                  {/* Spend per trade */}
-                  <label className="block">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-slate-400">Spend per trade ($)</span>
-                    </div>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">$</span>
-                      <input
-                        type="number"
-                        min="0.01"
-                        step="0.01"
-                        value={betCostCents}
-                        onChange={e => setBetCostCents(e.target.value)}
-                        onBlur={e => {
-                          const v = parseFloat(e.target.value);
-                          if (!isNaN(v) && v > 0) setBetCostCents(v.toFixed(2));
-                        }}
-                        placeholder="1.00"
-                        className="w-full bg-white/[0.04] border border-white/10 rounded-lg pl-6 pr-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                      />
-                    </div>
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Enter dollars · $1.00 = 1 dollar per trade · $10.00 = ten dollars per trade
-                    </p>
-                  </label>
-
-                  {/* Entry price range */}
-                  <div>
-                    <span className="text-[10px] text-slate-400 block mb-1">Entry price range (¢)</span>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min="1"
-                        max="99"
-                        step="1"
-                        value={priceMin}
-                        onChange={e => setPriceMin(e.target.value)}
-                        placeholder="20"
-                        className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                      />
-                      <span className="text-[10px] text-slate-600 shrink-0">to</span>
-                      <input
-                        type="number"
-                        min="1"
-                        max="99"
-                        step="1"
-                        value={priceMax}
-                        onChange={e => setPriceMax(e.target.value)}
-                        placeholder="80"
-                        className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                      />
-                    </div>
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Only enter when market price is in this range. e.g. <strong className="text-slate-500">30 to 70</strong> = buy YES only when it's between 30¢ and 70¢
-                    </p>
+                <label className="block">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-slate-400">Spend per trade ($)</span>
                   </div>
-
-                  {/* Coin filter */}
-                  <div>
-                    <span className="text-[10px] text-slate-400 block mb-1.5">Active coins</span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {ALL_COINS.map(coin => {
-                        const active = allowedCoins.includes(coin);
-                        return (
-                          <button
-                            key={coin}
-                            type="button"
-                            onClick={() => {
-                              if (active) {
-                                const next = allowedCoins.filter(c => c !== coin);
-                                if (next.length > 0) setAllowedCoins(next);
-                              } else {
-                                setAllowedCoins(prev => [...prev, coin]);
-                              }
-                            }}
-                            className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all ${
-                              active
-                                ? "bg-sky-500/20 border-sky-500/50 text-sky-300"
-                                : "bg-white/[0.03] border-white/10 text-slate-500"
-                            }`}
-                          >
-                            {coin}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Only trade highlighted coins. At least one must stay active.
-                    </p>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">$</span>
+                    <input type="number" min="0.01" step="0.01" value={betCostCents} onChange={e => setBetCostCents(e.target.value)} onBlur={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setBetCostCents(v.toFixed(2)); }} placeholder="1.00" className="w-full bg-white/[0.04] border border-white/10 rounded-lg pl-6 pr-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
                   </div>
+                  <p className="text-[9px] text-slate-600 mt-0.5">Enter dollars · $1.00 = 1 dollar per trade</p>
+                </label>
 
-                  {/* Exit thresholds */}
-                  <div>
-                    <span className="text-[10px] text-slate-400 block mb-1">Take-profit / Stop-loss (¢)</span>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1">
-                        <input
-                          type="number"
-                          min="1"
-                          max="99"
-                          step="1"
-                          value={tpCents}
-                          onChange={e => setTpCents(e.target.value)}
-                          placeholder="3"
-                          className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
-                        />
-                        <p className="text-[9px] text-slate-600 mt-0.5">TP +¢</p>
-                      </div>
-                      <div className="flex-1">
-                        <input
-                          type="number"
-                          min="1"
-                          max="99"
-                          step="1"
-                          value={slCents}
-                          onChange={e => setSlCents(e.target.value)}
-                          placeholder="3"
-                          className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-red-500/50"
-                        />
-                        <p className="text-[9px] text-slate-600 mt-0.5">SL -¢</p>
-                      </div>
-                    </div>
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Exit when price moves +TP or −SL cents from entry. Default: <strong className="text-slate-500">5 / 2</strong>
-                    </p>
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-1">Entry price range (¢)</span>
+                  <div className="flex items-center gap-2">
+                    <input type="number" min="1" max="99" step="1" value={priceMin} onChange={e => setPriceMin(e.target.value)} placeholder="20" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                    <span className="text-[10px] text-slate-600 shrink-0">to</span>
+                    <input type="number" min="1" max="99" step="1" value={priceMax} onChange={e => setPriceMax(e.target.value)} placeholder="80" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
                   </div>
-
-                  {/* Stale exit timer */}
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Stale exit timer (seconds)</span>
-                    <input
-                      type="number"
-                      min="10"
-                      max="300"
-                      step="5"
-                      value={staleMs}
-                      onChange={e => setStaleMs(e.target.value)}
-                      placeholder="65"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500/50"
-                    />
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Exit if price hasn't moved in this many seconds. Default: <strong className="text-slate-500">65s</strong>. Use longer with wider TP.
-                    </p>
-                  </label>
-
-                  {/* Absolute price TP */}
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Exit price target (¢) — close when YES price hits this</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="99"
-                      step="1"
-                      value={tpAbsolute}
-                      onChange={e => setTpAbsolute(e.target.value)}
-                      placeholder="0"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
-                    />
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Set e.g. <strong className="text-slate-500">80</strong> to exit YES trades when price reaches 80¢ (NO trades exit at 20¢). Set <strong className="text-slate-500">0</strong> to use the relative TP¢ above instead.
-                    </p>
-                  </label>
-
-                  {/* Session profit target */}
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Session profit target (¢) — stop bot after making this much</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={sessionProfitTarget}
-                      onChange={e => setSessionProfitTarget(e.target.value)}
-                      placeholder="0"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
-                    />
-                    <p className="text-[9px] text-slate-600 mt-0.5">
-                      Bot stops automatically once session P&L reaches this value. Set <strong className="text-slate-500">0</strong> to trade indefinitely.
-                    </p>
-                  </label>
-
-                  {/* Risk guards */}
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Balance floor ($) — stop if balance drops below</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={balanceFloor}
-                      onChange={e => setBalanceFloor(e.target.value)}
-                      placeholder="0"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                    />
-                  </label>
-
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Max session loss ($) — stop if this is lost today</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.5"
-                      value={maxSessionLoss}
-                      onChange={e => setMaxSessionLoss(e.target.value)}
-                      placeholder="0"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                    />
-                  </label>
-
-                  <label className="block">
-                    <span className="text-[10px] text-slate-400 block mb-1">Max losses in a row — stop after N consecutive losses</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="10"
-                      step="1"
-                      value={consecutiveLossLimit}
-                      onChange={e => setConsecutiveLossLimit(e.target.value)}
-                      placeholder="3"
-                      className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50"
-                    />
-                  </label>
                 </div>
 
-                {/* Save settings button */}
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-1.5">Active coins</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {ALL_COINS.map(coin => {
+                      const active = allowedCoins.includes(coin);
+                      return (
+                        <button key={coin} type="button" onClick={() => { if (active) { const next = allowedCoins.filter(c => c !== coin); if (next.length > 0) setAllowedCoins(next); } else { setAllowedCoins(prev => [...prev, coin]); } }} className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all ${active ? "bg-sky-500/20 border-sky-500/50 text-sky-300" : "bg-white/[0.03] border-white/10 text-slate-500"}`}>
+                          {coin}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-1">Take-profit / Stop-loss (¢)</span>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <input type="number" min="1" max="99" step="1" value={tpCents} onChange={e => setTpCents(e.target.value)} placeholder="5" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
+                      <p className="text-[9px] text-slate-600 mt-0.5">TP +¢</p>
+                    </div>
+                    <div className="flex-1">
+                      <input type="number" min="1" max="99" step="1" value={slCents} onChange={e => setSlCents(e.target.value)} placeholder="2" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-red-500/50" />
+                      <p className="text-[9px] text-slate-600 mt-0.5">SL -¢</p>
+                    </div>
+                  </div>
+                </div>
+
+                <label className="block">
+                  <span className="text-[10px] text-slate-400 block mb-1">Stale exit timer (seconds)</span>
+                  <input type="number" min="10" max="300" step="5" value={staleMs} onChange={e => setStaleMs(e.target.value)} placeholder="65" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500/50" />
+                  <p className="text-[9px] text-slate-600 mt-0.5">Exit if price flat for this many seconds. Default: 65s</p>
+                </label>
+
+                <label className="block">
+                  <span className="text-[10px] text-slate-400 block mb-1">Exit price target (¢)</span>
+                  <input type="number" min="0" max="99" step="1" value={tpAbsolute} onChange={e => setTpAbsolute(e.target.value)} placeholder="0" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
+                  <p className="text-[9px] text-slate-600 mt-0.5">Exit when YES price hits this level. 0 = use relative TP above.</p>
+                </label>
+
+                <label className="block">
+                  <span className="text-[10px] text-slate-400 block mb-1">Session profit target (¢)</span>
+                  <input type="number" min="0" step="1" value={sessionProfitTarget} onChange={e => setSessionProfitTarget(e.target.value)} placeholder="0" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
+                  <p className="text-[9px] text-slate-600 mt-0.5">Stop bot after earning this much. 0 = unlimited.</p>
+                </label>
+
+                <label className="block">
+                  <span className="text-[10px] text-slate-400 block mb-1">Balance floor ($)</span>
+                  <input type="number" min="0" step="1" value={balanceFloor} onChange={e => setBalanceFloor(e.target.value)} placeholder="0" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                </label>
+
+                <label className="block">
+                  <span className="text-[10px] text-slate-400 block mb-1">Max session loss ($)</span>
+                  <input type="number" min="0" step="0.5" value={maxSessionLoss} onChange={e => setMaxSessionLoss(e.target.value)} placeholder="0" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                </label>
+
+                <label className="block">
+                  <span className="text-[10px] text-slate-400 block mb-1">Max losses in a row</span>
+                  <input type="number" min="0" max="10" step="1" value={consecutiveLossLimit} onChange={e => setConsecutiveLossLimit(e.target.value)} placeholder="3" className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                </label>
+
                 <button
                   type="button"
-                  onClick={() => {
-                    try {
-                      setAuto.mutate({ data: buildConfig({ enabled }) });
-                    } catch (err) {
-                      const msg = err instanceof Error ? err.message : String(err);
-                      setToggleError(`Config error: ${msg}`);
-                    }
-                  }}
+                  onClick={() => { try { setAuto.mutate({ data: buildConfig({ enabled }) }); } catch (err) { setToggleError(`Config error: ${err instanceof Error ? err.message : String(err)}`); } }}
                   disabled={setAuto.isPending}
                   className="w-full py-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-300 text-xs font-semibold hover:bg-sky-500/30 transition-all disabled:opacity-50"
                 >
@@ -1502,19 +1061,21 @@ export function MomentumBot() {
                 </button>
 
                 <div className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1 text-[9px] text-slate-600">
-                  <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /> <span className="text-slate-500">Current active settings:</span></p>
+                  <p className="flex items-center gap-1"><Shield className="w-2.5 h-2.5 text-sky-500/50" /><span className="text-slate-500">Current active settings:</span></p>
                   <p>· Spend: ${((data?.betCostCents ?? 100) / 100).toFixed(2)} per trade</p>
                   <p>· Entry range: {data?.priceMin ?? 20}¢ – {data?.priceMax ?? 80}¢</p>
+                  <p>· TP / SL: +{data?.tpCents ?? 5}¢ / -{data?.slCents ?? 2}¢</p>
                   <p>· Balance floor: {data?.balanceFloorCents ? `$${(data.balanceFloorCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Session loss: {data?.maxSessionLossCents ? `$${(data.maxSessionLossCents / 100).toFixed(2)}` : "OFF"}</p>
                   <p>· Losses in a row: {data?.consecutiveLossLimit || "OFF"}</p>
                   <p>· Active coins: {data?.allowedCoins?.join(", ") ?? "All"}</p>
+                  <p>· Max positions: 1</p>
                 </div>
               </div>
             )}
           </div>
 
-        </div>{/* end relative content wrapper */}
+        </div>
       </div>
     </>
   );
