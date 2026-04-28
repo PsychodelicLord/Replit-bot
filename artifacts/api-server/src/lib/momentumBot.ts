@@ -2000,6 +2000,10 @@ export async function scanMomentumMarkets(): Promise<void> {
   let reservedBetCents = 0;
 
   for (const candidate of candidates) {
+    if (Date.now() < globalCooldownUntilMs) {
+      console.log("[EXECUTE] Global cooldown active — skipping");
+      break;
+    }
     // Always recompute from canonical state in case positions changed mid-scan.
     const currentPositions = state.simulatorMode ? simPositions : openPositions;
     if (currentPositions.length >= MAX_POSITIONS) break;
