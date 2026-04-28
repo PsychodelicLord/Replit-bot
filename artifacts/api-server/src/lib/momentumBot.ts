@@ -1259,89 +1259,112 @@ export async function executeMomentumTrade(
   // Buy near bid (not ask) to avoid instant drawdown
   const limitCents = Math.min(askCents, bidCents + 1);
   const budget = betCents ?? state.betCostCents;
-
-  const result = await placeBuyOrder(ticker, side, limitCents, budget);
-  if (!result.ok) {
-    return {
-      status: "order_skipped",
-      reason: `${result.reason}: ${result.message}`,
-    };
-  }
-
-  // If the limit order didn't fill immediately (resting order), filled count comes back as 0.
-  // A 0-sized position can never be sold — it becomes a silent ghost that blocks the slot
-  // and never records a loss. Cancel it immediately and bail out.
-  if (result.contractCount <= 0) {
-    console.warn(`[ORDER UNFILLED] ${coinLabel(ticker)} ${side} — order resting on book (count:0), cancelling`);
-    dbLog("warn", `[MOMENTUM] ORDER UNFILLED: ${coinLabel(ticker)} ${side} @${result.fillPrice}¢ — resting order, cancelled`);
-    kalshiFetch("DELETE", `/portfolio/orders/${result.orderId}`).catch(() => {});
-    return {
-      status: "order_unfilled_cancelled",
-      reason: `order ${result.orderId} returned filled count=0 and was cancelled`,
-    };
-  }
-
-  // Insert trade row to DB before releasing atomic entry gate so other instances
-  // immediately observe this asset as open via DB-level checks.
-  let tradeId = -(Date.now()); // provisional negative ID
-  const insertedTrade = await db.insert(tradesTable).values({
-    marketId:       ticker,
-    marketTitle:    title,
-    side,
-    buyPriceCents:  result.fillPrice,
-    contractCount:  result.contractCount,
-    feeCents:       0,
-    pnlCents:       null,
-    status:         "open",
-    minutesRemaining: null,
-    kalshiBuyOrderId: result.orderId,
-  }).returning({ id: tradesTable.id }).catch(err => {
-    throw new Error(`DB insert failed: ${String(err)}`);
-  });
-  if (insertedTrade[0]) {
-    tradeId = insertedTrade[0].id;
-  }
-
-  // lastSeenPriceCents must be in YES-space (sell monitor always compares against currentMid=YES).
-  // For YES: fill price IS the YES price.
-  // For NO:  fill price is the NO price; convert to YES-equivalent (100 - noPrice).
-  const entryYesEquiv = side === "YES" ? result.fillPrice : 100 - result.fillPrice;
-
-  // Expected entry price in the same space as fillPrice:
-  // YES: limitCents (YES-space). NO: 100 - limitCents (NO-space).
+  const now = Date.now();
+  const provisionalTradeId = -now;
   const expectedEntryPrice = side === "NO" ? (100 - limitCents) : limitCents;
-
-  const pos: MomentumPosition = {
-    tradeId,
+  const provisionalPos: MomentumPosition = {
+    tradeId: provisionalTradeId,
     marketId: ticker,
     marketTitle: title,
     side,
-    entryPriceCents:   result.fillPrice,
-    entrySlippageCents: Math.abs(result.fillPrice - expectedEntryPrice), // actual vs expected (correct space)
-    contractCount: result.contractCount,
-    contractCountFp: result.countFp ?? undefined,
-    enteredAt: Date.now(),
-    lastSeenPriceCents: entryYesEquiv,  // YES-space so stale-tracker comparisons are valid
-    lastMovedAt: Date.now(),
-    buyOrderId: result.orderId,
+    entryPriceCents: expectedEntryPrice,
+    entrySlippageCents: 0,
+    contractCount: 1,
+    enteredAt: now,
+    lastSeenPriceCents: limitCents,
+    lastMovedAt: now,
+    buyOrderId: null,
     closeTs,
   };
 
-  openPositions.push(pos);
-  noteOpenedAssetPosition(ticker);
-  state.openTradeCount = openPositions.length;
-  state.status = "IN_TRADE";
-
-  log(
-    `🟢 BUY ${side} — ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId: ${tradeId}`,
-    { ticker, side, fillPrice: result.fillPrice, tradeId },
-  );
-
-  dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
-  return {
-    status: "trade_opened",
-    reason: `trade opened with ${result.countFp ?? result.contractCount} contract(s) at ${result.fillPrice}¢`,
+  const removeProvisionalPosition = () => {
+    const idx = openPositions.findIndex(p => p.tradeId === provisionalTradeId);
+    if (idx >= 0) {
+      openPositions.splice(idx, 1);
+      state.openTradeCount = openPositions.length;
+    }
   };
+
+  openPositions.push(provisionalPos);
+  state.openTradeCount = openPositions.length;
+
+  try {
+    const result = await placeBuyOrder(ticker, side, limitCents, budget);
+    if (!result.ok) {
+      removeProvisionalPosition();
+      return {
+        status: "order_skipped",
+        reason: `${result.reason}: ${result.message}`,
+      };
+    }
+
+    // If the limit order didn't fill immediately (resting order), filled count comes back as 0.
+    // A 0-sized position can never be sold — it becomes a silent ghost that blocks the slot
+    // and never records a loss. Cancel it immediately and bail out.
+    if (result.contractCount <= 0) {
+      removeProvisionalPosition();
+      console.warn(`[ORDER UNFILLED] ${coinLabel(ticker)} ${side} — order resting on book (count:0), cancelling`);
+      dbLog("warn", `[MOMENTUM] ORDER UNFILLED: ${coinLabel(ticker)} ${side} @${result.fillPrice}¢ — resting order, cancelled`);
+      kalshiFetch("DELETE", `/portfolio/orders/${result.orderId}`).catch(() => {});
+      return {
+        status: "order_unfilled_cancelled",
+        reason: `order ${result.orderId} returned filled count=0 and was cancelled`,
+      };
+    }
+
+    // Insert trade row to DB before releasing atomic entry gate so other instances
+    // immediately observe this asset as open via DB-level checks.
+    let tradeId = provisionalTradeId;
+    const insertedTrade = await db.insert(tradesTable).values({
+      marketId:       ticker,
+      marketTitle:    title,
+      side,
+      buyPriceCents:  result.fillPrice,
+      contractCount:  result.contractCount,
+      feeCents:       0,
+      pnlCents:       null,
+      status:         "open",
+      minutesRemaining: null,
+      kalshiBuyOrderId: result.orderId,
+    }).returning({ id: tradesTable.id }).catch(err => {
+      throw new Error(`DB insert failed: ${String(err)}`);
+    });
+    if (insertedTrade[0]) {
+      tradeId = insertedTrade[0].id;
+    }
+
+    // lastSeenPriceCents must be in YES-space (sell monitor always compares against currentMid=YES).
+    // For YES: fill price IS the YES price.
+    // For NO:  fill price is the NO price; convert to YES-equivalent (100 - noPrice).
+    const entryYesEquiv = side === "YES" ? result.fillPrice : 100 - result.fillPrice;
+
+    provisionalPos.tradeId = tradeId;
+    provisionalPos.entryPriceCents = result.fillPrice;
+    provisionalPos.entrySlippageCents = Math.abs(result.fillPrice - expectedEntryPrice); // actual vs expected (correct space)
+    provisionalPos.contractCount = result.contractCount;
+    provisionalPos.contractCountFp = result.countFp ?? undefined;
+    provisionalPos.enteredAt = Date.now();
+    provisionalPos.lastSeenPriceCents = entryYesEquiv;  // YES-space so stale-tracker comparisons are valid
+    provisionalPos.lastMovedAt = Date.now();
+    provisionalPos.buyOrderId = result.orderId;
+
+    noteOpenedAssetPosition(ticker);
+    state.status = "IN_TRADE";
+
+    log(
+      `🟢 BUY ${side} — ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId: ${tradeId}`,
+      { ticker, side, fillPrice: result.fillPrice, tradeId },
+    );
+
+    dbLog("info", `[MOMENTUM] 🟢 TRADE OPENED: BUY ${side} ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId:${tradeId}`);
+    return {
+      status: "trade_opened",
+      reason: `trade opened with ${result.countFp ?? result.contractCount} contract(s) at ${result.fillPrice}¢`,
+    };
+  } catch (err) {
+    removeProvisionalPosition();
+    throw err;
+  }
 }
 
 // ─── Simulator (Paper Trading) ───────────────────────────────────────────────
