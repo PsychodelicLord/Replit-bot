@@ -276,6 +276,7 @@ const simPositions: MomentumPosition[] = [];
 const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") → cooldown-expiry ms
 const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
+let globalCooldownUntilMs = 0;
 const marketFractionalTradingEnabledByTicker = new Map<string, boolean>();
 let lastExchangeSyncMs = 0;
 let lastExchangeSyncOkAt = 0;
@@ -1074,6 +1075,7 @@ async function placeSellOrder(
   midAtTrigger = currentBidCents,  // YES-space mid price when TP/SL fired — for P&L and execution tracking
   currentAskCents = currentBidCents + 2, // YES ask — used for correct NO sell pricing
 ): Promise<boolean> {
+  const cooldownMs = COOLDOWN_MS;
   // Cancel any previously resting sell order for this position before placing a new one
   if (pos.pendingSellOrderId) {
     await kalshiFetch("DELETE", `/portfolio/orders/${pos.pendingSellOrderId}`)
@@ -1146,7 +1148,8 @@ async function placeSellOrder(
     // Per-coin cooldown — keyed by coin name so it survives window rollovers.
     // Arm cooldown BEFORE freeing the slot to prevent immediate re-entry races.
     const asset = coinLabel(pos.marketId);
-    marketCooldowns.set(asset, Date.now() + COOLDOWN_MS);
+    globalCooldownUntilMs = Date.now() + cooldownMs;
+    marketCooldowns.set(asset, globalCooldownUntilMs);
     // Also arm short duplicate-entry cooldown from close time.
     assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
 
@@ -1235,12 +1238,12 @@ async function placeSellOrder(
         recordTradeResult(pos.entryPriceCents, estimatedExitPrice, etPnl);
       }
       dbLog("error", `[MOMENTUM] GIVE-UP LOSS recorded for ${coinLabel(pos.marketId)} tradeId:${pos.tradeId} estExit:${estimatedExitPrice}¢ pnl:${etPnl}¢`);
+      marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
       const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
       if (idx >= 0) {
         openPositions.splice(idx, 1);
         state.openTradeCount = openPositions.length;
       }
-      marketCooldowns.set(coinLabel(pos.marketId), Date.now() + COOLDOWN_MS);
     }
 
     return false;
