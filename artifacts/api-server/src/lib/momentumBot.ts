@@ -1143,16 +1143,17 @@ async function placeSellOrder(
     const fee    = Math.floor(FEE_RATE * Math.max(0, gross));
     const netPnl = gross - fee;
 
-    // ── Remove from in-memory FIRST — always, regardless of DB status ──
-    const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-    if (idx >= 0) openPositions.splice(idx, 1);
-    state.openTradeCount = openPositions.length;
-
-    // Per-coin cooldown — keyed by coin name so it survives window rollovers
+    // Per-coin cooldown — keyed by coin name so it survives window rollovers.
+    // Arm cooldown BEFORE freeing the slot to prevent immediate re-entry races.
     const asset = coinLabel(pos.marketId);
     marketCooldowns.set(asset, Date.now() + COOLDOWN_MS);
     // Also arm short duplicate-entry cooldown from close time.
     assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
+
+    // ── Remove from in-memory after cooldown is armed ──
+    const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+    if (idx >= 0) openPositions.splice(idx, 1);
+    state.openTradeCount = openPositions.length;
     // ── Record win/loss in-memory immediately — DB-independent ──
     if (!pos.resultRecorded) {
       pos.resultRecorded = true;
