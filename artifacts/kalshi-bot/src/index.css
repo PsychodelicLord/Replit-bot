@@ -208,15 +208,6 @@
   animation: float-aura 3s ease-in-out infinite;
 }
 
-/* ── Coin flip ─────────────────────────────────────────────────── */
-.coin {
-  width: 80px;
-  height: 80px;
-  position: relative;
-  transform-style: preserve-3d;
-  perspective: 400px;
-}
-
 /* Scanline overlay for terminal feel */
 body::before {
   content: '';

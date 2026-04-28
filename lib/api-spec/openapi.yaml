@@ -96,24 +96,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/BotStatus"
 
-  /bot/manual-trade:
-    post:
-      operationId: manualTrade
-      tags: [bot]
-      summary: Manual trade endpoint (consolidated safety response)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ManualTradeBody"
-      responses:
-        "200":
-          description: Manual trade response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ManualTradeResult"
 
   /bot/momentum/status:
     get:
@@ -381,43 +363,6 @@ components:
         - openPositionCount
         - balanceCents
         - stoppedReason
-
-    ManualTradeBody:
-      type: object
-      properties:
-        ticker:
-          type: string
-          minLength: 1
-        side:
-          type: string
-          enum: [YES, NO]
-        limitCents:
-          type: integer
-          minimum: 1
-          maximum: 99
-        quantity:
-          type: integer
-          minimum: 1
-          maximum: 500
-      required:
-        - ticker
-        - side
-        - limitCents
-
-    ManualTradeResult:
-      type: object
-      properties:
-        success:
-          type: boolean
-        tradeId:
-          type: integer
-        orderId:
-          type: string
-        message:
-          type: string
-      required:
-        - success
-        - message
 
     MomentumBotAutoBody:
       type: object

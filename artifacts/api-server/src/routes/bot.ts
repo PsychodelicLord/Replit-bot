@@ -15,7 +15,6 @@ import {
   ListTradesResponse,
   ListTradesQueryParams,
   GetTradeStatsResponse,
-  ManualTradeResponse,
   SetMomentumBotAutoBody,
   GetMomentumBotStatusResponse,
 } from "@workspace/api-zod";
@@ -160,13 +159,6 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
     todayPnlCents,
     winRate,
     avgPnlCents,
-  }));
-});
-
-router.post("/bot/manual-trade", async (req, res): Promise<void> => {
-  res.status(410).json(ManualTradeResponse.parse({
-    success: false,
-    message: "Manual trade path disabled. ACTIVE TRADE PATHS: 1 (signal -> gate -> execute -> update state).",
   }));
 });
 
