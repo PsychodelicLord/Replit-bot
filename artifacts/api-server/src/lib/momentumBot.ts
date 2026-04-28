@@ -1752,9 +1752,11 @@ async function runSellMonitor(): Promise<void> {
 
 // ─── Market Scanner ─────────────────────────────────────────────────────────
 let scanInProgress = false; // single-instance lock — prevents overlapping scans causing double bets
+let tradeInProgress = false;
 
 export async function scanMomentumMarkets(): Promise<void> {
   if (!state.enabled) return;
+  if (tradeInProgress) return;
   if (scanInProgress) {
     console.log("[SCAN] Previous scan still running — skipping this tick to prevent double bets");
     return;
@@ -2154,6 +2156,7 @@ export async function scanMomentumMarkets(): Promise<void> {
       let keepDistributedLockMs = 0;
       let finalLockState: "confirmed" | "rolled_back" = "rolled_back";
       try {
+        tradeInProgress = true;
         const executeResult = await executeMomentumTrade(
           market.ticker,
           market.title,
@@ -2174,6 +2177,7 @@ export async function scanMomentumMarkets(): Promise<void> {
           setLastTradeNow(marketCoin);
           keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
           finalLockState = "confirmed";
+          await refreshBalance();
         }
         // Reserve this bet so the next candidate's balance check sees the correct available balance,
         // even if Kalshi's API hasn't updated yet.
@@ -2182,6 +2186,7 @@ export async function scanMomentumMarkets(): Promise<void> {
         }
         console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
       } finally {
+        tradeInProgress = false;
         releaseTradeEntryGate(
           marketCoin,
           "momentum_scan_execute_finally",
