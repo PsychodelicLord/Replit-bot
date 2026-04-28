@@ -94,6 +94,7 @@ interface MomentumPosition {
   closeTs: number;          // contract expiry epoch ms — 0 if unknown
   sellRetries?: number;     // how many times a sell limit order was placed but rested unfilled
   pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
+  resultRecorded?: boolean;
 }
 
 function normalizeCountFp(raw?: string | null): string | null {
@@ -1153,7 +1154,10 @@ async function placeSellOrder(
     // Also arm short duplicate-entry cooldown from close time.
     assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
     // ── Record win/loss in-memory immediately — DB-independent ──
-    recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
+    if (!pos.resultRecorded) {
+      pos.resultRecorded = true;
+      recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
+    }
 
     // Per-asset duplicate entry cooldown — local to this coin only.
     lastTradeTimeByAssetMs.set(coinLabel(pos.marketId), Date.now());
@@ -1219,6 +1223,17 @@ async function placeSellOrder(
     // infinite loops on genuinely broken positions.
     if ((pos.sellRetries ?? 0) > 15) {
       warn(`placeSellOrder giving up after ${pos.sellRetries} failures — removing position`, { tradeId: pos.tradeId });
+      const estimatedExitPrice = pos.side === "YES"
+        ? Math.max(1, currentBidCents)
+        : Math.max(1, 100 - currentAskCents);
+      const estimatedGross = estimatedExitPrice - pos.entryPriceCents;
+      const estimatedFee = Math.floor(FEE_RATE * Math.max(0, estimatedGross));
+      const etPnl = estimatedGross - estimatedFee;
+      if (!pos.resultRecorded) {
+        pos.resultRecorded = true;
+        recordTradeResult(pos.entryPriceCents, estimatedExitPrice, etPnl);
+      }
+      dbLog("error", `[MOMENTUM] GIVE-UP LOSS recorded for ${coinLabel(pos.marketId)} tradeId:${pos.tradeId} estExit:${estimatedExitPrice}¢ pnl:${etPnl}¢`);
       const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
       if (idx >= 0) {
         openPositions.splice(idx, 1);
