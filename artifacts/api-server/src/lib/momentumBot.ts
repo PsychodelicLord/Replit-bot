@@ -277,6 +277,7 @@ const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") â†
 const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
 let globalCooldownUntilMs = 0;
+let tradeMutex = false;
 const marketFractionalTradingEnabledByTicker = new Map<string, boolean>();
 let lastExchangeSyncMs = 0;
 let lastExchangeSyncOkAt = 0;
@@ -1260,6 +1261,9 @@ export async function executeMomentumTrade(
   closeTs: number = 0,
   betCents?: number,
 ): Promise<{ status: "trade_opened" | "order_skipped" | "order_unfilled_cancelled"; reason: string }> {
+  if (tradeMutex) return { status: "order_skipped", reason: "trade mutex locked" };
+  tradeMutex = true;
+  try {
   // Buy near bid (not ask) to avoid instant drawdown
   const limitCents = Math.min(askCents, bidCents + 1);
   const budget = betCents ?? state.betCostCents;
@@ -1368,6 +1372,9 @@ export async function executeMomentumTrade(
   } catch (err) {
     removeProvisionalPosition();
     throw err;
+  }
+  } finally {
+    tradeMutex = false;
   }
 }
 
@@ -2571,6 +2578,7 @@ export function startMomentumBot(): MomentumBotState {
   state.autoMode = true;
   state.status = "WAITING_FOR_SETUP";
   recoveryReady = false;
+  tradeMutex = false;
 
   // Wire up real-trade W/L counter (hook avoids circular import)
   setTradeClosedHook(recordTradeResult);
