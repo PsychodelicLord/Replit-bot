@@ -1391,7 +1391,7 @@ function enterSimPosition(
   askCents: number,
   closeTs: number = 0,
   betCents?: number,
-): void {
+): { opened: boolean; reason: string } {
   const limitCents    = Math.min(askCents, bidCents + 1);
   const budget        = betCents ?? state.betCostCents;
   const entryPriceCents = side === "NO" ? (100 - limitCents) : limitCents;
@@ -1400,11 +1400,12 @@ function enterSimPosition(
   const cappedPricePerContract = Math.max(entryPriceCents, MIN_PRICE_FOR_CONTRACTS);
   const contractCount = Math.floor(budget / cappedPricePerContract);
   if (contractCount < 1) {
+    const reason = `budget_too_small: ${budget}¢ < 1 contract @${cappedPricePerContract}¢`;
     log(
-      `🎮 [SIM] SKIP ${side} ${coinLabel(ticker)} — budget:${budget}¢ < 1 contract @${cappedPricePerContract}¢`,
+      `🎮 [SIM] SKIP ${side} ${coinLabel(ticker)} — ${reason}`,
     );
-    dbLog("warn", `[SIM] SKIP ${side} ${coinLabel(ticker)} budget:${budget}¢ price:${cappedPricePerContract}¢`);
-    return;
+    dbLog("warn", `[SIM] SKIP ${side} ${coinLabel(ticker)} ${reason}`);
+    return { opened: false, reason };
   }
   const tradeId       = -(Date.now());
 
@@ -1429,6 +1430,7 @@ function enterSimPosition(
 
   log(`🎮 [SIM] ENTER ${side} ${coinLabel(ticker)} @${entryPriceCents}¢ | contracts:${contractCount} cost:${budget}¢`);
   dbLog("info", `[SIM] ENTER ${side} ${coinLabel(ticker)} @${limitCents}¢`);
+  return { opened: true, reason: `opened ${contractCount} contract(s)` };
 }
 
 /** Close a paper position at current price — no Kalshi API call */
@@ -2132,8 +2134,12 @@ export async function scanMomentumMarkets(): Promise<void> {
       console.log(
         `[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢ signalAge:${signalAgeSec}s`,
       );
-      enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
-      setLastDecision(`SIM EXECUTED ${marketCoin} ${side} @${ob.mid}¢`);
+      const simEntry = enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
+      if (simEntry.opened) {
+        setLastDecision(`SIM EXECUTED ${marketCoin} ${side} @${ob.mid}¢`);
+      } else {
+        setLastDecision(`SIM SKIP ${marketCoin} ${side} — ${simEntry.reason}`);
+      }
     } else {
       // ── Live mode: real Kalshi order ─────────────────────────────────────
       // Balance guard — always runs, even if no floor is configured.
