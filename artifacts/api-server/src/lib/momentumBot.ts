@@ -1433,6 +1433,9 @@ function enterSimPosition(
 
 /** Close a paper position at current price — no Kalshi API call */
 function closeSimPosition(pos: MomentumPosition, exitPriceCents: number, reason: string): void {
+  console.log(
+    `[SIM CLOSE] closeSimPosition reached market=${pos.marketId} side=${pos.side} entry=${pos.entryPriceCents} exit=${exitPriceCents} reason=${reason}`,
+  );
   const rawGain  = exitPriceCents - pos.entryPriceCents;
   const pnlCents = Math.round(rawGain * pos.contractCount);
 
