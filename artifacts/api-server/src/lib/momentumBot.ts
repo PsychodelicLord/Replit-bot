@@ -2009,6 +2009,15 @@ export async function scanMomentumMarkets(): Promise<void> {
   }
 
   // ── Phase 3: Execute top-ranked signals up to MAX_POSITIONS ──────────────
+  if (!state.simulatorMode) {
+    const posResp = await kalshiFetch("GET", "/portfolio/positions") as { positions?: Array<{ ticker_name?: string; position?: number }> };
+    const liveOpenCount = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0).length;
+    if (liveOpenCount > 0) {
+      console.log(`[SCAN] Kalshi shows ${liveOpenCount} open position(s) — skipping entry`);
+      return;
+    }
+  }
+
   // Track capital committed THIS scan cycle so the balance floor check stays accurate
   // even if Kalshi's API hasn't updated the balance yet after the first trade.
   let reservedBetCents = 0;
