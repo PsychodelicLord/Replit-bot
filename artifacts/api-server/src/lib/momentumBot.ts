@@ -277,6 +277,7 @@ const marketCooldowns = new Map<string, number>(); // coin label (e.g. "BTC") �
 const assetEntryCooldownUntilMs = new Map<string, number>(); // per-asset rapid re-entry block
 const lastTradeTimeByAssetMs = new Map<string, number>(); // last successful entry time per asset
 let globalCooldownUntilMs = 0;
+let lastTradeClosedAt = 0;
 let tradeMutex = false;
 const marketFractionalTradingEnabledByTicker = new Map<string, boolean>();
 let lastExchangeSyncMs = 0;
@@ -1155,6 +1156,7 @@ async function placeSellOrder(
     assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
 
     // ── Remove from in-memory after cooldown is armed ──
+    lastTradeClosedAt = Date.now();
     const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
     if (idx >= 0) openPositions.splice(idx, 1);
     state.openTradeCount = openPositions.length;
@@ -1793,6 +1795,10 @@ export async function scanMomentumMarkets(): Promise<void> {
   if (tradeInProgress) return;
   if (scanInProgress) {
     console.log("[SCAN] Previous scan still running — skipping this tick to prevent double bets");
+    return;
+  }
+  if (Date.now() - lastTradeClosedAt < 90_000) {
+    console.log("[SCAN] Post-trade cooldown active");
     return;
   }
   scanInProgress = true;
