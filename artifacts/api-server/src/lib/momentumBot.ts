@@ -1136,6 +1136,8 @@ async function placeSellOrder(
       return false; // position stays in openPositions; sell monitor will retry
     }
 
+    lastTradeClosedAt = Date.now();
+
     // P&L is computed from market mid at trigger time (YES-space), NOT the order response
     // price — Kalshi's order API returns the limit we submitted, not the actual fill price.
     //   YES gain: midAtTrigger (YES exit) - entryPriceCents (YES entry)
@@ -1156,7 +1158,6 @@ async function placeSellOrder(
     assetEntryCooldownUntilMs.set(asset, Date.now() + ENTRY_CHECK_COOLDOWN_MS);
 
     // ── Remove from in-memory after cooldown is armed ──
-    lastTradeClosedAt = Date.now();
     const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
     if (idx >= 0) openPositions.splice(idx, 1);
     state.openTradeCount = openPositions.length;
@@ -1797,13 +1798,13 @@ export async function scanMomentumMarkets(): Promise<void> {
     console.log("[SCAN] Previous scan still running — skipping this tick to prevent double bets");
     return;
   }
-  if (Date.now() - lastTradeClosedAt < 90_000) {
-    console.log("[SCAN] Post-trade cooldown active");
-    return;
-  }
   scanInProgress = true;
 
   try {
+  if (Date.now() - lastTradeClosedAt < 90_000) {
+    console.log("[SCAN] Post-trade cooldown active — skipping");
+    return;
+  }
 
   // Live mode safety: never trade before restart recovery has completed.
   // If recovery failed/unfinished, we could forget existing open positions and re-enter.
