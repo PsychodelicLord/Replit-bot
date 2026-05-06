@@ -1798,6 +1798,7 @@ let tradeInProgress = false;
 
 export async function scanMomentumMarkets(): Promise<void> {
   if (!state.enabled) return;
+  if (!state.simulatorMode) return;
   if (tradeInProgress) return;
   if (scanInProgress) {
     console.log("[SCAN] Previous scan still running — skipping this tick to prevent double bets");
@@ -2129,133 +2130,15 @@ export async function scanMomentumMarkets(): Promise<void> {
       continue;
     }
 
-    if (state.simulatorMode) {
-      // ── Simulator: paper position, no real money ──────────────────────────
-      console.log(
-        `[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢ signalAge:${signalAgeSec}s`,
-      );
-      const simEntry = enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
-      if (simEntry.opened) {
-        setLastDecision(`SIM EXECUTED ${marketCoin} ${side} @${ob.mid}¢`);
-      } else {
-        setLastDecision(`SIM SKIP ${marketCoin} ${side} — ${simEntry.reason}`);
-      }
+    // ── Simulator: paper position, no real money ──────────────────────────
+    console.log(
+      `[SIM EXECUTE] ${coinLabel(market.ticker)} ${side} @${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} bet:${effectiveBet}¢ signalAge:${signalAgeSec}s`,
+    );
+    const simEntry = enterSimPosition(market.ticker, market.title, side, ob.bid, ob.ask, market.closeTs, effectiveBet);
+    if (simEntry.opened) {
+      setLastDecision(`SIM EXECUTED ${marketCoin} ${side} @${ob.mid}¢`);
     } else {
-      // ── Live mode: real Kalshi order ─────────────────────────────────────
-      // Balance guard — always runs, even if no floor is configured.
-      // effectiveFloor = max(user floor, bet size). No hard-coded minimum —
-      // user controls their own risk tolerance via the balance floor setting.
-      {
-        const effectiveFloor = Math.max(
-          state.balanceFloorCents,
-          effectiveBet,
-        );
-        let balanceOk = false;
-        try {
-          await refreshBalance();
-          const rawBalance = getBotState().balanceCents;
-          // Subtract capital already committed this scan cycle — Kalshi's API may
-          // not reflect the deduction yet, so we track it locally to avoid
-          // the floor check passing on stale data when placing a second trade.
-          const balance = rawBalance - reservedBetCents;
-          // Hard bet-size cap: never risk more than 33% of available balance on a single trade.
-          // This prevents a stale large betCostCents in the DB from wiping the account in one shot.
-          const maxBetFromBalance = Math.max(1, Math.floor(balance * 0.33));
-          if (effectiveBet > maxBetFromBalance) {
-            console.warn(`[BET CAP] ${coinLabel(market.ticker)} — effectiveBet ${effectiveBet}¢ reduced to ${maxBetFromBalance}¢ (33% of ${balance}¢ available)`);
-            effectiveBet = maxBetFromBalance;
-          }
-          // Recalculate floor after possible cap reduction
-          const cappedFloor = Math.max(state.balanceFloorCents, effectiveBet);
-          console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:${reservedBetCents}¢ available:${balance}¢ floor:${cappedFloor}¢ bet:${effectiveBet}¢`);
-          if (balance > 0 && balance >= cappedFloor) {
-            balanceOk = true;
-          } else if (balance > 0 && balance < cappedFloor) {
-            stopMomentumBot(`Balance too low: ${balance}¢ < ${cappedFloor}¢ floor — stopping bot`);
-            return;
-          } else {
-            // balance came back as 0 — API problem, block trade as precaution
-            console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${cappedFloor}¢)`);
-          }
-        } catch (err) {
-          // fetch failed — block trade rather than risk breaching floor
-          console.error(`[BALANCE CHECK] Failed to fetch balance — skipping trade: ${String(err)}`);
-        }
-        if (!balanceOk) {
-          const blockedReason = `balance_guard_failed floor:${effectiveFloor}¢ reserved:${reservedBetCents}¢`;
-          console.warn(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
-          log(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
-          setLastDecision(`SKIP ${coinLabel(market.ticker)} ${side} — ${blockedReason}`);
-          return;
-        }
-      }
-
-      // Log full active config snapshot so Railway logs always show exactly what was in effect
-      console.log(`[CONFIG SNAPSHOT] betCostCents:${state.betCostCents}¢ ($${(state.betCostCents/100).toFixed(2)}) priceRange:${state.priceMin}-${state.priceMax}¢ floor:${state.balanceFloorCents}¢ sim:${state.simulatorMode}`);
-      console.log(
-        `[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length} signalAge:${signalAgeSec}s`,
-      );
-      log(
-        `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
-        { market: market.ticker, price: ob.mid, spread: ob.spread },
-      );
-      const entryLock = await tryEnterTrade(marketCoin, {
-        assetOrTicker: marketCoin,
-        context: "momentum_scan_execute",
-      });
-      if (!entryLock.allowed) {
-        const reason = entryLock.reason ?? "trade_gate_blocked";
-        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (final pre-entry check)`);
-        setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
-        continue;
-      }
-      if (hasOpenPosition(marketCoin) || entryLock.openPosition) {
-        console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
-        setLastDecision(`SKIP ${marketCoin} ${side} — has_open_position`);
-        releaseTradeEntryGate(marketCoin, "momentum_scan_execute_open_position");
-        continue;
-      }
-
-      let keepDistributedLockMs = 0;
-      let finalLockState: "confirmed" | "rolled_back" = "rolled_back";
-      try {
-        tradeInProgress = true;
-        const executeResult = await executeMomentumTrade(
-          market.ticker,
-          market.title,
-          side,
-          ob.bid,
-          ob.ask,
-          market.closeTs,
-          effectiveBet,
-        );
-        console.log(
-          `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
-        );
-        log(
-          `[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`,
-        );
-        setLastDecision(`RESULT ${marketCoin} ${side} — ${executeResult.status} (${executeResult.reason})`);
-        if (executeResult.status === "trade_opened") {
-          setLastTradeNow(marketCoin);
-          keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
-          finalLockState = "confirmed";
-          await refreshBalance();
-        }
-        // Reserve this bet so the next candidate's balance check sees the correct available balance,
-        // even if Kalshi's API hasn't updated yet.
-        if (executeResult.status === "trade_opened") {
-          reservedBetCents += effectiveBet;
-        }
-        console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:${reservedBetCents}¢`);
-      } finally {
-        tradeInProgress = false;
-        releaseTradeEntryGate(
-          marketCoin,
-          "momentum_scan_execute_finally",
-          { keepDistributedLockMs: keepDistributedLockMs, finalState: finalLockState },
-        );
-      }
+      setLastDecision(`SIM SKIP ${marketCoin} ${side} — ${simEntry.reason}`);
     }
   }
 
@@ -2269,6 +2152,339 @@ export async function scanMomentumMarkets(): Promise<void> {
   state.simOpenTradeCount = simPositions.length;
   if (activePositions.length > 0) state.status = "IN_TRADE";
 
+  } finally {
+    scanInProgress = false;
+  }
+}
+
+async function botTick(): Promise<void> {
+  if (!state.enabled) return;
+  if (state.simulatorMode) return;
+  if (tradeInProgress) return;
+  if (scanInProgress) {
+    console.log("[BOT TICK] Previous tick still running — skipping");
+    return;
+  }
+  scanInProgress = true;
+
+  try {
+    const posResp = await kalshiFetch("GET", "/portfolio/positions") as { positions?: Array<{ ticker_name?: string; position?: number }> };
+    const liveOpenCount = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0).length;
+    if (liveOpenCount > 0) {
+      console.log(`[SCAN] Kalshi shows ${liveOpenCount} open position(s) — skipping entry`);
+      return;
+    }
+
+    if (openPositions.length > 0) {
+      console.log(`[BOT TICK] Local open positions=${openPositions.length} — skipping entry`);
+      return;
+    }
+
+    if (Date.now() < globalCooldownUntilMs) {
+      console.log("[BOT TICK] Global cooldown active — skipping");
+      return;
+    }
+
+    if (Date.now() - lastTradeClosedAt < 90_000) {
+      console.log("[SCAN] Post-trade cooldown active — skipping");
+      return;
+    }
+
+    // Never allow live entries before startup recovery confirms canonical state.
+    if (!recoveryReady) {
+      console.log("[BOT TICK] Recovery latch active — waiting for DB/exchange recovery");
+      return;
+    }
+
+    if (checkRiskPause()) {
+      state.status = "PAUSED";
+      return;
+    }
+
+    if (openPositions.length >= MAX_POSITIONS) {
+      state.status = "IN_TRADE";
+      return;
+    }
+
+    state.status = "WAITING_FOR_SETUP";
+
+    const markets = await fetchActiveMarkets();
+    if (markets.length === 0) {
+      log("[BOT TICK] fetchActiveMarkets returned 0 markets — check ticker prefixes or API");
+      dbLog("warn", "[MOMENTUM] BOT TICK fetchActiveMarkets returned 0 markets", "no-markets");
+      return;
+    }
+
+    log(
+      `[BOT TICK] ${markets.length} markets: ${markets.map(m => `${coinLabel(m.ticker)} ${m.minutesRemaining.toFixed(1)}min ask:${m.askCents}¢`).join(", ")}`,
+    );
+
+    type Candidate = {
+      market: typeof markets[0];
+      ob: { bid: number; ask: number; spread: number; mid: number };
+      decision: MomentumDecision;
+      side: "YES" | "NO";
+      score: number;
+      signalDetectedAtMs: number;
+    };
+    const candidates: Candidate[] = [];
+    const plannedCoins = new Set(openPositions.map(p => coinLabel(p.marketId)));
+    let inRangeCount = 0;
+
+    for (const market of markets) {
+      if (openPositions.some(p => p.marketId === market.ticker)) continue;
+      const marketCoin = coinLabel(market.ticker);
+      const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
+      if (coinCooldownRemainingMs > 0) {
+        console.log(`[BOT TICK] ${marketCoin} — coin cooldown active (${Math.ceil(coinCooldownRemainingMs / 1000)}s left), skipping`);
+        continue;
+      }
+
+      if (!state.allowedCoins.includes(marketCoin)) {
+        console.log(`[BOT TICK] ${marketCoin} — not in allowedCoins [${state.allowedCoins.join(",")}], skipping`);
+        continue;
+      }
+
+      const minRequired = MIN_MINUTES_REMAINING;
+      if (market.closeTs <= 0) {
+        console.log(`[BOT TICK] ${coinLabel(market.ticker)} — no close_time on record, skipping to be safe`);
+        continue;
+      }
+      const actualMinutesLeft = (market.closeTs - Date.now()) / 60_000;
+      if (actualMinutesLeft < minRequired) {
+        console.log(`[BOT TICK] ${coinLabel(market.ticker)} — only ${actualMinutesLeft.toFixed(1)}min left (< ${minRequired}min required), skipping`);
+        continue;
+      }
+
+      const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
+      if (!ob) {
+        console.log(`[SCAN SKIP NO_PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — no bid/ask from orderbook, hints, or detail`);
+        continue;
+      }
+
+      const { bid, ask, spread, mid } = ob;
+      if (ask <= 0 || bid <= 0) {
+        console.log(`[SCAN SKIP NO_PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — non-tradable price snapshot source:${ob.source} ask:${ask} bid:${bid}`);
+        continue;
+      }
+      console.log(`[SCAN INCLUDE PRICE] ${coinLabel(market.ticker)} (${market.ticker}) — source:${ob.source} ask:${ask} bid:${bid} spread:${spread} mid:${mid}`);
+
+      const pMin = state.priceMin;
+      const pMax = state.priceMax;
+      if (mid < pMin - ENTRY_BUFFER_CENTS || mid > pMax + ENTRY_BUFFER_CENTS) {
+        console.log(`[BOT TICK] ${coinLabel(market.ticker)} — price ${mid}¢ outside ${pMin - ENTRY_BUFFER_CENTS}-${pMax + ENTRY_BUFFER_CENTS}¢ hard limit, skipping`);
+        continue;
+      }
+      if (spread > SPREAD_MAX) {
+        console.log(`[BOT TICK] ${coinLabel(market.ticker)} — spread ${spread}¢ > ${SPREAD_MAX}¢ max, skipping`);
+        continue;
+      }
+      if (mid >= pMin && mid <= pMax) inRangeCount++;
+
+      const decision = evaluateMomentum(market.ticker, mid);
+      log(
+        `[MOMENTUM CHECK] ${coinLabel(market.ticker)} | price:${mid}¢ spread:${spread}¢ | ${decision.action} — ${decision.reason}`,
+        { moveCents: decision.moveCents, moveMs: decision.moveMs, centsPerSec: decision.centsPerSec, decision: decision.action },
+      );
+
+      if (decision.action === "SKIP") continue;
+      if (spread > TRADE_SPREAD_MAX) continue;
+      if (decision.action === "BUY_YES" && (mid < pMin || mid > pMax)) continue;
+      if (decision.action === "BUY_NO"  && (mid < pMin || mid > pMax)) continue;
+
+      const side = decision.action === "BUY_YES" ? "YES" : "NO";
+      if (plannedCoins.has(marketCoin)) continue;
+
+      const momentumScore = Math.min(decision.centsPerSec * 25, 60);
+      const signalBonus = decision.moveCents >= 4 ? 15 : decision.moveCents >= 3 ? 10 : 5;
+      const spreadScore = (SPREAD_MAX - spread) * 3;
+      const timeScore = Math.min(market.minutesRemaining, 10);
+      const score = momentumScore + signalBonus + spreadScore + timeScore;
+
+      log(`[SIGNAL] 🎯 ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)} | ${decision.reason}`);
+      dbLog("info", `[MOMENTUM] 🎯 SIGNAL: ${coinLabel(market.ticker)} ${decision.action} | price:${mid}¢ spread:${spread}¢ score:${score.toFixed(0)}`);
+      candidates.push({ market, ob, decision, side, score, signalDetectedAtMs: Date.now() });
+      plannedCoins.add(marketCoin);
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    if (candidates.length === 0) {
+      if (inRangeCount === 0) {
+        console.log(`[BOT TICK] All ${markets.length} markets out of tradeable range — expiring cache for fresh fetch`);
+        _marketCache = null;
+      }
+      return;
+    }
+
+    const board = candidates.slice(0, 5)
+      .map(c => `${coinLabel(c.market.ticker)}(${c.score.toFixed(0)} ${c.side})`)
+      .join(" > ");
+    console.log(`[RANKING] ${candidates.length} signals → best: ${board}`);
+    setLastDecision(`${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`);
+
+    const candidate = candidates[0];
+    const { market, ob, side, decision } = candidate;
+    const marketCoin = coinLabel(market.ticker);
+    const signalAgeMs = Math.max(0, Date.now() - candidate.signalDetectedAtMs);
+    const signalAgeSec = (signalAgeMs / 1000).toFixed(2);
+    if (signalAgeMs > SIGNAL_TO_EXEC_MAX_DELAY_MS) {
+      const reason = `stale_signal_${Math.ceil(signalAgeMs / 1000)}s`;
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (max:${Math.ceil(SIGNAL_TO_EXEC_MAX_DELAY_MS / 1000)}s)`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+      return;
+    }
+
+    const coinCooldownRemainingMs = getRemainingCooldownMs(marketCooldowns, marketCoin);
+    if (coinCooldownRemainingMs > 0) {
+      const reason = `coin_cooldown_${Math.ceil(coinCooldownRemainingMs / 1000)}s`;
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+      return;
+    }
+
+    const exchangeSyncOk = await refreshLiveOpenPositionsFromExchange();
+    if (!exchangeSyncOk) {
+      console.log(`[ENTRY CHECK] asset=${marketCoin}, exchangeSync=stale_or_failed, lastError=${lastExchangeSyncError ?? "unknown"}`);
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — exchange_sync_unavailable`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — exchange_sync_unavailable`);
+      return;
+    }
+    const gateStatus = await getSharedTradeGateStatus(marketCoin);
+    const hasPosition = hasOpenPosition(marketCoin) || gateStatus.openPosition;
+    const entryLocked = gateStatus.entryLocked;
+    const lastTradeAgoMs = getLastTradeAgoMs(marketCoin);
+    const closeDedupRemainingMs = getRemainingCooldownMs(assetEntryCooldownUntilMs, marketCoin);
+    const dedupCooldownActive =
+      (lastTradeAgoMs !== null && lastTradeAgoMs < ENTRY_CHECK_COOLDOWN_MS) || closeDedupRemainingMs > 0;
+    const lastTradeAgoSec = lastTradeAgoMs === null ? "n/a" : (lastTradeAgoMs / 1000).toFixed(1);
+    console.log(`[TRADE GATE] asset=${marketCoin}, openPosition=${hasPosition}, entryLocked=${entryLocked}`);
+    console.log(
+      `[ENTRY CHECK] asset=${marketCoin}, hasPosition=${hasPosition}, entryLocked=${entryLocked}, lastTradeAgo=${lastTradeAgoSec}s, postExitCooldown=${Math.ceil(closeDedupRemainingMs / 1000)}s, signalAge=${signalAgeSec}s`,
+    );
+    if (hasPosition || entryLocked || dedupCooldownActive) {
+      const reason = hasPosition
+        ? "has_open_position"
+        : entryLocked
+          ? "entry_in_progress"
+          : closeDedupRemainingMs > 0
+            ? `post_exit_cooldown_${Math.ceil(closeDedupRemainingMs / 1000)}s`
+            : `dedup_cooldown_${Math.ceil((ENTRY_CHECK_COOLDOWN_MS - (lastTradeAgoMs ?? 0)) / 1000)}s`;
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason}`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+      return;
+    }
+
+    const signalMult = decision.centsPerSec >= 0.20 ? 1.0 : 0.70;
+    const health = state.healthScore?.label;
+    const healthMult = health === "Fragile" ? 0.70 : 1.0;
+    let effectiveBet = Math.round(state.betCostCents * signalMult * healthMult);
+    effectiveBet = Math.max(1, Math.min(effectiveBet, state.betCostCents));
+    console.log(`[SIZING] ${coinLabel(market.ticker)} ${side} | base:${state.betCostCents}¢ velocity:${decision.centsPerSec.toFixed(2)}¢/s signalMult:${signalMult} health:${health ?? "Pending"} → bet:${effectiveBet}¢`);
+
+    if (health === "Broken") {
+      console.log("[HEALTH GATE] Skipping live trade — bot health is Broken. Switch to sim or wait for recovery.");
+      setLastDecision(`SKIP ${marketCoin} ${side} — health_gate_broken`);
+      return;
+    }
+
+    {
+      const effectiveFloor = Math.max(state.balanceFloorCents, effectiveBet);
+      let balanceOk = false;
+      try {
+        await refreshBalance();
+        const rawBalance = getBotState().balanceCents;
+        const balance = rawBalance;
+        const maxBetFromBalance = Math.max(1, Math.floor(balance * 0.33));
+        if (effectiveBet > maxBetFromBalance) {
+          console.warn(`[BET CAP] ${coinLabel(market.ticker)} — effectiveBet ${effectiveBet}¢ reduced to ${maxBetFromBalance}¢ (33% of ${balance}¢ available)`);
+          effectiveBet = maxBetFromBalance;
+        }
+        const cappedFloor = Math.max(state.balanceFloorCents, effectiveBet);
+        console.log(`[BALANCE CHECK] fetched:${rawBalance}¢ reserved:0¢ available:${balance}¢ floor:${cappedFloor}¢ bet:${effectiveBet}¢`);
+        if (balance > 0 && balance >= cappedFloor) {
+          balanceOk = true;
+        } else if (balance > 0 && balance < cappedFloor) {
+          stopMomentumBot(`Balance too low: ${balance}¢ < ${cappedFloor}¢ floor — stopping bot`);
+          return;
+        } else {
+          console.warn(`[BALANCE CHECK] Balance returned 0 — skipping trade as precaution (floor: ${cappedFloor}¢)`);
+        }
+      } catch (err) {
+        console.error(`[BALANCE CHECK] Failed to fetch balance — skipping trade: ${String(err)}`);
+      }
+      if (!balanceOk) {
+        const blockedReason = `balance_guard_failed floor:${effectiveFloor}¢ reserved:0¢`;
+        console.warn(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
+        log(`[EXECUTE RESULT] ${coinLabel(market.ticker)} ${side} -> order_skipped (${blockedReason})`);
+        setLastDecision(`SKIP ${coinLabel(market.ticker)} ${side} — ${blockedReason}`);
+        return;
+      }
+    }
+
+    console.log(`[CONFIG SNAPSHOT] betCostCents:${state.betCostCents}¢ ($${(state.betCostCents / 100).toFixed(2)}) priceRange:${state.priceMin}-${state.priceMax}¢ floor:${state.balanceFloorCents}¢ sim:${state.simulatorMode}`);
+    console.log(
+      `[EXECUTE ATTEMPT] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)} | positions:${openPositions.length} signalAge:${signalAgeSec}s`,
+    );
+    log(
+      `[EXECUTE] ${coinLabel(market.ticker)} ${side} | price:${ob.mid}¢ spread:${ob.spread}¢ score:${candidate.score.toFixed(0)}`,
+      { market: market.ticker, price: ob.mid, spread: ob.spread },
+    );
+
+    const entryLock = await tryEnterTrade(marketCoin, {
+      assetOrTicker: marketCoin,
+      context: "momentum_bot_tick_execute",
+    });
+    if (!entryLock.allowed) {
+      const reason = entryLock.reason ?? "trade_gate_blocked";
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — ${reason} (final pre-entry check)`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — ${reason}`);
+      return;
+    }
+    if (hasOpenPosition(marketCoin) || entryLock.openPosition) {
+      console.log(`[EXECUTE SKIP] ${marketCoin} ${side} — has_open_position (final pre-entry check)`);
+      setLastDecision(`SKIP ${marketCoin} ${side} — has_open_position`);
+      releaseTradeEntryGate(marketCoin, "momentum_bot_tick_execute_open_position");
+      return;
+    }
+
+    let keepDistributedLockMs = 0;
+    let finalLockState: "confirmed" | "rolled_back" = "rolled_back";
+    try {
+      tradeInProgress = true;
+      const executeResult = await executeMomentumTrade(
+        market.ticker,
+        market.title,
+        side,
+        ob.bid,
+        ob.ask,
+        market.closeTs,
+        effectiveBet,
+      );
+      console.log(`[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`);
+      log(`[EXECUTE RESULT] ${marketCoin} ${side} -> ${executeResult.status} (${executeResult.reason})`);
+      setLastDecision(`RESULT ${marketCoin} ${side} — ${executeResult.status} (${executeResult.reason})`);
+      if (executeResult.status === "trade_opened") {
+        setLastTradeNow(marketCoin);
+        keepDistributedLockMs = POST_ENTRY_LOCK_HOLD_MS;
+        finalLockState = "confirmed";
+        await refreshBalance();
+      }
+      console.log(`[EXECUTE DONE] ${coinLabel(market.ticker)} ${side} | positions now:${openPositions.length} reserved:0¢`);
+    } finally {
+      tradeInProgress = false;
+      releaseTradeEntryGate(
+        marketCoin,
+        "momentum_bot_tick_execute_finally",
+        { keepDistributedLockMs: keepDistributedLockMs, finalState: finalLockState },
+      );
+    }
+
+    state.openTradeCount = openPositions.length;
+    if (openPositions.length > 0) {
+      state.status = "IN_TRADE";
+    }
+  } catch (err) {
+    warn(`Bot tick error: ${String(err)}`);
   } finally {
     scanInProgress = false;
   }
@@ -2696,11 +2912,13 @@ export function startMomentumBot(): MomentumBotState {
 
   // Kick off scan loop immediately; recovery latch controls live entry readiness.
   if (!scanTimer) {
+    const tick = state.simulatorMode ? scanMomentumMarkets : botTick;
+    const tickLabel = state.simulatorMode ? "scan" : "bot tick";
     scanTimer = setInterval(() => {
-      scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
+      tick().catch(err => warn(`${tickLabel} error: ${String(err)}`));
     }, SCAN_INTERVAL_MS);
     // Also run once right away to avoid missing near-term scalp windows.
-    scanMomentumMarkets().catch(err => warn(`Initial scan error: ${String(err)}`));
+    tick().catch(err => warn(`Initial ${tickLabel} error: ${String(err)}`));
   }
 
   log(`▶️  Momentum Bot STARTED | bet=$${(state.betCostCents/100).toFixed(2)}/trade | range:${state.priceMin}-${state.priceMax}¢ | floor:$${(state.balanceFloorCents/100).toFixed(2)} | sim:${state.simulatorMode}`);
