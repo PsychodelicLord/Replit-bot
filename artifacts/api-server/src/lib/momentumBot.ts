@@ -1,6 +1,9 @@
 /**
  * Momentum Bot — selective trend-following scalper
  *
+ * Note: this file is also used to trigger Railway watched-file deploys when
+ * root-level packaging changes (e.g. preinstall guards) need to ship.
+ *
  * Rules:
  *  - Trades BTC, ETH, SOL, DOGE, XRP, BNB, HYPE (15-min crypto markets)
  *  - Entry: price 20-80¢, spread ≤5¢, >7 min remaining, momentum signal
