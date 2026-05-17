@@ -1218,6 +1218,7 @@ async function placeSellOrder(
       warn(`DB sell skipped — no real tradeId or buyOrderId`, { provisId: pos.tradeId });
     }
 
+    stopMomentumBot("Trade closed — single trade mode, stopping until manually restarted");
     return true;
   } catch (err) {
     warn(`placeSellOrder API error: ${String(err)}`, { tradeId: pos.tradeId, market: pos.marketId });
