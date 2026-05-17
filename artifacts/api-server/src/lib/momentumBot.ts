@@ -94,6 +94,7 @@ interface MomentumPosition {
   closeTs: number;          // contract expiry epoch ms — 0 if unknown
   sellRetries?: number;     // how many times a sell limit order was placed but rested unfilled
   pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
+  sellInProgress?: boolean;
   resultRecorded?: boolean;
 }
 
@@ -1650,17 +1651,53 @@ async function runSellMonitor(): Promise<void> {
 
   for (const pos of [...openPositions]) {
     const now = Date.now();
+    const holdMins = (now - pos.enteredAt) / 60_000;
+
+    const forceRemoveStalePosition = () => {
+      const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
+      if (idx >= 0) openPositions.splice(idx, 1);
+      noteClosedAssetPosition(pos.marketId);
+      state.openTradeCount = openPositions.length;
+      console.warn(`[SELL-MONITOR] FORCE REMOVE >12m — removed stale position ${pos.marketId} ${pos.side} tradeId:${pos.tradeId}`);
+      dbLog("warn", `[MOMENTUM] FORCE REMOVE >12m: ${coinLabel(pos.marketId)} tradeId:${pos.tradeId} removed from openPositions`);
+    };
+
+    if (pos.sellInProgress) {
+      if (holdMins >= 12) {
+        forceRemoveStalePosition();
+      }
+      continue;
+    }
+
+    // Hard stale guard: if a position survives in-memory >12 minutes, force-remove it
+    // regardless of orderbook/close path state to prevent infinite repeat handling.
+    if (holdMins >= 12) {
+      forceRemoveStalePosition();
+      continue;
+    }
+
+    const attemptPlaceSellOrder = async (
+      bidCents: number,
+      midAtTrigger = bidCents,
+      askCents = bidCents + 2,
+    ): Promise<boolean> => {
+      pos.sellInProgress = true;
+      const closed = await placeSellOrder(pos, bidCents, midAtTrigger, askCents);
+      if (!closed) {
+        pos.sellInProgress = false;
+      }
+      return closed;
+    };
 
     // ── Hard max-hold backstop — exit ANY position open longer than 10 min ────
     // Prevents full-bet expiry losses even if order book is unreachable.
-    const holdMins = (now - pos.enteredAt) / 60_000;
     if (holdMins >= 10) {
       console.warn(`[MAX-HOLD] ${coinLabel(pos.marketId)} ${pos.side} open ${holdMins.toFixed(1)}min — force-exiting`);
       dbLog("warn", `[MOMENTUM] MAX-HOLD EXIT: ${coinLabel(pos.marketId)} open ${holdMins.toFixed(1)}min — force-closing to prevent expiry`);
       const fallbackBid = pos.lastSeenPriceCents > 0
         ? (pos.side === "YES" ? pos.lastSeenPriceCents : 100 - pos.lastSeenPriceCents)
         : 1;
-      await placeSellOrder(pos, fallbackBid, pos.lastSeenPriceCents || fallbackBid);
+      await attemptPlaceSellOrder(fallbackBid, pos.lastSeenPriceCents || fallbackBid);
       continue;
     }
 
@@ -1687,7 +1724,7 @@ async function runSellMonitor(): Promise<void> {
         if (minsLeft < 5) {
           const exitPx = Math.max(1, pos.lastSeenPriceCents);
           console.warn(`[SELL-MONITOR] EMERGENCY EXIT — ${coinLabel(pos.marketId)} ${minsLeft.toFixed(1)}min left with 0 bid/ask — force-exiting at ${exitPx}¢`);
-          await placeSellOrder(pos, exitPx, exitPx);
+          await attemptPlaceSellOrder(exitPx, exitPx);
           continue;
         }
       }
@@ -1705,7 +1742,7 @@ async function runSellMonitor(): Promise<void> {
           console.warn(
             `[SELL-MONITOR] SL via fallback price: gain ${gain}¢ absStop=${absStopHit} mid:${fallbackMid}¢ threshold:${pos.side === "YES" ? state.slCents : 100 - state.slCents}¢ — force-closing ${pos.marketId}`,
           );
-          await placeSellOrder(pos, fallbackBid, fallbackMid);
+          await attemptPlaceSellOrder(fallbackBid, fallbackMid);
         }
       }
       continue;
@@ -1737,7 +1774,7 @@ async function runSellMonitor(): Promise<void> {
       if (minsLeft < 2) {
         log(`⚠️ EXPIRY EXIT — ${minsLeft.toFixed(1)}min left on Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — force-closing`);
         dbLog("warn", `[MOMENTUM] EXPIRY EXIT: ${coinLabel(pos.marketId)} — ${minsLeft.toFixed(1)}min left, gain:${executableGain}¢`);
-        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+        await attemptPlaceSellOrder(currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
         continue;
       }
     }
@@ -1749,7 +1786,7 @@ async function runSellMonitor(): Promise<void> {
         : currentMid <= (100 - state.tpAbsoluteCents);
       if (absHit) {
         log(`💰 ABS-TP hit — price ${currentMid}¢ reached target ${pos.side === "YES" ? ">=" : "<="} ${pos.side === "YES" ? state.tpAbsoluteCents : 100 - state.tpAbsoluteCents}¢ on Trade ${pos.tradeId}`);
-        await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+        await attemptPlaceSellOrder(currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
         continue;
       }
     }
@@ -1757,14 +1794,14 @@ async function runSellMonitor(): Promise<void> {
     // Relative take-profit (cents above entry)
     if (executableGain >= state.tpCents) {
       log(`💰 TP hit — gain ${executableGain}¢ on Trade ${pos.tradeId}`, { gain: executableGain, tradeId: pos.tradeId });
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      await attemptPlaceSellOrder(currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
 
     // Stop-loss
     if (executableGain <= -state.slCents) {
       log(`🛑 SL hit — loss ${executableGain}¢ on Trade ${pos.tradeId}`, { gain: executableGain, tradeId: pos.tradeId });
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      await attemptPlaceSellOrder(currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
 
@@ -1775,14 +1812,14 @@ async function runSellMonitor(): Promise<void> {
       log(
         `🛑 ABS-SL hit — YES price ${currentMid}¢ crossed ${pos.side === "YES" ? "<=" : ">="} ${pos.side === "YES" ? state.slCents : 100 - state.slCents}¢ on Trade ${pos.tradeId}`,
       );
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      await attemptPlaceSellOrder(currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
 
     // Stale-position exit
     if (now - pos.lastMovedAt >= state.staleMs) {
       log(`⏳ STALE EXIT — price flat for ${Math.round((now - pos.lastMovedAt) / 1000)}s on Trade ${pos.tradeId}`);
-      await placeSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      await attemptPlaceSellOrder(currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
       continue;
     }
   }
