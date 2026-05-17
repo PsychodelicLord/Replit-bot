@@ -3,6 +3,7 @@
  *
  * Note: this file is also used to trigger Railway watched-file deploys when
  * root-level packaging changes (e.g. preinstall guards) need to ship.
+ * Deploy trigger marker: keep synchronized with package-level hotfix commits.
  *
  * Rules:
  *  - Trades BTC, ETH, SOL, DOGE, XRP, BNB, HYPE (15-min crypto markets)
