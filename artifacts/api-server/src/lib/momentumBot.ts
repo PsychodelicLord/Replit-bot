@@ -77,6 +77,18 @@ interface MomentumPosition {
   pendingSellOrderId?: string; // Kalshi order ID of the most recent resting sell order
 }
 
+interface LivePositionSnapshot {
+  tradeId: number | null;
+  marketId: string;
+  marketTitle: string;
+  side: "YES" | "NO";
+  entryPriceCents: number;
+  contractCount: number;
+  enteredAt: number;
+  buyOrderId: string | null;
+  closeTs: number;
+}
+
 interface MomentumDecision {
   action: "BUY_YES" | "BUY_NO" | "SKIP";
   reason: string;
@@ -706,6 +718,322 @@ export async function fetchActiveMarkets(): Promise<Array<{
   return markets;
 }
 
+function recordPriceSampleAndGetLastMoveAt(marketId: string, priceCents: number, now: number): number {
+  if (!marketMomentum.has(marketId)) {
+    marketMomentum.set(marketId, { priceHistory: [] });
+  }
+  const ms = marketMomentum.get(marketId)!;
+  ms.priceHistory.push({ price: priceCents, ts: now });
+  const cutoff = now - PRICE_HISTORY_MAX_MS;
+  ms.priceHistory = ms.priceHistory.filter(p => p.ts >= cutoff);
+  if (ms.priceHistory.length < 2) {
+    return ms.priceHistory[0]?.ts ?? now;
+  }
+  for (let i = ms.priceHistory.length - 1; i >= 1; i--) {
+    if (Math.abs(ms.priceHistory[i]!.price - ms.priceHistory[i - 1]!.price) >= 1) {
+      return ms.priceHistory[i]!.ts;
+    }
+  }
+  return ms.priceHistory[0]!.ts;
+}
+
+async function inferLiveEntryFromFills(ticker: string): Promise<{ side: "YES" | "NO"; entryPriceCents: number } | null> {
+  try {
+    const fillsResp = await kalshiFetch("GET", `/portfolio/fills?ticker=${ticker}&limit=20`) as {
+      fills?: Array<{ action?: string; side?: string; yes_price?: number; no_price?: number }>;
+    };
+    const buyFill = (fillsResp.fills ?? []).find(f => f.action === "buy");
+    if (!buyFill) return null;
+    const side = (buyFill.side?.toUpperCase() ?? "YES") === "NO" ? "NO" : "YES";
+    const entryPriceCents = side === "YES"
+      ? Math.round((buyFill.yes_price ?? 0.5) * 100)
+      : Math.round((buyFill.no_price ?? 0.5) * 100);
+    return { side, entryPriceCents: Math.max(1, entryPriceCents) };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLivePositionSnapshots(): Promise<LivePositionSnapshot[]> {
+  const posResp = await kalshiFetch("GET", "/portfolio/positions") as {
+    positions?: Array<{ ticker_name?: string; position?: number }>;
+  };
+  const livePositions = (posResp.positions ?? []).filter(p => (p.position ?? 0) > 0 && !!p.ticker_name);
+  if (livePositions.length === 0) return [];
+
+  const openTrades = await db
+    .select()
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "open"))
+    .orderBy(desc(tradesTable.createdAt))
+    .catch(() => [] as Array<typeof tradesTable.$inferSelect>);
+  const openTradeByTicker = new Map<string, (typeof openTrades)[number]>();
+  for (const row of openTrades) {
+    if (!openTradeByTicker.has(row.marketId)) {
+      openTradeByTicker.set(row.marketId, row);
+    }
+  }
+
+  const markets = await fetchActiveMarkets().catch(() => [] as Awaited<ReturnType<typeof fetchActiveMarkets>>);
+  const closeTsByTicker = new Map(markets.map(m => [m.ticker, m.closeTs]));
+  const titleByTicker = new Map(markets.map(m => [m.ticker, m.title]));
+
+  const snapshots: LivePositionSnapshot[] = [];
+  for (const p of livePositions) {
+    const ticker = p.ticker_name!;
+    const tracked = openTradeByTicker.get(ticker);
+    let side: "YES" | "NO" = (tracked?.side as "YES" | "NO" | undefined) ?? "YES";
+    let entryPriceCents = tracked?.buyPriceCents ?? 50;
+    if (!tracked) {
+      const inferred = await inferLiveEntryFromFills(ticker);
+      if (inferred) {
+        side = inferred.side;
+        entryPriceCents = inferred.entryPriceCents;
+      }
+    }
+    snapshots.push({
+      tradeId: tracked?.id ?? null,
+      marketId: ticker,
+      marketTitle: tracked?.marketTitle ?? titleByTicker.get(ticker) ?? ticker,
+      side,
+      entryPriceCents: Math.max(1, Math.round(entryPriceCents)),
+      contractCount: Math.max(0.01, p.position ?? 1),
+      enteredAt: tracked?.createdAt ? new Date(tracked.createdAt).getTime() : Date.now(),
+      buyOrderId: tracked?.kalshiBuyOrderId ?? null,
+      closeTs: closeTsByTicker.get(ticker) ?? 0,
+    });
+  }
+  return snapshots;
+}
+
+async function placeStatelessLiveSellOrder(
+  pos: LivePositionSnapshot,
+  currentBidCents: number,
+  midAtTrigger = currentBidCents,
+  currentAskCents = currentBidCents + 2,
+): Promise<boolean> {
+  const limitCents = pos.side === "YES"
+    ? Math.max(1, currentBidCents)
+    : Math.max(1, 100 - currentAskCents);
+  const payload: Record<string, unknown> = {
+    ticker: pos.marketId,
+    client_order_id: `momentum-sell-${pos.marketId}-${Date.now()}`,
+    type: "limit",
+    action: "sell",
+    side: pos.side.toLowerCase(),
+    count: pos.contractCount,
+    yes_price: pos.side === "YES" ? limitCents : undefined,
+    no_price: pos.side === "NO" ? limitCents : undefined,
+  };
+
+  try {
+    const resp = await kalshiFetch("POST", "/portfolio/orders", payload) as {
+      order?: { order_id?: string; count?: number; filled_count?: number };
+    };
+    const fillCount = resp?.order?.count ?? resp?.order?.filled_count ?? 0;
+    const orderId = resp?.order?.order_id;
+    if (fillCount === 0) {
+      if (orderId) {
+        await kalshiFetch("DELETE", `/portfolio/orders/${orderId}`).catch(() => {});
+      }
+      return false;
+    }
+
+    const exitPriceForPnl = pos.side === "YES" ? midAtTrigger : 100 - midAtTrigger;
+    const gross = exitPriceForPnl - pos.entryPriceCents;
+    const fee = Math.floor(FEE_RATE * Math.max(0, gross));
+    const netPnl = gross - fee;
+    recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
+
+    const liveReason: "TP" | "SL" | "STALE" = gross >= state.tpCents ? "TP" : gross <= -state.slCents ? "SL" : "STALE";
+    recordTradeForHealth(netPnl, liveReason, 0);
+    recordLiveTradeExecution({
+      timestamp: Date.now(),
+      market: pos.marketId,
+      side: pos.side,
+      exitReason: liveReason,
+      entryPriceCents: pos.entryPriceCents,
+      entrySlippage: 0,
+      midAtTrigger,
+      expectedExitCents: currentBidCents,
+      actualFillCents: exitPriceForPnl,
+      exitSlippage: exitPriceForPnl - currentBidCents,
+      pnlCents: netPnl,
+    });
+
+    const closeFields = {
+      status: "closed" as const,
+      sellPriceCents: exitPriceForPnl,
+      pnlCents: netPnl,
+      feeCents: fee,
+      closedAt: new Date(),
+    };
+    if (pos.tradeId != null) {
+      db.update(tradesTable).set(closeFields)
+        .where(eq(tradesTable.id, pos.tradeId))
+        .catch(err => warn(`DB sell update failed for id=${pos.tradeId}: ${String(err)}`));
+    } else if (pos.buyOrderId) {
+      db.update(tradesTable).set(closeFields)
+        .where(eq(tradesTable.kalshiBuyOrderId, pos.buyOrderId))
+        .catch(err => warn(`DB sell update (by buyOrderId) failed: ${String(err)}`));
+    }
+    return true;
+  } catch (err) {
+    warn(`Stateless sell order failed: ${String(err)}`, { market: pos.marketId });
+    return false;
+  }
+}
+
+async function runStatelessLiveExits(positions: LivePositionSnapshot[]): Promise<void> {
+  const now = Date.now();
+  for (const pos of positions) {
+    const holdMins = (now - pos.enteredAt) / 60_000;
+    let currentBid = 0;
+    let currentAsk = 0;
+    try {
+      const ob = await fetchMarketOrderBook(pos.marketId);
+      if (ob) {
+        currentBid = ob.bid;
+        currentAsk = ob.ask;
+      }
+    } catch {
+      // best effort
+    }
+    if (currentBid <= 0 && currentAsk <= 0) {
+      continue;
+    }
+    const currentMid = currentAsk > 0 ? Math.round((currentBid + currentAsk) / 2) : currentBid;
+    const lastMovedAt = recordPriceSampleAndGetLastMoveAt(pos.marketId, currentMid, now);
+    const executableGain = pos.side === "YES"
+      ? (currentBid > 0 ? currentBid : currentMid) - pos.entryPriceCents
+      : (currentAsk > 0 ? Math.max(1, 100 - currentAsk) : Math.max(1, 100 - currentMid)) - pos.entryPriceCents;
+
+    if (holdMins >= 10) {
+      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      continue;
+    }
+    if (pos.closeTs > 0) {
+      const minsLeft = (pos.closeTs - now) / 60_000;
+      if (minsLeft < 2) {
+        await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+        continue;
+      }
+    }
+    if (state.tpAbsoluteCents > 0) {
+      const absHit = pos.side === "YES"
+        ? currentMid >= state.tpAbsoluteCents
+        : currentMid <= (100 - state.tpAbsoluteCents);
+      if (absHit) {
+        await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+        continue;
+      }
+    }
+    if (executableGain >= state.tpCents) {
+      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      continue;
+    }
+    if (executableGain <= -state.slCents) {
+      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      continue;
+    }
+    if (now - lastMovedAt >= state.staleMs) {
+      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
+      continue;
+    }
+  }
+}
+
+async function runStatelessLiveEntryScan(): Promise<void> {
+  const markets = await fetchActiveMarkets();
+  if (markets.length === 0) return;
+
+  type Candidate = {
+    market: (typeof markets)[number];
+    ob: { bid: number; ask: number; spread: number; mid: number };
+    decision: MomentumDecision;
+    side: "YES" | "NO";
+    score: number;
+  };
+  const candidates: Candidate[] = [];
+
+  for (const market of markets) {
+    const marketCoin = coinLabel(market.ticker);
+    if (!state.allowedCoins.includes(marketCoin)) continue;
+    const minRequired = MIN_MINUTES_REMAINING;
+    const actualMinutesLeft = (market.closeTs - Date.now()) / 60_000;
+    if (market.closeTs <= 0 || actualMinutesLeft < minRequired) continue;
+
+    const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
+    if (!ob) continue;
+
+    const { bid, ask, spread, mid } = ob;
+    if (ask <= 0 || bid <= 0) continue;
+    const pMin = state.priceMin;
+    const pMax = state.priceMax;
+    if (mid < pMin - ENTRY_BUFFER_CENTS || mid > pMax + ENTRY_BUFFER_CENTS) continue;
+    if (spread > SPREAD_MAX) continue;
+
+    const decision = evaluateMomentum(market.ticker, mid);
+    if (decision.action === "SKIP") continue;
+    if (spread > TRADE_SPREAD_MAX) continue;
+
+    if (decision.action === "BUY_YES" && (mid < pMin || mid > pMax)) continue;
+    if (decision.action === "BUY_NO" && (mid < pMin || mid > pMax)) continue;
+
+    const side = decision.action === "BUY_YES" ? "YES" : "NO";
+    const momentumScore  = Math.min(decision.centsPerSec * 25, 60);
+    const signalBonus    = decision.moveCents >= 4 ? 15 : decision.moveCents >= 3 ? 10 : 5;
+    const spreadScore    = (SPREAD_MAX - spread) * 3;
+    const timeScore      = Math.min(market.minutesRemaining, 10);
+    const score = momentumScore + signalBonus + spreadScore + timeScore;
+    candidates.push({ market, ob, decision, side, score });
+  }
+
+  if (candidates.length === 0) return;
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0]!;
+  state.lastDecision = `${coinLabel(best.market.ticker)}: ${best.decision.action} — score:${best.score.toFixed(0)}`;
+  state.lastDecisionAt = new Date().toISOString();
+
+  await refreshBalance().catch(() => {});
+  const balance = getBotState().balanceCents;
+  let effectiveBet = Math.max(1, Math.min(state.betCostCents, Math.floor(balance * 0.33)));
+  if (balance <= 0 || effectiveBet <= 0) return;
+  if (balance < Math.max(state.balanceFloorCents, effectiveBet)) return;
+
+  const gatePositions = await fetchLivePositionSnapshots();
+  if (gatePositions.length > 0) return;
+
+  await executeMomentumTrade(
+    best.market.ticker,
+    best.market.title,
+    best.side,
+    best.ob.bid,
+    best.ob.ask,
+    best.market.closeTs,
+    effectiveBet,
+  );
+}
+
+async function runStatelessLiveTick(): Promise<void> {
+  if (!state.enabled || state.simulatorMode) return;
+  if (checkRiskPause()) {
+    state.status = "PAUSED";
+    return;
+  }
+
+  const positions = await fetchLivePositionSnapshots();
+  state.openTradeCount = positions.length;
+  if (positions.length > 0) {
+    state.status = "IN_TRADE";
+    await runStatelessLiveExits(positions);
+    return;
+  }
+
+  state.status = "WAITING_FOR_SETUP";
+  await runStatelessLiveEntryScan();
+}
+
 // ─── Order placement ────────────────────────────────────────────────────────
 type BuyOrderResult =
   | { ok: true; orderId: string; fillPrice: number; contractCount: number }
@@ -1019,25 +1347,6 @@ export async function executeMomentumTrade(
   // Expected entry price in the same space as fillPrice:
   // YES: limitCents (YES-space). NO: 100 - limitCents (NO-space).
   const expectedEntryPrice = side === "NO" ? (100 - limitCents) : limitCents;
-
-  const pos: MomentumPosition = {
-    tradeId,
-    marketId: ticker,
-    marketTitle: title,
-    side,
-    entryPriceCents:   result.fillPrice,
-    entrySlippageCents: Math.abs(result.fillPrice - expectedEntryPrice), // actual vs expected (correct space)
-    contractCount: result.contractCount,
-    enteredAt: Date.now(),
-    lastSeenPriceCents: entryYesEquiv,  // YES-space so stale-tracker comparisons are valid
-    lastMovedAt: Date.now(),
-    buyOrderId: result.orderId,
-    closeTs,
-  };
-
-  openPositions.push(pos);
-  state.openTradeCount = openPositions.length;
-  state.status = "IN_TRADE";
 
   log(
     `🟢 BUY ${side} — ${coinLabel(ticker)} @${result.fillPrice}¢ | tradeId: ${tradeId}`,
@@ -1431,6 +1740,7 @@ let scanInProgress = false; // single-instance lock — prevents overlapping sca
 
 export async function scanMomentumMarkets(): Promise<void> {
   if (!state.enabled) return;
+  if (!state.simulatorMode) return;
   if (scanInProgress) {
     console.log("[SCAN] Previous scan still running — skipping this tick to prevent double bets");
     return;
@@ -2116,7 +2426,6 @@ export function startMomentumBot(): MomentumBotState {
   state.enabled = true;
   state.autoMode = true;
   state.status = "WAITING_FOR_SETUP";
-  recoveryReady = false;
 
   // Wire up real-trade W/L counter (hook avoids circular import)
   setTradeClosedHook(recordTradeResult);
@@ -2127,80 +2436,42 @@ export function startMomentumBot(): MomentumBotState {
   state.pausedUntilMs = null;
   state.pauseReason = null;
 
-  // Block all new trades for 60s so DB recovery + Kalshi portfolio sync have time
-  // to repopulate openPositions before any new entries fire. Prevents the restart
-  // race condition where the bot re-enters coins it was already holding.
-  startupHoldUntilMs = Date.now() + 60_000;
-  console.log(`[STARTUP HOLD] No new trades for 60s — recovering open positions from DB and Kalshi`);
-
   if (state.simulatorMode) {
     simPositions.length = 0;
     state.simOpenTradeCount = 0;
     log(`🎮 [SIM] Simulator mode — paper trading active, no real orders will be placed | lifetime: W:${state.simWins} L:${state.simLosses} pnl:${state.simPnlCents}¢`);
-  }
-
-  // Kick off sell monitor (handles both real and sim positions)
-  if (!sellTimer) {
-    sellTimer = setInterval(() => {
-      runSellMonitor().catch(err => warn(`Sell monitor error: ${String(err)}`));
-      monitorSimPositions().catch(err => warn(`Sim monitor error: ${String(err)}`));
-    }, SELL_INTERVAL_MS);
-  }
-
-  // ── Recover open real positions from DB so sell monitor manages them after restart ──
-  // This fixes the gap where a buy order filled but the server restarted before the
-  // sell monitor could close the position — without this the position sits orphaned on Kalshi.
-  if (!state.simulatorMode) {
-    db.select().from(tradesTable).where(eq(tradesTable.status, "open"))
-      .then(openTrades => {
-        let recovered = 0;
-        for (const t of openTrades) {
-          if (openPositions.some(p => p.tradeId === t.id)) continue; // already tracked
-          const entryYesEquiv = t.side === "YES" ? t.buyPriceCents : 100 - t.buyPriceCents;
-          openPositions.push({
-            tradeId:            t.id,
-            marketId:           t.marketId,
-            marketTitle:        t.marketTitle ?? t.marketId,
-            side:               t.side as "YES" | "NO",
-            entryPriceCents:    t.buyPriceCents,
-            entrySlippageCents: 0,
-            contractCount:      t.contractCount,
-            enteredAt:          t.createdAt.getTime(),
-            lastSeenPriceCents: entryYesEquiv,
-            lastMovedAt:        Date.now(),
-            buyOrderId:         t.kalshiBuyOrderId ?? null,
-            closeTs:            0,
-          });
-          recovered++;
-        }
-        if (recovered > 0) {
-          state.openTradeCount = openPositions.length;
-          state.status = "IN_TRADE";
-          log(`🔄 [RECOVERY] Restored ${recovered} open position(s) from DB — sell monitor now managing them`);
-          dbLog("warn", `[MOMENTUM] Recovered ${recovered} open position(s) after restart — sell monitor active`);
-        }
-        recoveryReady = true;
-        console.log(`[RECOVERY] Ready — DB recovery complete, live entries unlocked (restored:${recovered})`);
-      })
-      .catch(err => {
-        // Keep recoveryReady=false so live mode cannot re-enter blindly after restart.
-        warn(`[RECOVERY] Failed to restore open positions from DB: ${String(err)} — live entries remain locked`);
-      });
+    if (!sellTimer) {
+      sellTimer = setInterval(() => {
+        monitorSimPositions().catch(err => warn(`Sim monitor error: ${String(err)}`));
+      }, SELL_INTERVAL_MS);
+    }
   } else {
-    // Sim mode does not rely on DB position recovery.
-    recoveryReady = true;
+    // Live mode is fully stateless; no local sell-monitor loop.
+    if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
   }
 
-  // Kick off scan loop with a brief startup pause
+  // Kick off scan loop
   if (!scanTimer) {
-    setTimeout(() => {
-      if (!state.enabled) return;
-      if (!scanTimer) {
-        scanTimer = setInterval(() => {
-          scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
-        }, SCAN_INTERVAL_MS);
-      }
-    }, 5_000);
+    if (state.simulatorMode) {
+      scanTimer = setInterval(() => {
+        scanMomentumMarkets().catch(err => warn(`Scan error: ${String(err)}`));
+      }, SCAN_INTERVAL_MS);
+      scanMomentumMarkets().catch(err => warn(`Initial scan error: ${String(err)}`));
+    } else {
+      const scheduleNextLiveTick = () => {
+        if (!state.enabled || state.simulatorMode) return;
+        runStatelessLiveTick()
+          .catch(err => warn(`Live stateless tick error: ${String(err)}`))
+          .finally(() => {
+            if (!state.enabled || state.simulatorMode) {
+              scanTimer = null;
+              return;
+            }
+            scanTimer = setTimeout(scheduleNextLiveTick, SCAN_INTERVAL_MS);
+          });
+      };
+      scheduleNextLiveTick();
+    }
   }
 
   log(`▶️  Momentum Bot STARTED | bet=$${(state.betCostCents/100).toFixed(2)}/trade | range:${state.priceMin}-${state.priceMax}¢ | floor:$${(state.balanceFloorCents/100).toFixed(2)} | sim:${state.simulatorMode}`);
@@ -2260,24 +2531,7 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
 
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
-
-  // Record any open real positions as losses so the W/L counter stays honest
-  if (openPositions.length > 0) {
-    console.log(`🛑 BOT STOP — ${openPositions.length} open position(s) abandoned, recording as losses`);
-    for (const pos of [...openPositions]) {
-      const abandonedLoss = -state.slCents * pos.contractCount;
-      recordTradeResult(pos.entryPriceCents, pos.entryPriceCents - state.slCents, abandonedLoss);
-      console.log(`🛑 ABANDONED: Trade ${pos.tradeId} (${coinLabel(pos.marketId)}) — recorded as ~${abandonedLoss}¢ loss`);
-      dbLog("warn", `[MOMENTUM] ABANDONED position ${pos.tradeId} (${coinLabel(pos.marketId)}) on stop — counted as loss`);
-      if (pos.tradeId > 0) {
-        db.update(tradesTable).set({ status: "closed", pnlCents: abandonedLoss, closedAt: new Date() })
-          .where(eq(tradesTable.id, pos.tradeId))
-          .catch(err => console.error(`[STOP] DB update failed: ${String(err)}`));
-      }
-    }
-    openPositions.length = 0;
-    state.openTradeCount = 0;
-  }
+  state.openTradeCount = 0;
 
   // Capture call stack so Railway logs show exactly which line triggered the stop
   const stack = new Error().stack?.split("\n").slice(1, 5).join(" | ") ?? "no stack";
