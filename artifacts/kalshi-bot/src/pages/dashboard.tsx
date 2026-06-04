@@ -1,6 +1,5 @@
 import { useGetTradeStats, useGetBotStatus } from "@workspace/api-client-react";
 import { MomentumBot } from "@/components/momentum-bot";
-import { OutcomeBot } from "@/components/outcome-bot";
 import { TradeTable } from "@/components/trade-table";
 import { Wallet, TrendingUp, TrendingDown, Trophy, Skull, Zap } from "lucide-react";
 
@@ -132,7 +131,6 @@ export function Dashboard() {
 
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6 pb-12">
         <MomentumBot />
-        <OutcomeBot />
         <TradeTable />
       </main>
     </div>
