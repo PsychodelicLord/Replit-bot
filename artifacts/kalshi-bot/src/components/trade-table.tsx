@@ -42,7 +42,7 @@ export function TradeTable() {
                     </div>
                   </TableCell>
                 </TableRow>
-              ) : !data || data.trades.length === 0 ? (
+              ) : !data || !data.trades || data.trades.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={8} className="text-center py-10 text-muted-foreground font-sans">
                     No trades executed yet.
