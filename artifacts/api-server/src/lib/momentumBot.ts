@@ -49,7 +49,7 @@ const TRADE_SPREAD_MAX_SIM  = 5;      // sim mode: allow up to 5¢ spread (sligh
 const SPREAD_MAX_SIM        = 8;      // sim mode: scan-level spread filter (looser than 5)
 const MIN_MINUTES_REMAINING_SIM = 2;  // sim mode: enter with 2 min left (vs 3)
 
-const SCAN_INTERVAL_MS = 15_000; // scan every 15s — gives prices time to move
+const SCAN_INTERVAL_MS = 10_000; // scan every 10s
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
 
 const FEE_RATE = 0.07;
@@ -781,6 +781,33 @@ async function fetchLivePositionSnapshots(): Promise<LivePositionSnapshot[]> {
   const snapshots: LivePositionSnapshot[] = [];
   for (const p of livePositions) {
     const ticker = p.ticker_name!;
+    let marketStatus: string | undefined;
+    let marketCloseTs = closeTsByTicker.get(ticker) ?? 0;
+    let marketTitle = titleByTicker.get(ticker) ?? ticker;
+    try {
+      const marketResp = await kalshiFetch("GET", `/markets/${ticker}`) as {
+        market?: { status?: string; close_time?: string; title?: string };
+      };
+      marketStatus = marketResp.market?.status;
+      if (marketResp.market?.close_time) {
+        marketCloseTs = new Date(marketResp.market.close_time).getTime();
+      }
+      if (marketResp.market?.title) {
+        marketTitle = marketResp.market.title;
+      }
+    } catch {
+      // If market detail lookup fails, keep conservative behavior and treat
+      // the position as live so we don't accidentally stack entries.
+    }
+
+    const statusLower = marketStatus?.toLowerCase();
+    const isLiveStatus = !statusLower || statusLower === "open" || statusLower === "active";
+    const notExpired = marketCloseTs <= 0 || marketCloseTs > Date.now();
+    if (!isLiveStatus || !notExpired) {
+      console.log(`[STATELESS] ignoring non-live position ${ticker} status:${marketStatus ?? "unknown"} closeTs:${marketCloseTs}`);
+      continue;
+    }
+
     const tracked = openTradeByTicker.get(ticker);
     let side: "YES" | "NO" = (tracked?.side as "YES" | "NO" | undefined) ?? "YES";
     let entryPriceCents = tracked?.buyPriceCents ?? 50;
@@ -794,13 +821,13 @@ async function fetchLivePositionSnapshots(): Promise<LivePositionSnapshot[]> {
     snapshots.push({
       tradeId: tracked?.id ?? null,
       marketId: ticker,
-      marketTitle: tracked?.marketTitle ?? titleByTicker.get(ticker) ?? ticker,
+      marketTitle: tracked?.marketTitle ?? marketTitle,
       side,
       entryPriceCents: Math.max(1, Math.round(entryPriceCents)),
       contractCount: Math.max(0.01, p.position ?? 1),
       enteredAt: tracked?.createdAt ? new Date(tracked.createdAt).getTime() : Date.now(),
       buyOrderId: tracked?.kalshiBuyOrderId ?? null,
-      closeTs: closeTsByTicker.get(ticker) ?? 0,
+      closeTs: marketCloseTs,
     });
   }
   return snapshots;
@@ -840,7 +867,12 @@ async function placeStatelessLiveSellOrder(
     }
 
     const exitPriceForPnl = pos.side === "YES" ? midAtTrigger : 100 - midAtTrigger;
-    const gross = exitPriceForPnl - pos.entryPriceCents;
+    const entryYesPrice = pos.side === "YES" ? pos.entryPriceCents : (100 - pos.entryPriceCents);
+    // Keep P&L direction explicit in YES-price space:
+    // YES: exit - entry, NO: entry - exit.
+    const gross = pos.side === "YES"
+      ? (midAtTrigger - entryYesPrice)
+      : (entryYesPrice - midAtTrigger);
     const fee = Math.floor(FEE_RATE * Math.max(0, gross));
     const netPnl = gross - fee;
     recordTradeResult(pos.entryPriceCents, exitPriceForPnl, netPnl);
@@ -941,6 +973,12 @@ async function runStatelessLiveExits(positions: LivePositionSnapshot[]): Promise
       continue;
     }
   }
+
+  const remaining = await fetchLivePositionSnapshots().catch(() => positions);
+  state.openTradeCount = remaining.length;
+  if (remaining.length === 0) {
+    state.status = "WAITING_FOR_SETUP";
+  }
 }
 
 async function runStatelessLiveEntryScan(): Promise<void> {
@@ -1023,6 +1061,7 @@ async function runStatelessLiveTick(): Promise<void> {
   }
 
   const positions = await fetchLivePositionSnapshots();
+  console.log(`[STATELESS TICK] live Kalshi positions detected: ${positions.length}`);
   state.openTradeCount = positions.length;
   if (positions.length > 0) {
     state.status = "IN_TRADE";
