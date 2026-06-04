@@ -877,9 +877,6 @@ async function placeStatelessLiveSellOrder(
         .where(eq(tradesTable.kalshiBuyOrderId, pos.buyOrderId))
         .catch(err => warn(`DB sell update (by buyOrderId) failed: ${String(err)}`));
     }
-    // Preserve strict single-trade mode: after a successful close, stop until
-    // user manually restarts from the dashboard.
-    stopMomentumBot("Trade closed — single trade mode, stopping until manually restarted");
     return true;
   } catch (err) {
     warn(`Stateless sell order failed: ${String(err)}`, { market: pos.marketId });
