@@ -19,7 +19,7 @@
 import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
-import { eq, asc, desc } from "drizzle-orm";
+import { and, eq, asc, desc } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
@@ -781,14 +781,17 @@ async function fetchLivePositionSnapshots(): Promise<LivePositionSnapshot[]> {
   const snapshots: LivePositionSnapshot[] = [];
   for (const p of livePositions) {
     const ticker = p.ticker_name!;
+    const tracked = openTradeByTicker.get(ticker);
     let marketStatus: string | undefined;
+    let marketResult: string | undefined;
     let marketCloseTs = closeTsByTicker.get(ticker) ?? 0;
     let marketTitle = titleByTicker.get(ticker) ?? ticker;
     try {
       const marketResp = await kalshiFetch("GET", `/markets/${ticker}`) as {
-        market?: { status?: string; close_time?: string; title?: string };
+        market?: { status?: string; result?: string; close_time?: string; title?: string };
       };
       marketStatus = marketResp.market?.status;
+      marketResult = marketResp.market?.result;
       if (marketResp.market?.close_time) {
         marketCloseTs = new Date(marketResp.market.close_time).getTime();
       }
@@ -804,11 +807,38 @@ async function fetchLivePositionSnapshots(): Promise<LivePositionSnapshot[]> {
     const isLiveStatus = !statusLower || statusLower === "open" || statusLower === "active";
     const notExpired = marketCloseTs <= 0 || marketCloseTs > Date.now();
     if (!isLiveStatus || !notExpired) {
+      if (tracked) {
+        const settled = statusLower === "settled" || statusLower === "finalized";
+        const resultLower = marketResult?.toLowerCase();
+        const ourSideWon = settled && (
+          (resultLower === "yes" && tracked.side === "YES") ||
+          (resultLower === "no" && tracked.side === "NO")
+        );
+        const grossWin = 100 - tracked.buyPriceCents;
+        const pnlCents = ourSideWon
+          ? grossWin - Math.floor(FEE_RATE * Math.max(0, grossWin))
+          : -tracked.buyPriceCents;
+        const exitPriceCents = ourSideWon ? 100 : 0;
+
+        try {
+          await db.update(tradesTable)
+            .set({
+              status: ourSideWon ? "closed" : "expired",
+              sellPriceCents: exitPriceCents,
+              pnlCents,
+              feeCents: ourSideWon ? Math.floor(FEE_RATE * Math.max(0, grossWin)) : 0,
+              closedAt: new Date(),
+            })
+            .where(and(eq(tradesTable.id, tracked.id), eq(tradesTable.status, "open")));
+          recordTradeResult(tracked.buyPriceCents, exitPriceCents, pnlCents);
+        } catch (err) {
+          warn(`Failed to reconcile non-live trade ${tracked.id}: ${String(err)}`);
+        }
+      }
       console.log(`[STATELESS] ignoring non-live position ${ticker} status:${marketStatus ?? "unknown"} closeTs:${marketCloseTs}`);
       continue;
     }
 
-    const tracked = openTradeByTicker.get(ticker);
     let side: "YES" | "NO" = (tracked?.side as "YES" | "NO" | undefined) ?? "YES";
     let entryPriceCents = tracked?.buyPriceCents ?? 50;
     if (!tracked) {
