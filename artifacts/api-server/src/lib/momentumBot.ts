@@ -43,11 +43,20 @@ const MOMENTUM_WINDOW_MS    = 15_000; // rolling look-back window: detect moves 
 const MIN_FAST_MOVE_CENTS   = 2;      // need ≥2¢ directional move within the window to signal
 const MAX_ENTRY_PRICE_YES   = 87;     // hard cap: never buy YES above 87¢ (insufficient upside)
 const MIN_ENTRY_PRICE_YES   = 13;     // hard cap: never buy NO when YES < 13¢ (equiv cap for NO)
-const PRICE_HISTORY_MAX_MS  = 60_000; // keep 60s of price samples per market
+const PRICE_HISTORY_MAX_MS  = 10 * 60_000; // keep 10m of price samples per market
 const TRADE_SPREAD_MAX      = 4;      // spread required to actually execute a trade
 const TRADE_SPREAD_MAX_SIM  = 5;      // sim mode: allow up to 5¢ spread (slightly looser)
 const SPREAD_MAX_SIM        = 8;      // sim mode: scan-level spread filter (looser than 5)
 const MIN_MINUTES_REMAINING_SIM = 2;  // sim mode: enter with 2 min left (vs 3)
+
+// Stateless live late-entry strategy (outcome-style hold to expiry)
+const LATE_ENTRY_MIN_MINUTES = 4;
+const LATE_ENTRY_MAX_MINUTES = 8;
+const LATE_ENTRY_YES_MID = 62;
+const LATE_ENTRY_NO_MID = 38;
+const LATE_ENTRY_MOVE_CENTS = 8;
+const LATE_ENTRY_WINDOW_MS = 5 * 60_000;
+const LATE_ENTRY_SPREAD_MAX = 5;
 
 const SCAN_INTERVAL_MS = 10_000; // scan every 10s
 const SELL_INTERVAL_MS = 2_000;  // monitor every 2s
@@ -949,7 +958,6 @@ async function placeStatelessLiveSellOrder(
 async function runStatelessLiveExits(positions: LivePositionSnapshot[]): Promise<void> {
   const now = Date.now();
   for (const pos of positions) {
-    const holdMins = (now - pos.enteredAt) / 60_000;
     let currentBid = 0;
     let currentAsk = 0;
     try {
@@ -965,50 +973,18 @@ async function runStatelessLiveExits(positions: LivePositionSnapshot[]): Promise
       continue;
     }
     const currentMid = currentAsk > 0 ? Math.round((currentBid + currentAsk) / 2) : currentBid;
-    const lastMovedAt = recordPriceSampleAndGetLastMoveAt(pos.marketId, currentMid, now);
-    const executableGain = pos.side === "YES"
-      ? (currentBid > 0 ? currentBid : currentMid) - pos.entryPriceCents
-      : (currentAsk > 0 ? Math.max(1, 100 - currentAsk) : Math.max(1, 100 - currentMid)) - pos.entryPriceCents;
-
-    if (holdMins >= 10) {
-      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
-      continue;
-    }
+    recordPriceSampleAndGetLastMoveAt(pos.marketId, currentMid, now);
     if (pos.closeTs > 0) {
       const minsLeft = (pos.closeTs - now) / 60_000;
-      if (minsLeft < 2) {
-        await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
-        continue;
+      if (minsLeft <= 1) {
+        console.log(`[STATELESS HOLD] ${coinLabel(pos.marketId)} ${pos.side} | ${minsLeft.toFixed(2)}m to expiry — holding to settlement`);
       }
-    }
-    if (state.tpAbsoluteCents > 0) {
-      const absHit = pos.side === "YES"
-        ? currentMid >= state.tpAbsoluteCents
-        : currentMid <= (100 - state.tpAbsoluteCents);
-      if (absHit) {
-        await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
-        continue;
-      }
-    }
-    if (executableGain >= state.tpCents) {
-      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
-      continue;
-    }
-    if (executableGain <= -state.slCents) {
-      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
-      continue;
-    }
-    if (now - lastMovedAt >= state.staleMs) {
-      await placeStatelessLiveSellOrder(pos, currentBid > 0 ? currentBid : currentMid, currentMid, currentAsk > 0 ? currentAsk : currentMid + 2);
-      continue;
     }
   }
 
   const remaining = await fetchLivePositionSnapshots().catch(() => positions);
   state.openTradeCount = remaining.length;
-  if (remaining.length === 0) {
-    state.status = "WAITING_FOR_SETUP";
-  }
+  state.status = remaining.length === 0 ? "WAITING_FOR_SETUP" : "IN_TRADE";
 }
 
 async function runStatelessLiveEntryScan(): Promise<void> {
@@ -1018,49 +994,53 @@ async function runStatelessLiveEntryScan(): Promise<void> {
   type Candidate = {
     market: (typeof markets)[number];
     ob: { bid: number; ask: number; spread: number; mid: number };
-    decision: MomentumDecision;
     side: "YES" | "NO";
-    score: number;
+    moveCents: number;
   };
   const candidates: Candidate[] = [];
+  const now = Date.now();
 
   for (const market of markets) {
     const marketCoin = coinLabel(market.ticker);
     if (!state.allowedCoins.includes(marketCoin)) continue;
-    const minRequired = MIN_MINUTES_REMAINING;
-    const actualMinutesLeft = (market.closeTs - Date.now()) / 60_000;
-    if (market.closeTs <= 0 || actualMinutesLeft < minRequired) continue;
+    const actualMinutesLeft = (market.closeTs - now) / 60_000;
+    if (market.closeTs <= 0 || actualMinutesLeft < LATE_ENTRY_MIN_MINUTES || actualMinutesLeft > LATE_ENTRY_MAX_MINUTES) continue;
 
     const ob = await fetchMarketOrderBook(market.ticker, market.askCents, market.bidCents);
     if (!ob) continue;
 
     const { bid, ask, spread, mid } = ob;
     if (ask <= 0 || bid <= 0) continue;
-    const pMin = state.priceMin;
-    const pMax = state.priceMax;
-    if (mid < pMin - ENTRY_BUFFER_CENTS || mid > pMax + ENTRY_BUFFER_CENTS) continue;
-    if (spread > SPREAD_MAX) continue;
+    if (spread > LATE_ENTRY_SPREAD_MAX) continue;
 
-    const decision = evaluateMomentum(market.ticker, mid);
-    if (decision.action === "SKIP") continue;
-    if (spread > TRADE_SPREAD_MAX) continue;
+    // Track mid-price history over 5 minutes for late-entry momentum.
+    if (!marketMomentum.has(market.ticker)) {
+      marketMomentum.set(market.ticker, { priceHistory: [] });
+    }
+    const ms = marketMomentum.get(market.ticker)!;
+    ms.priceHistory.push({ price: mid, ts: now });
+    const cutoff = now - PRICE_HISTORY_MAX_MS;
+    ms.priceHistory = ms.priceHistory.filter(p => p.ts >= cutoff);
+    const windowStart = now - LATE_ENTRY_WINDOW_MS;
+    const windowSamples = ms.priceHistory.filter(p => p.ts >= windowStart);
+    if (windowSamples.length < 2) continue;
+    const baseline = windowSamples[0]!.price;
+    const netMove = mid - baseline;
 
-    if (decision.action === "BUY_YES" && (mid < pMin || mid > pMax)) continue;
-    if (decision.action === "BUY_NO" && (mid < pMin || mid > pMax)) continue;
-
-    const side = decision.action === "BUY_YES" ? "YES" : "NO";
-    const momentumScore  = Math.min(decision.centsPerSec * 25, 60);
-    const signalBonus    = decision.moveCents >= 4 ? 15 : decision.moveCents >= 3 ? 10 : 5;
-    const spreadScore    = (SPREAD_MAX - spread) * 3;
-    const timeScore      = Math.min(market.minutesRemaining, 10);
-    const score = momentumScore + signalBonus + spreadScore + timeScore;
-    candidates.push({ market, ob, decision, side, score });
+    if (mid > LATE_ENTRY_YES_MID && netMove >= LATE_ENTRY_MOVE_CENTS) {
+      candidates.push({ market, ob, side: "YES", moveCents: netMove });
+      continue;
+    }
+    if (mid < LATE_ENTRY_NO_MID && netMove <= -LATE_ENTRY_MOVE_CENTS) {
+      candidates.push({ market, ob, side: "NO", moveCents: Math.abs(netMove) });
+      continue;
+    }
   }
 
   if (candidates.length === 0) return;
-  candidates.sort((a, b) => b.score - a.score);
+  candidates.sort((a, b) => b.moveCents - a.moveCents);
   const best = candidates[0]!;
-  state.lastDecision = `${coinLabel(best.market.ticker)}: ${best.decision.action} — score:${best.score.toFixed(0)}`;
+  state.lastDecision = `${coinLabel(best.market.ticker)}: BUY_${best.side} — late-entry move:${best.moveCents.toFixed(1)}¢`;
   state.lastDecisionAt = new Date().toISOString();
 
   await refreshBalance().catch(() => {});
